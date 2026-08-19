@@ -75,3 +75,11 @@ bd.db
 # They would override fork protection in .git/info/exclude.
 # Config files (metadata.json, config.yaml) are tracked by git by default
 # since no pattern above ignores them.
+
+# Interaction audit log (local-only, per-machine)
+# Append-only log of bead field changes. The Dolt DB synced over
+# refs/dolt/data already holds this history authoritatively, so the git copy
+# is redundant - and because every machine appends to the same line range, a
+# tracked copy conflicts on every merge. Tracking it was accidental: nothing
+# above matched it, while the sibling issues.jsonl was never tracked.
+interactions.jsonl
