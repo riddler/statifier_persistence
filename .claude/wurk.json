@@ -1,0 +1,88 @@
+{
+  "wurk": 1,
+
+  "beads": {
+    "prefix": "sp",
+    "topology": "beads",
+    "areas": {
+      "labels": [
+        "area:adapter-behaviour",
+        "area:run-lifecycle",
+        "area:stepper",
+        "area:ecto",
+        "area:docs",
+        "area:build"
+      ],
+      "lands_alone": ["area:build"],
+      "always_batchable": ["upstream"]
+    }
+  },
+
+  "forge": {
+    "kind": "github",
+    "labels": {}
+  },
+
+  "gate": {
+    "full": ["mix", "quality"],
+    "loop": ["mix", "quality", "--profile", "loop"],
+    "report": ["mix", "quality", "--report", "-"],
+    "build_paths": ["lib/", "test/", "config/", "mix.exs", "mix.lock"],
+    "also_gated_paths": [],
+    "moving_files": [".quality.exs", "coveralls.json"],
+    "sabotage": {
+      "test_roots": ["test/"],
+      "test_pattern": "\\btest\\s+\"",
+      "exempt_prefixes": []
+    },
+    "project_level_skips": [],
+    "not_applicable_skips": [
+      "^:doctor not installed$",
+      "^:gettext not installed$",
+      "^:sobelow not installed$"
+    ]
+  },
+
+  "parallelism": {
+    "model": "worktree-per-issue",
+    "worktrees_dir": "../statifier_persistence-worktrees",
+    "trust": ["mise", "trust", "{path}"],
+    "warm_clone": ["deps", "_build"],
+    "warm_globs": ["_build/dev/dialyxir_erlang-*_elixir-*_deps-dev.plt*"],
+    "warm": [["mix", "deps.get"]],
+    "repair_when": "mix.lock",
+    "repair": [["mix", "deps.get"]],
+    "post_branch": []
+  },
+
+  "tmux": {
+    "session": "statifier_persistence",
+    "model": "opus"
+  },
+
+  "models": {
+    "direction": "fable"
+  },
+
+  "artifacts": {
+    "plans": "docs/plans",
+    "research": "docs/research",
+    "filename": "YYMMDD-[id-]kebab"
+  },
+
+  "commits": {
+    "style": "s-form",
+    "subject_under": 50,
+    "body_line_max": 72,
+    "total_lines_max": 40,
+    "trailer": {
+      "key": "Refs"
+    }
+  },
+
+  "changelog": {
+    "mode": "none"
+  },
+
+  "release": null
+}
