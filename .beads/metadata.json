@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "statifier_persistence",
+  "project_id": "d40d0dd6-0395-4369-bd52-89e3dfe5a19b"
+}
