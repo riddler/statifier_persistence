@@ -1,0 +1,11 @@
+# mise config for statifier_persistence: toolchain only.
+#
+#   mise install        provision the toolchain below
+#
+# Pinned to match statifier-ex, which this package is a host for. The corpus
+# and spec tasks that repo carries have no counterpart here, and neither does
+# its Java entry - nothing in lib/ or test/ needs a JRE.
+
+[tools]
+erlang = "27.3"
+elixir = "1.18.3-otp-27"
