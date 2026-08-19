@@ -1,9 +1,8 @@
 defmodule StatifierPersistenceTest do
   use ExUnit.Case
 
-  # sabotage: n/a - scaffold placeholder asserting only that the module loads;
-  # replaced by real tests with the first behaviour
-  test "the scaffold module loads" do
-    assert {:module, StatifierPersistence} = Code.ensure_loaded(StatifierPersistence)
+  # sabotage: version/0 returns a literal instead of the app spec -> red
+  test "version/0 reports the package version from the app spec" do
+    assert StatifierPersistence.version() == Mix.Project.config()[:version]
   end
 end

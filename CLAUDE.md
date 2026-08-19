@@ -97,12 +97,14 @@ Two boundaries shape what this package can promise:
 ## Build & Test
 
 ```bash
-mix test      # the suite
-mix format    # no quality gate is wired up yet
+mix quality --profile loop   # inner loop: format, compile, credo, changed tests
+mix quality                  # full gate: + dialyzer, deps audit, coverage floor
+mix test                     # just the suite
 ```
 
-There is no `mix quality` gate here yet. statifier-ex runs ExQuality; adopting
-it (or anything else) is an open decision, not an assumed one.
+Full `mix quality` must be green before any commit. The gate formats your code
+for you - do not run `mix format` as a separate step. The gate is deliberately
+smaller than statifier-ex's; `.quality.exs` records why.
 
 ## Conventions
 
