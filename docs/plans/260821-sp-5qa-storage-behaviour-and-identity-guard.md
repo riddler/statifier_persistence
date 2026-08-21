@@ -859,6 +859,13 @@ is the one the maintainer wants. None of them changes the phase structure.
    that postdates some pins. If the maintainer would rather this package
    commit to `Statifier.Chart`, that is a one-line change to ADR-0003's
    Context and a tightened `save_chart/3` signature.
+
+   **Settled (2026-08-21):** working answer stands - `chart_blob` stays
+   opaque. Confirmed against the pinned dep during the `/wurk:verify` walk:
+   ADR-0003's Context and Consequences both already decline to choose, and
+   nothing in `lib/` decodes a chart blob, so committing to
+   `Statifier.Chart` remains the one-line change described above. Revisit
+   when sp-4an.3 ships an adapter that has a reason to care.
 2. **Position key: engine session id, or a run id.** ADR-0002 decision 5
    establishes *runs* as this package's vocabulary and gives
    `statifier_runs` a nullable `session_id`. This bead predates the run
@@ -867,25 +874,62 @@ is the one the maintainer wants. None of them changes the phase structure.
    category) and this layer is forbidden surrogate keys. If sp-4an.2 decides
    a run id is the durable key and a session id is optional, this signature
    changes before any adapter ships - which is the cheap moment for it.
+
+   **Settled (2026-08-21):** working answer stands - positions are keyed by
+   engine session id. This is the item most likely to reopen: sp-4an.2 owns
+   the run lifecycle and may make a run id the durable key. Recorded here so
+   that bead inherits the question rather than rediscovering it; no adapter
+   outside this repo depends on the signature yet, so it is still cheap.
 3. **`init/1` on the behaviour.** Included so an adapter has a declared setup
    hook and the facade has one call to make when building a handle. It could
    equally be left to each adapter's own API. *Working answer*: keep it;
    an Ecto adapter checking its repo is reachable wants somewhere to fail.
+
+   **Settled (2026-08-21):** working answer stands - `init/1` is kept. Its
+   return shape was checked against a repo-module handle during the walk:
+   `opts :: keyword()` carries `[repo: MyApp.Repo]` as readily as the
+   in-memory adapter's `[pid: pid]`, so an adapter whose handle is a module
+   rather than a process needs no change to the callback.
 4. **The cheap identity pre-check in `load_position/3`.** It makes the stored
    `identity_blob` load-bearing and avoids a full position decode on a
    mismatch, at the cost of two code paths that must agree. *Working
    answer*: keep it, reusing `Identity.matches?/2` and the identical error
    arms so they cannot diverge in meaning. Dropping it would simplify the
    facade at the cost of decoding every stale position in full.
+
+   **Settled (2026-08-21):** working answer stands - the pre-check is kept.
+   Verified during the walk that it cannot disagree with the authoritative
+   check: both call `Identity.matches?/2`, both short-circuit a `nil`
+   supplied identity to `:unidentified_chart`, and both order the mismatch
+   arm blob-first, matching `deps/statifier/lib/statifier/position.ex:172-176`.
+   One narrow caveat worth knowing rather than fixing: the pre-check reads
+   the separately stored `identity_blob` while the authoritative check reads
+   the identity embedded in the position blob. `save_position/3` derives
+   both from the same machine, so they cannot diverge through this package -
+   but a hand-written row could make them disagree, and the pre-check would
+   win. Also, an `{:unsupported_format_version, v}` arm from the pre-check
+   describes the *identity* envelope (currently v1) while the same arm from
+   the authoritative check describes the *position* envelope (currently v2);
+   a caller cannot tell which from the tuple alone.
 5. **Coverage treatment of `lib/statifier_persistence/testing/`.** Phase 4
    measures before deciding whether to add it to `coveralls.json`'s
    `skip_files`. *Working answer*: measure first, skip only if the floor is
    actually threatened, and record the reason in the commit message.
+
+   **Settled (2026-08-21):** resolved by measurement in Phase 4 and closed -
+   `coveralls.json` was never touched. Coverage landed at 95.5% against the
+   90% floor with the `Testing` namespace measured normally, so the floor
+   was never threatened and no `skip_files` entry was needed.
 6. **Whether ADR-0003 should also state what reopens ADR-0002's layering
    claim.** ADR-0002's own Consequences already names it. *Working answer*:
    adopt by reference from ADR-0003's Context rather than restate, per
    ADR-0001's "adopted by reference, never restated in a way that could
    drift".
+
+   **Settled (2026-08-21):** working answer stands - adopted by reference.
+   Confirmed during the walk: ADR-0003's Context quotes ADR-0002's layering
+   claim once and points at Decision 3 for how it is kept true, rather than
+   restating the rule in terms that could drift from ADR-0002's own wording.
 
 ## References
 
@@ -916,12 +960,12 @@ before considering the plan fully landed.
 
 ### Phase 1
 
-- [ ] The record reads as a decision, not a design sketch: someone citing
+- [x] The record reads as a decision, not a design sketch: someone citing
       "ADR-0003 decision 2" ends the argument about where the guard lives.
-- [ ] Nothing in it contradicts ADR-0001 or ADR-0002, and the ADR-0002
+- [x] Nothing in it contradicts ADR-0001 or ADR-0002, and the ADR-0002
       layering claim is adopted by reference rather than restated in a way
       that could drift.
-- [ ] The cross-repo citations use the `st-ADR-NNNN` form and the bare
+- [x] The cross-repo citations use the `st-ADR-NNNN` form and the bare
       `ADR-NNNN` form is only ever this repo's own.
 
 **Implementation Note**: Use the project's loop gate between edits while
@@ -936,11 +980,11 @@ of blocking here.
 
 ### Phase 2
 
-- [ ] The `@callback` docs are sufficient for someone to write an Ecto
+- [x] The `@callback` docs are sufficient for someone to write an Ecto
       adapter without reading `in_memory.ex`.
-- [ ] No callback signature mentions a surrogate key, a table name, or a
+- [x] No callback signature mentions a surrogate key, a table name, or a
       prefix (ADR-0002's layering claim still literally true).
-- [ ] `init/1`'s return shape is workable for an adapter whose handle is a
+- [x] `init/1`'s return shape is workable for an adapter whose handle is a
       repo module rather than a pid.
 
 **Implementation Note**: Use the project's loop gate between edits while
@@ -955,12 +999,12 @@ of blocking here.
 
 ### Phase 3
 
-- [ ] The pre-check and the authoritative check genuinely cannot disagree -
+- [x] The pre-check and the authoritative check genuinely cannot disagree -
       read both against `deps/statifier/lib/statifier/position.ex:151-160`.
-- [ ] The `{:identity_mismatch, expected, actual}` argument order matches
+- [x] The `{:identity_mismatch, expected, actual}` argument order matches
       upstream's (blob first, supplied machine second), so a host's log line
       means the same thing at both layers.
-- [ ] The `load_position/3` doc's statement about `routes` / `invoke_types`
+- [x] The `load_position/3` doc's statement about `routes` / `invoke_types`
       is accurate against the pinned engine and points at sp-4an.2.
 
 **Implementation Note**: Use the project's loop gate between edits while
@@ -975,12 +1019,12 @@ of blocking here.
 
 ### Phase 4
 
-- [ ] The template can be `use`d from a package that depends on this one -
+- [x] The template can be `use`d from a package that depends on this one -
       no reference to anything under this repo's `test/`, and the doc example
       is copy-pasteable.
-- [ ] The optional per-test isolation hook is adequate for an Ecto sandbox;
+- [x] The optional per-test isolation hook is adequate for an Ecto sandbox;
       read it against how `Ecto.Adapters.SQL.Sandbox` wants to be checked out.
-- [ ] Deleting the superseded assertions lost no coverage of a real
+- [x] Deleting the superseded assertions lost no coverage of a real
       behaviour, only duplication.
 
 **Implementation Note**: Use the project's loop gate between edits while

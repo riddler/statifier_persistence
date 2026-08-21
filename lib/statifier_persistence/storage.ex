@@ -150,10 +150,23 @@ defmodule StatifierPersistence.Storage do
   reuse `Identity.matches?/2` and produce the same
   `{:identity_mismatch, expected, actual}` arm, whichever check fires.
 
-  The returned `MachineState.t()` has `routes` and `invoke_types` set to
-  `nil` by upstream design - a driver re-stamps both before the next drive
-  (ADR-0048, ADR-0051); re-stamping them is the stepper's job (sp-4an.2),
-  not this function's.
+  The returned `MachineState.t()` carries the `routes` and `invoke_types`
+  the position held **when it was saved**, restored verbatim - not `nil`.
+  `Position.to_binary/1` encodes the whole struct minus `:machine`
+  (`deps/statifier/lib/statifier/position.ex:104`) and `from_binary/2`
+  rebuilds it with `struct!/2` (`:148`), so both fields survive the round
+  trip. Only `Position.import/2` blanks them (`:511-512`), and that is the
+  cross-revision migration path this package does not use.
+
+  A caller must therefore re-stamp both before the next drive, via
+  `MachineState.put_routes/2` and `MachineState.put_invoke_types/2`: both
+  are per-drive/per-session snapshots (st-ADR-0048, st-ADR-0051), and a
+  restored one is stale rather than absent. That is the sharper hazard -
+  `nil` announces itself at the first use, while a stale route snapshot
+  answers send-reachability questions against a previous drive and looks
+  valid doing it. Re-stamping is the stepper's job (sp-4an.2), not this
+  function's; this function is documented here as the place a reader learns
+  the snapshot is stale.
   """
   @spec load_position(
           store :: t(),
