@@ -125,4 +125,21 @@ defmodule StatifierPersistence.Storage.Adapter do
   """
   @callback fetch_position(opts(), session_id()) ::
               {:ok, StatifierPersistence.Storage.Adapter.position_record()} | {:error, error()}
+
+  @doc """
+  Optional per-test isolation hook (ADR-0003 amendment, 2026-08-21).
+
+  The conformance suite's case template (`StorageConformance`, in this
+  package's `Testing` namespace) calls this before each generated test,
+  when an adapter exports it, so an adapter backed by a
+  shared resource - a database connection, a sandbox checkout - can wrap
+  every test in its own isolated unit (an `Ecto.Adapters.SQL.Sandbox`
+  checkout, for one) instead of leaking state between conformance tests.
+  Optional and defaulted to a no-op by the template's own
+  `function_exported?/3` check: an adapter needing no isolation, like
+  `StatifierPersistence.Storage.InMemory`, simply does not implement it.
+  """
+  @callback isolate(opts()) :: :ok | {:error, error()}
+
+  @optional_callbacks isolate: 1
 end

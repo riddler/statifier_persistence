@@ -1,6 +1,8 @@
 # ADR-0003: Storage adapter behaviour and the identity guard
 
-Status: accepted (2026-08-21)
+Status: accepted (2026-08-21) - amended 2026-08-21 (sp-5qa Phase 4: adds the
+optional per-test isolation callback, `isolate/1`, to the behaviour's
+contract surface, alongside the conformance suite decision 5 already names)
 
 ## Context
 
@@ -40,10 +42,14 @@ it. This is why the chart record's payload is opaque here - see Decision 1.
 
 ## Decision
 
-**1. The behaviour stores blobs, never positions.** Every
-`StatifierPersistence.Storage.Adapter` callback takes and returns binaries
-plus engine identity strings. No callback receives a `Statifier.Machine.t()`
-and none returns a `Statifier.MachineState.t()`. The chart record's
+**1. The behaviour stores blobs, never positions.** Every data-bearing
+`StatifierPersistence.Storage.Adapter` callback - `init/1`, `save_chart/2`,
+`fetch_chart/2`, `save_position/2`, `fetch_position/2` - takes and returns
+binaries plus engine identity strings. No callback receives a
+`Statifier.Machine.t()` and none returns a `Statifier.MachineState.t()`. (The
+optional `isolate/1` this ADR's 2026-08-21 amendment adds is the one
+exception, by design: it carries no chart or position data at all - see the
+amendment under Decision 5.) The chart record's
 `chart_blob` is opaque to this layer: this record does not choose between
 `Statifier.Chart.to_binary/1`'s envelope and a host's own retained source,
 because both satisfy the only property the layer needs - given the blob
@@ -85,6 +91,24 @@ downstream adapter (the Ecto adapter, sp-4an.3) can `use` it outside this
 repository's own `test/`. The same one-way rule applies: no module in
 `lib/` outside the `StatifierPersistence.Testing.*` namespace may reference
 anything inside it.
+
+*(Amended 2026-08-21, sp-5qa Phase 4: the conformance suite's `setup` calls
+an optional callback, `c:StatifierPersistence.Storage.Adapter.isolate/1`,
+right after `init/1`, when the adapter under test exports it. It exists for
+an adapter backed by a shared resource - a database connection, a sandbox
+checkout - to wrap the test that follows in its own isolated unit (an
+`Ecto.Adapters.SQL.Sandbox` checkout, for one), so the conformance suite's
+tests do not leak state into each other through that resource. It is
+declared `@optional_callbacks` on `StatifierPersistence.Storage.Adapter`
+with no default implementation in the behaviour itself; the template's own
+`function_exported?/3` check is the no-op default, so an adapter needing no
+isolation - `StatifierPersistence.Storage.InMemory` among them - simply does
+not implement it. This widens the behaviour's contract surface, which is why
+it is recorded here rather than left as an undocumented convention the
+template alone establishes; decision 5's shape - test-side surface shipped
+in `lib/` for a downstream adapter to reuse - is what makes the hook
+possible in the first place, so it belongs with that decision rather than as
+a new one.)*
 
 ## Consequences
 

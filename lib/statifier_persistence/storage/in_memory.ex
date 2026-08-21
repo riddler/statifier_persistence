@@ -3,11 +3,11 @@ defmodule StatifierPersistence.Storage.InMemory do
   The reference `StatifierPersistence.Storage.Adapter`: an Agent holding two
   maps, charts keyed by content hash and positions keyed by session id.
 
-  It ships in `lib/`, not `test/support/`, for two reasons: the conformance
-  template this package ships in `lib/` (`StatifierPersistence.Testing.*`)
-  needs a reference implementation to check against from outside this
-  repository's own `test/`, and a host prototyping the stepper wants an
-  adapter with no database to stand up.
+  It ships in `lib/`, not the test-only `support/` directory, for two
+  reasons: the conformance template this package ships in `lib/` (this
+  package's own `Testing` namespace) needs a reference implementation to
+  check against from outside this repository's own `test/`, and a host
+  prototyping the stepper wants an adapter with no database to stand up.
   """
 
   @behaviour StatifierPersistence.Storage.Adapter
