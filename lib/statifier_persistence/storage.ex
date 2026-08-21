@@ -167,6 +167,12 @@ defmodule StatifierPersistence.Storage do
   valid doing it. Re-stamping is the stepper's job (sp-4an.2), not this
   function's; this function is documented here as the place a reader learns
   the snapshot is stale.
+
+  Upstream's own `Statifier.Interpreter` moduledoc says these fields come
+  back `nil`, which is the claim this paragraph replaces; the discrepancy is
+  tracked as st-otr0, paired here as sp-3m3. If upstream starts blanking
+  them, this paragraph and the conformance test pinning it both go away
+  together.
   """
   @spec load_position(
           store :: t(),

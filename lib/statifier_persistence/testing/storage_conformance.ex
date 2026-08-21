@@ -243,8 +243,17 @@ defmodule StatifierPersistence.Testing.StorageConformance do
       # that a future upstream change could quietly falsify. `to_binary/1`
       # encodes the whole struct minus `:machine`, so both fields survive
       # the round trip **stale**, not blanked - only `Position.import/2`
-      # blanks them. If upstream ever starts blanking them here too, this
-      # test goes red and the doc gets corrected with it.
+      # blanks them.
+      #
+      # Upstream tracks the discrepancy as st-otr0 (paired here as sp-3m3):
+      # `Statifier.Interpreter`'s own moduledoc says the two fields "come
+      # back nil", which is what this test proves they do not. The lean
+      # recorded there is to blank them in `to_binary/1`, aligning both
+      # serialization pairs with the stated per-drive model. If that ships,
+      # this test goes red on the version bump - which is the point of it.
+      # Read st-otr0 before "fixing" the failure: the correct response then
+      # is to delete this test and correct `load_position/3`'s doc with it,
+      # not to make the assertion pass.
       #
       # sabotage: in StatifierPersistence.Storage.save_position/3, blank
       # routes/invoke_types on machine_state before Position.to_binary/1
