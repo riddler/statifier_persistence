@@ -593,17 +593,17 @@ drive the result gets a confusing failure well downstream of here.
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] Full quality gate passes (`mix quality`), coverage at or above 90.
-- [ ] The mismatch test asserts a returned `{:error, {:identity_mismatch, _, _}}`
+- [x] Full quality gate passes (`mix quality`), coverage at or above 90.
+- [x] The mismatch test asserts a returned `{:error, {:identity_mismatch, _, _}}`
       tuple, and the suite contains no `assert_raise` for the guard path.
-- [ ] Every new test that asserts `lib/` behavior is sabotage-verified with a
+- [x] Every new test that asserts `lib/` behavior is sabotage-verified with a
       one-line `# sabotage: ...` note above it. The guard test's mutation
       must be the load path skipping the check - deleting the
       `Position.from_binary/2` call's guard and returning the decoded state
       anyway must go red.
-- [ ] `grep -n "rescue\|raise" lib/statifier_persistence/storage.ex` returns
+- [x] `grep -n "rescue\|raise" lib/statifier_persistence/storage.ex` returns
       nothing (errors are events; no rescue-to-default at a leaf).
-- [ ] Dialyzer is clean, which is what checks the `@spec` error unions match
+- [x] Dialyzer is clean, which is what checks the `@spec` error unions match
       what the code can actually return.
 
 #### Manual Verification:
@@ -942,6 +942,26 @@ of blocking here.
       prefix (ADR-0002's layering claim still literally true).
 - [ ] `init/1`'s return shape is workable for an adapter whose handle is a
       repo module rather than a pid.
+
+**Implementation Note**: Use the project's loop gate between edits while
+iterating; run the full gate as the phase gate. In interactive execution,
+pause here for the human to confirm the manual testing before moving to the
+next phase. In looped (`--loop`) execution, this phase's Automated
+Verification gates advancement automatically (via `/wurk:commit --auto`), and
+Manual Verification items are deferred and surfaced once at the end instead
+of blocking here.
+
+---
+
+### Phase 3
+
+- [ ] The pre-check and the authoritative check genuinely cannot disagree -
+      read both against `deps/statifier/lib/statifier/position.ex:151-160`.
+- [ ] The `{:identity_mismatch, expected, actual}` argument order matches
+      upstream's (blob first, supplied machine second), so a host's log line
+      means the same thing at both layers.
+- [ ] The `load_position/3` doc's statement about `routes` / `invoke_types`
+      is accurate against the pinned engine and points at sp-4an.2.
 
 **Implementation Note**: Use the project's loop gate between edits while
 iterating; run the full gate as the phase gate. In interactive execution,
