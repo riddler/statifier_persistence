@@ -412,19 +412,19 @@ a second copy.
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] Full quality gate passes (`mix quality`), including dialyzer and the
+- [x] Full quality gate passes (`mix quality`), including dialyzer and the
       90% coverage floor.
-- [ ] Every new test that asserts `lib/` behavior has been sabotage-verified:
+- [x] Every new test that asserts `lib/` behavior has been sabotage-verified:
       break the covered code, confirm the test goes red, revert, and leave a
       one-line `# sabotage: ...` note above the test, as
       `test/statifier_persistence_test.exs` already models.
-- [ ] The blob layer decodes nothing (ADR-0003 decision 1). Decided by one
+- [x] The blob layer decodes nothing (ADR-0003 decision 1). Decided by one
       command, with no human classification of the hits:
       `grep -nE '\bStatifier\.(Position|Machine|MachineState)[A-Za-z.]*\.[a-z_]+\(' lib/statifier_persistence/storage/adapter.ex lib/statifier_persistence/storage/in_memory.ex`
       returns nothing. It matches a dotted **call** and not a prose or
       `@typedoc` mention of a module name, which is what the two files
       legitimately contain.
-- [ ] `mix.exs` `deps/0` is unchanged - no dependency is added by this phase.
+- [x] `mix.exs` `deps/0` is unchanged - no dependency is added by this phase.
 
 #### Manual Verification:
 - [ ] The `@callback` docs are sufficient for someone to write an Ecto
@@ -923,6 +923,25 @@ before considering the plan fully landed.
       that could drift.
 - [ ] The cross-repo citations use the `st-ADR-NNNN` form and the bare
       `ADR-NNNN` form is only ever this repo's own.
+
+**Implementation Note**: Use the project's loop gate between edits while
+iterating; run the full gate as the phase gate. In interactive execution,
+pause here for the human to confirm the manual testing before moving to the
+next phase. In looped (`--loop`) execution, this phase's Automated
+Verification gates advancement automatically (via `/wurk:commit --auto`), and
+Manual Verification items are deferred and surfaced once at the end instead
+of blocking here.
+
+---
+
+### Phase 2
+
+- [ ] The `@callback` docs are sufficient for someone to write an Ecto
+      adapter without reading `in_memory.ex`.
+- [ ] No callback signature mentions a surrogate key, a table name, or a
+      prefix (ADR-0002's layering claim still literally true).
+- [ ] `init/1`'s return shape is workable for an adapter whose handle is a
+      repo module rather than a pid.
 
 **Implementation Note**: Use the project's loop gate between edits while
 iterating; run the full gate as the phase gate. In interactive execution,
