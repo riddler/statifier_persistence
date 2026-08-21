@@ -4,6 +4,7 @@
 |---|---|---|
 | [0001](0001-record-architecture-decisions.md) | Record architecture decisions | accepted |
 | [0002](0002-configurable-keys-and-table-names.md) | Storage keys and table names are host-configurable at compile time (UXID default, `statifier_` prefix, runs vocabulary); engine identities are not | accepted |
+| [0003](0003-storage-adapter-behaviour-and-the-identity-guard.md) | The storage adapter stores opaque blobs keyed by engine identities; the identity guard lives above every adapter and cannot be skipped | accepted |
 
 New ADRs: next number, same three-section format (Context, Decision,
 Consequences). Pick the number against a freshly fetched remote. A bare
