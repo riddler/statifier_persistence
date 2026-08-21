@@ -9,7 +9,7 @@ defmodule StatifierPersistence.Testing.Charts do
   hand-forged identity struct, or it does not exercise what the guard
   exists to catch.
 
-  This module lives in `lib/`, not `test/support/`, because Phase 4's
+  This module lives in `lib/`, not the test-only `support/` directory, because Phase 4's
   conformance template also lives in `lib/` (under this same
   `StatifierPersistence.Testing.*` namespace) and may not reference
   anything under `test/` (ADR-0003 decision 5, st-ADR-0053's rule).

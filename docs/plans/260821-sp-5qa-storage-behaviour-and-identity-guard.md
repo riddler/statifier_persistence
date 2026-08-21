@@ -745,27 +745,27 @@ suite runs, not by a line count. Do not pre-emptively add it - measure first.
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] Full quality gate passes (`mix quality`), coverage at or above 90.
-- [ ] `test/statifier_persistence/storage/in_memory_conformance_test.exs`
+- [x] Full quality gate passes (`mix quality`), coverage at or above 90.
+- [x] `test/statifier_persistence/storage/in_memory_conformance_test.exs`
       contains no `test` block of its own - the whole suite comes from the
       template.
-- [ ] `grep -rn "StatifierPersistence.Testing" lib/ --include=*.ex | grep -v
+- [x] `grep -rn "StatifierPersistence.Testing" lib/ --include=*.ex | grep -v
       "lib/statifier_persistence/testing/"` returns nothing: no module in
       `lib/` outside the `Testing` namespace references anything inside it
       (ADR-0003 decision 5, st-ADR-0053's rule).
-- [ ] `grep -rn "test/support" lib/` returns nothing.
-- [ ] Every `@callback` and `@optional_callbacks` entry on
+- [x] `grep -rn "test/support" lib/` returns nothing.
+- [x] Every `@callback` and `@optional_callbacks` entry on
       `StatifierPersistence.Storage.Adapter` is named in
       `docs/adr/0003-storage-adapter-behaviour-and-the-identity-guard.md` -
       in particular the isolation hook added by this phase. The ADR file
       remains free of typographic dashes and curly quotes
       (`grep -nP '[\x{2010}-\x{2015}\x{2018}\x{2019}\x{201C}\x{201D}]'`
       returns nothing).
-- [ ] Every new or moved test that asserts `lib/` behavior is
+- [x] Every new or moved test that asserts `lib/` behavior is
       sabotage-verified with its one-line `# sabotage: ...` note; for a
       template-generated test the note lives above the generating `test`
       block in the template.
-- [ ] The byte-identity assertion goes red when the adapter is mutated to
+- [x] The byte-identity assertion goes red when the adapter is mutated to
       return a re-encoded blob.
 
 #### Manual Verification:
@@ -962,6 +962,26 @@ of blocking here.
       means the same thing at both layers.
 - [ ] The `load_position/3` doc's statement about `routes` / `invoke_types`
       is accurate against the pinned engine and points at sp-4an.2.
+
+**Implementation Note**: Use the project's loop gate between edits while
+iterating; run the full gate as the phase gate. In interactive execution,
+pause here for the human to confirm the manual testing before moving to the
+next phase. In looped (`--loop`) execution, this phase's Automated
+Verification gates advancement automatically (via `/wurk:commit --auto`), and
+Manual Verification items are deferred and surfaced once at the end instead
+of blocking here.
+
+---
+
+### Phase 4
+
+- [ ] The template can be `use`d from a package that depends on this one -
+      no reference to anything under this repo's `test/`, and the doc example
+      is copy-pasteable.
+- [ ] The optional per-test isolation hook is adequate for an Ecto sandbox;
+      read it against how `Ecto.Adapters.SQL.Sandbox` wants to be checked out.
+- [ ] Deleting the superseded assertions lost no coverage of a real
+      behaviour, only duplication.
 
 **Implementation Note**: Use the project's loop gate between edits while
 iterating; run the full gate as the phase gate. In interactive execution,
