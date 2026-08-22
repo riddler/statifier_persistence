@@ -7,8 +7,13 @@ defmodule StatifierPersistence.Demo.Host do
   `executor/1`'s arity-2 fun and nowhere else - reading this module top to
   bottom, nothing it does to `StatifierPersistence.Demo.Ledger` or
   `StatifierPersistence.Demo.Runtime` happens outside that one function and
-  the private helpers it calls. That is what makes this host shaped like a
-  real embedder rather than a test harness with effects inlined.
+  the private helpers it calls, with two deliberate cold-boot exceptions
+  that are host obligations rather than chart effects: `boot/4`'s
+  `{:chart_fetched, _}` observability marker, and `recover/1`'s
+  re-establishment of timers and invocations from durable state (st-ADR-0060
+  leaves both to the host precisely because no step emits them). That is
+  what makes this host shaped like a real embedder rather than a test
+  harness with effects inlined.
 
   A `%Host{}` carries no `Statifier.MachineState.t()` of its own between
   calls - the durable position lives in `store`, loaded fresh by

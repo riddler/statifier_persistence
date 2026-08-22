@@ -93,20 +93,36 @@ defmodule StatifierPersistence.Demo.RestartDemoTest do
     assert %Run{status: :completed} = Host.run(result.host)
 
     # --- no duplicate side effects across the restart ---
-    side_effect_keys = Ledger.side_effects(result.ledger)
-    assert Enum.uniq(side_effect_keys) == side_effect_keys
+    # The host's idempotency ledger, on exact contents: one row per key
+    # even though `recover/1` re-ran `handler.start/2` (the re-arm and the
+    # re-establishment hit existing keys and appended nothing), plus the
+    # one `{:chart_fetched, _}` marker the post-restart `boot/4` wrote.
+    run_id = result.host.run_id
 
+    assert [
+             {:arm_timer, {^run_id, sla_ordinal}},
+             {:record_invocation, {^run_id, "enrich"}},
+             {:chart_fetched, ^content_hash},
+             {:arm_timer, {^run_id, reminder_ordinal}}
+           ] = Ledger.side_effects(result.ledger)
+
+    refute sla_ordinal == reminder_ordinal
+
+    # The executor call log, on exact contents - identical to the
+    # straight-through run's. The restart added no executor call at all:
+    # `recover/1` re-establishes liveness host-side, through the handler,
+    # never back through the seam, so neither the `:invoke` nor the
+    # sla-timer's `:send_delayed` was re-emitted - st-ADR-0060's "resume
+    # restores position, not liveness" stated as an assertion.
     calls = result.ledger |> Ledger.calls() |> Enum.map(fn {effect, _context} -> effect end)
 
-    invoke_calls = Enum.filter(calls, &match?({:invoke, _}, &1))
-    assert [{:invoke, %Invoke{type: "myapp:enrich"}}] = invoke_calls
-
-    sla_arm_calls =
-      Enum.filter(calls, &match?({:send_delayed, %SendDelayed{send_id: "sla-timer"}}, &1))
-
-    assert [{:send_delayed, %SendDelayed{send_id: "sla-timer"}}] = sla_arm_calls
-
-    assert Enum.any?(calls, &match?({:cancel_invoke, %CancelInvoke{}}, &1))
-    assert Enum.any?(calls, &match?({:cancel, %Cancel{send_id: "reminder-timer"}}, &1))
+    assert [
+             {:datamodel_init, %DatamodelInit{}},
+             {:send_delayed, %SendDelayed{send_id: "sla-timer", event: "sla.breach"}},
+             {:invoke, %Invoke{type: "myapp:enrich", invoke_id: invoke_id}},
+             {:cancel_invoke, %CancelInvoke{invoke_id: invoke_id}},
+             {:send_delayed, %SendDelayed{send_id: "reminder-timer", event: "reminder"}},
+             {:cancel, %Cancel{send_id: "reminder-timer"}}
+           ] = calls
   end
 end
