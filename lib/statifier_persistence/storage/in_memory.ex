@@ -153,8 +153,9 @@ defmodule StatifierPersistence.Storage.InMemory do
   releases it; the raise itself propagates to the caller.
 
   Simple and honest for a reference adapter. A production adapter should
-  prefer its backend's native lock - the Ecto adapter implements this as a
-  transaction-scoped row lock (sp-4an.3).
+  prefer its backend's native lock - the Ecto adapter implements this as
+  a transaction-scoped advisory-plus-row lock (ADR-0004 decision 5 as
+  amended 2026-08-22).
   """
   @impl Adapter
   @spec lock_run(Adapter.opts(), Adapter.run_id(), (-> result)) ::

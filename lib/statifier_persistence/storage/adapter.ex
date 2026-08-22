@@ -238,9 +238,12 @@ defmodule StatifierPersistence.Storage.Adapter do
   This is the callback the default serialization strategy
   (`StatifierPersistence.Serialization.AdapterLock`) delegates to; an
   adapter that does not export it makes that strategy refuse with
-  `{:error, {:serialization, :not_supported}}`. An Ecto adapter implements
-  it as a transaction-scoped row lock - `SELECT ... FOR UPDATE` on the run
-  row inside a transaction that spans `fun` (sp-4an.3).
+  `{:error, {:serialization, :not_supported}}`. The Ecto adapter
+  implements it as a transaction-scoped advisory lock plus a
+  `SELECT ... FOR UPDATE` row lock inside a transaction that spans `fun`
+  (ADR-0004 decision 5 as amended 2026-08-22) - the advisory half exists
+  because a row lock alone excludes nothing for a `run_id` whose run has
+  not been inserted yet.
   """
   @callback lock_run(opts(), run_id(), (-> result)) ::
               {:ok, result} | {:error, error()}

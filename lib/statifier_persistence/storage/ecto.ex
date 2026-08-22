@@ -263,6 +263,47 @@ if Code.ensure_loaded?(Ecto) do
       end
     end
 
+    @doc """
+    Runs `fun` under per-run mutual exclusion for `run_id` (the optional
+    `c:StatifierPersistence.Storage.Adapter.lock_run/3`, ADR-0004
+    decision 5 as amended 2026-08-22).
+
+    Everything happens inside one transaction that spans `fun`. It takes
+    `pg_advisory_xact_lock(hashtextextended(run_id, 0))` first -
+    unconditional per-run exclusion whether or not the run row exists
+    yet - and then `SELECT ... FOR UPDATE` on the run row when it does,
+    keeping the row itself locked against every other writer for the
+    rest of the transaction. Both locks are transaction-scoped, so any
+    exit from `fun` releases them: a normal return commits, and a raise
+    rolls back and propagates to the caller with nothing leaked.
+    """
+    @impl Adapter
+    @spec lock_run(Adapter.opts(), Adapter.run_id(), (-> result)) ::
+            {:ok, result} | {:error, Adapter.error()}
+          when result: term()
+    def lock_run(opts, run_id, fun) do
+      repo = repo(opts)
+      schema = run_schema(opts)
+
+      transaction =
+        repo.transaction(fn ->
+          %{rows: [[_void]]} =
+            repo.query!("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))", [run_id])
+
+          _row_locked =
+            repo.all(
+              from(r in schema, where: r.run_id == ^run_id, select: r.id, lock: "FOR UPDATE")
+            )
+
+          fun.()
+        end)
+
+      case transaction do
+        {:ok, result} -> {:ok, result}
+        {:error, reason} -> {:error, {:adapter, reason}}
+      end
+    end
+
     @spec repo(Adapter.opts()) :: module()
     defp repo(opts), do: Keyword.fetch!(opts, :repo)
 
