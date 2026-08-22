@@ -35,13 +35,15 @@ defmodule StatifierPersistence.Demo.RestartDemoEctoTest do
     :ok
   end
 
-  # Sabotage notes: the scenario bodies and the mutations are shared with
-  # the InMemory variant - see the notes on `RestartDemoTest`'s tests
-  # (Runs.run_status/2, Runs.write_run/6, Storage.load_run_position/3).
-  # Those mutations were each run and confirmed red there; the scenario
-  # body being shared is what carries the coverage here (the plan's
-  # Testing Strategy table records this explicitly).
+  # The scenario bodies and the mutations are shared with the InMemory
+  # variant (`RestartDemoTest`); the plan's Testing Strategy table records
+  # that Phase 4 reuses those notes rather than adding new mutations. The
+  # per-test notes below name which shared mutation reds each test.
 
+  # sabotage: shared with RestartDemoTest's straight-through test -
+  # Runs.run_status/2 returning :active for a :done machine state reds the
+  # `status: :completed` assertion here identically (same scenario body).
+  # Run and confirmed red on the InMemory variant, reverted.
   test "drives the chart straight through over Postgres" do
     result = Scenario.straight_through({@adapter, @adapter_opts})
 
@@ -61,6 +63,11 @@ defmodule StatifierPersistence.Demo.RestartDemoEctoTest do
            ] = calls
   end
 
+  # sabotage: shared with RestartDemoTest's restart test - Runs.write_run/6
+  # passing position: :skip on the :update path leaves the stored blob in
+  # intake, so `config_at_kill == ["enriching"]` reds here identically
+  # (same scenario body). Run and confirmed red on the InMemory variant,
+  # reverted.
   test "resumes from a simulated restart over Postgres" do
     result = Scenario.across_restart({@adapter, @adapter_opts})
 
@@ -102,6 +109,11 @@ defmodule StatifierPersistence.Demo.RestartDemoEctoTest do
            ] = calls
   end
 
+  # sabotage: shared with RestartDemoTest's replay test - the same
+  # write_run position: :skip mutation diverges the loaded original
+  # configs from the replay's returned ones, redding the sequence
+  # comparison here identically (same scenario body and comparison). Run
+  # and confirmed red on the InMemory variant, reverted.
   test "replays the recorded tape over Postgres" do
     result = Scenario.across_restart({@adapter, @adapter_opts})
 
