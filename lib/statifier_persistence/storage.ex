@@ -150,29 +150,19 @@ defmodule StatifierPersistence.Storage do
   reuse `Identity.matches?/2` and produce the same
   `{:identity_mismatch, expected, actual}` arm, whichever check fires.
 
-  The returned `MachineState.t()` carries the `routes` and `invoke_types`
-  the position held **when it was saved**, restored verbatim - not `nil`.
-  `Position.to_binary/1` encodes the whole struct minus `:machine`
-  (`deps/statifier/lib/statifier/position.ex:104`) and `from_binary/2`
-  rebuilds it with `struct!/2` (`:148`), so both fields survive the round
-  trip. Only `Position.import/2` blanks them (`:511-512`), and that is the
-  cross-revision migration path this package does not use.
+  The returned `MachineState.t()` carries `nil` for both `routes` and
+  `invoke_types`. Neither survives the round trip: `Position.to_binary/1`
+  drops both alongside `:machine` when it encodes the payload, and
+  `from_binary/2` drops both from the decoded payload before it rebuilds
+  the struct - unconditionally, so a blob written by an older encoder
+  decodes to `nil` too (st-ADR-0064, which amends st-ADR-0052 in part).
 
-  A caller must therefore re-stamp both before the next drive, via
+  A caller must therefore stamp both before the next drive, via
   `MachineState.put_routes/2` and `MachineState.put_invoke_types/2`: both
   are per-drive/per-session snapshots (st-ADR-0048, st-ADR-0051), and a
-  restored one is stale rather than absent. That is the sharper hazard -
-  `nil` announces itself at the first use, while a stale route snapshot
-  answers send-reachability questions against a previous drive and looks
-  valid doing it. Re-stamping is the stepper's job (sp-4an.2), not this
-  function's; this function is documented here as the place a reader learns
-  the snapshot is stale.
-
-  Upstream's own `Statifier.Interpreter` moduledoc says these fields come
-  back `nil`, which is the claim this paragraph replaces; the discrepancy is
-  tracked as st-otr0, paired here as sp-3m3. If upstream starts blanking
-  them, this paragraph and the conformance test pinning it both go away
-  together.
+  persisted position is not the place they live. Stamping is the stepper's
+  job (sp-4an.2), not this function's; this function is documented here as
+  the place a reader learns the snapshot does not come back.
   """
   @spec load_position(
           store :: t(),
