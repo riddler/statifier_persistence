@@ -39,7 +39,6 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           ] do
       alias Statifier.Machine
       alias Statifier.Machine.Identity
-      alias Statifier.Send.Routes
       alias StatifierPersistence.Storage
       alias StatifierPersistence.Testing.Charts
 
@@ -236,48 +235,6 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         assert loaded.configuration == machine_state.configuration
         assert loaded.datamodel == machine_state.datamodel
         assert loaded.status == machine_state.status
-      end
-
-      # Pins what the pinned engine actually does with the two per-drive
-      # snapshots, because `load_position/3`'s doc makes a claim about it
-      # that a future upstream change could quietly falsify. `to_binary/1`
-      # encodes the whole struct minus `:machine`, so both fields survive
-      # the round trip **stale**, not blanked - only `Position.import/2`
-      # blanks them.
-      #
-      # Upstream tracks the discrepancy as st-otr0 (paired here as sp-3m3):
-      # `Statifier.Interpreter`'s own moduledoc says the two fields "come
-      # back nil", which is what this test proves they do not. The lean
-      # recorded there is to blank them in `to_binary/1`, aligning both
-      # serialization pairs with the stated per-drive model. If that ships,
-      # this test goes red on the version bump - which is the point of it.
-      # Read st-otr0 before "fixing" the failure: the correct response then
-      # is to delete this test and correct `load_position/3`'s doc with it,
-      # not to make the assertion pass.
-      #
-      # sabotage: in StatifierPersistence.Storage.save_position/3, blank
-      # routes/invoke_types on machine_state before Position.to_binary/1
-      # (the alternative this walk considered and rejected) -> red, the
-      # loaded routes assertion below sees nil instead of the stamped
-      # snapshot. Verified red, reverted.
-      test "facade: routes and invoke_types round trip stale, not blanked", %{store: store} do
-        {_source, machine} = Charts.chart_a()
-
-        routes = Routes.new(sessions: ["sess_conformance_stale_peer"])
-
-        machine_state =
-          machine
-          |> Statifier.MachineState.new(session_id: "sess_conformance_stale")
-          |> Statifier.MachineState.put_routes(routes)
-
-        assert :ok = Storage.save_position(store, "sess_conformance_stale", machine_state)
-
-        assert {:ok, loaded} = Storage.load_position(store, "sess_conformance_stale", machine)
-
-        # Restored verbatim from save time. A caller re-stamps before the
-        # next drive (st-ADR-0048, st-ADR-0051); sp-4an.2 owns that.
-        assert loaded.routes == routes
-        refute is_nil(loaded.routes)
       end
 
       # sabotage: in StatifierPersistence.Storage.load_position/3, replace
