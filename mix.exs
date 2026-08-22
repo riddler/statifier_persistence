@@ -37,13 +37,16 @@ defmodule StatifierPersistence.MixProject do
   defp deps do
     [
       statifier_dep(),
+      {:uxid, "~> 2.0"},
+      {:ecto_sql, "~> 3.10", optional: true},
 
       # Dev / test
       {:ex_quality, "~> 0.13", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:excoveralls, "~> 0.18", only: :test},
-      {:ex_doc, "~> 0.34", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.34", only: :dev, runtime: false},
+      {:postgrex, "~> 0.19", only: :test}
     ]
   end
 
@@ -52,10 +55,9 @@ defmodule StatifierPersistence.MixProject do
   # publish a package that carries a git dependency, so this package cannot
   # ship until statifier is published. That is upstream's call, not ours.
   #
-  # Ecto is deliberately absent: the storage-adapter behaviour, run lifecycle,
-  # and stepper loop need none of it. The Ecto adapter epic decides its own
-  # dependency shape (ecto_sql optional vs a separate statifier_ecto package)
-  # when that work starts.
+  # The Ecto layer's dependency shape (ecto_sql optional here vs a separate
+  # statifier_ecto package, uxid required, postgrex test-only) is decided in
+  # ADR-0005 - see docs/adr/0005-ecto-in-package-and-postgres-test-harness.md.
   #
   # Export STATIFIER_PATH to point at a local checkout while co-developing a
   # change that spans both repos. It is an env var rather than a mix.exs edit
