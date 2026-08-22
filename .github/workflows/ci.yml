@@ -20,6 +20,30 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    # ADR-0005: database-backed tests are ordinary tests in the ordinary
+    # suite, against a real Postgres server - no tag skips them here either.
+    # Credentials match docker-compose.yml's local `db` service so the PG*
+    # env below is an override mechanism, not a setup step.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: statifier_persistence_test
+
     steps:
       - uses: actions/checkout@v4
 

@@ -14,6 +14,20 @@ crash semantics. This package is that loop, packaged.
 
 Nothing is implemented yet. This repository holds the scaffold only.
 
+## Running the tests
+
+The suite includes database-backed tests against a real Postgres server -
+ADR-0005 rejects a skip tag for when one is absent, so `mix quality` and
+`mix test` both need one reachable. Start it once with:
+
+    docker compose up -d db
+
+which brings up `postgres:17` on `localhost:5432` with user/password
+`postgres`. Override host, port, user, password, or database name with the
+`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, and `PGDATABASE` env vars (see
+`config/test.exs` for the defaults) if a server is already running
+elsewhere.
+
 ## The contract this package builds on
 
 The persisted-position story is already specified upstream, and this package

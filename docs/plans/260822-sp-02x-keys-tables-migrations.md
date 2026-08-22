@@ -204,10 +204,10 @@ healthcheck); export the matching `PG*` env at the job level.
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] Full quality gate passes locally (`mix quality`), including the new
+- [x] Full quality gate passes locally (`mix quality`), including the new
       smoke test against the compose Postgres
-- [ ] `mix gate.verify` passes
-- [ ] `mix deps.get` resolves uxid/ecto_sql/postgrex without conflicts
+- [x] `mix gate.verify` passes
+- [x] `mix deps.get` resolves uxid/ecto_sql/postgrex without conflicts
 
 #### Manual Verification:
 - [ ] CI run on the pushed branch is green with the service container
@@ -461,3 +461,22 @@ defaults work with zero options beyond `repo:`.
 - Precedent plan:
   `docs/plans/260822-sp-4an.2.1-run-lifecycle-executor-seam-stepper.md`
 - Open question this resolves: `mix.exs:52-59` (dependency shape)
+
+## Deferred Manual Verification
+
+Manual verification items are deferred during looped (--loop) execution and
+surfaced here once, rather than blocking after each phase. Confirm these
+before considering the plan fully landed.
+
+### Phase 1
+
+- [ ] CI run on the pushed branch is green with the service container
+- [ ] ADR-0005 reads as a decision record, not a plan restatement
+
+**Implementation Note**: Use the project's loop gate between edits while
+iterating; run the full gate as the phase gate. In looped (`--loop`)
+execution, Automated Verification gates advancement automatically (via
+`/wurk:commit --auto`), and Manual Verification items are deferred and
+surfaced once at the end.
+
+---

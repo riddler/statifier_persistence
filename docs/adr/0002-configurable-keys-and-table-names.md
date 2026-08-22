@@ -1,6 +1,8 @@
 # ADR-0002: Storage keys and table names are host-configurable; engine identities are not
 
-Status: accepted (2026-08-20)
+Status: accepted (2026-08-20) - amended 2026-08-22 (sp-02x Phase 1: collapses
+decision 4's table sketch to `charts`/`positions`/`runs` and records that
+decision 3's tenancy columns remain unimplemented option surface)
 
 ## Context
 
@@ -76,6 +78,13 @@ options, so DDL and schemas cannot disagree; it is the only supported way
 to create or upgrade the tables. Tenancy columns (host-supplied, per the
 charter) ride the same `use` so host configuration has one home.
 
+*(Amended 2026-08-22, sp-02x Phase 1: tenancy columns remain unimplemented
+option surface. No host has specified any yet, and inventing placeholder
+columns ahead of a real one would be the unexercised contract ADR-0003's
+Consequences warn against. This decision's promise stands - tenancy
+columns ride the same `use` when a host needs them - but nothing ships
+until then.)*
+
 **4. Table names default to the full `statifier_` prefix:**
 `statifier_charts`, `statifier_chart_versions`, `statifier_runs`.
 Discoverability wins over brevity - someone meeting `statifier_runs` in a
@@ -84,6 +93,19 @@ prefix knob keeps the set consistent; the per-table override map is the
 escape hatch for hosts with naming standards the prefix cannot satisfy;
 the Postgres-schema option covers hosts that isolate by schema instead of
 by name.
+
+*(Amended 2026-08-22, sp-02x Phase 1: this sketch's table set collapses to
+`charts`, `positions`, and `runs`. The storage-adapter behaviour (ADR-0003
+decision 3) keys a chart by content hash only and a position by the engine
+session id; nothing in that contract exercises a logical-chart /
+chart-versions split, so the `statifier_chart_versions` table above never
+gets a callback that would use it - the same unexercised-contract
+reasoning ADR-0003's Consequences apply to `delete_position`. V01
+therefore ships the hash-keyed `statifier_charts` table and joins
+`statifier_positions` to the set under the same prefix knob, and the
+default UXID row prefixes become `chart_`, `pos_`, and `run_` accordingly.
+A logical-chart table returns, under whatever name fits then, when a real
+embedder needs one - the charter's own design rule.)*
 
 **5. The vocabulary is *runs*, not sessions.** The charter's lifecycle
 (`create/step/complete/fail`) operates on runs; "session" keeps the
