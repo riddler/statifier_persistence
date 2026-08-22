@@ -13,3 +13,9 @@
 - Run-record conformance tests in
   `StatifierPersistence.Testing.StorageConformance`, so downstream adapters
   inherit the same contract checks.
+- The run lifecycle as a library: `StatifierPersistence.Runs.create/4` and
+  `step/5` drive the load -> re-stamp -> step -> execute -> persist loop
+  over durable run records, handing effects to a host-supplied
+  `StatifierPersistence.Executor` (behaviour or arity-2 fun) and returning
+  the host-facing `StatifierPersistence.Run` struct; events to a terminal
+  run come back as `{:discarded, run}`.
