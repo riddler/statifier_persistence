@@ -15,6 +15,6 @@
   "nimble_parsec": {:hex, :nimble_parsec, "1.4.2", "8efba0122db06df95bfaa78f791344a89352ba04baedd3849593bfce4d0dc1c6", [:mix], [], "hexpm", "4b21398942dda052b403bbe1da991ccd03a053668d147d53fb8c4e0efe09c973"},
   "predicator": {:hex, :predicator, "9.0.0", "c15685ce74e249195df9bbaedf7593c50339ac75b8700a3b13f56cfbcc837ff7", [:mix], [], "hexpm", "8e31739e3d448f9f5d91eb716498a0dfe26f3b27c8bcf96bc6b2ce93c0087e95"},
   "saxy": {:hex, :saxy, "1.6.1", "742eff28f553c066d0b54e84662dbf384a1d1f38595472ed15f6e0a33038bbe1", [:mix], [], "hexpm", "8989d504424ba29460a61950f8968380651413fa05e63b6118084db057da1a6b"},
-  "statifier": {:git, "https://github.com/riddler/statifier-ex.git", "9a52b172148e4eb72ac09dbb71ac67d7800968d1", [ref: "9a52b172148e4eb72ac09dbb71ac67d7800968d1"]},
+  "statifier": {:git, "https://github.com/riddler/statifier-ex.git", "68b814aad5ae0875881a4af05eefbaa81846a7ea", [branch: "main"]},
   "telemetry": {:hex, :telemetry, "1.4.2", "a0cb522801dffb1c49fe6e30561badffc7b6d0e180db1300df759faa22062855", [:rebar3], [], "hexpm", "928f6495066506077862c0d1646609eed891a4326bee3126ba54b60af61febb1"},
 }
