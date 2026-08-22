@@ -149,6 +149,39 @@ Full `mix quality` must be green before any commit. The gate formats your code
 for you - do not run `mix format` as a separate step. The gate is deliberately
 smaller than statifier-ex's; `.quality.exs` records why.
 
+<!-- usage-rules-start -->
+## ExQuality (`mix quality`)
+
+Full reference: `deps/ex_quality/usage-rules.md`. Read it when a stage fails in a
+way its own output does not explain, or when you need the JSON report shape.
+
+The rules that do not wait to be looked up:
+
+- **Never truncate the output.** No `| tail`, `| head`, `| grep`. A passing stage
+  costs one line and detail prints only for failures, so truncating removes
+  findings, not noise.
+- **Read the `○` lines.** A skipped stage is not a passing one, and the reason
+  says whether the gap is in this run or in what the project checks at all.
+- **A scoped or `--quick` green is not a full green.** Neither measures coverage.
+  Run a bare `mix quality` before reporting work complete.
+- **Never go green by weakening the check.** Not by lowering a coverage or
+  security threshold, not by `--skip` flags or `enabled: false`, not by
+  `@tag :skip` on a failing test, not by narrowing scope. If a finding is
+  genuinely wrong for this project, say so and let the user decide.
+<!-- usage-rules-end -->
+
+### This repo's own gate rules
+
+- The full gate is `mix quality`; the inner loop is
+  `mix quality --profile loop`. Only the full command is the advancement
+  gate: a `--profile loop` run, like any scoped or profiled run, is never
+  evidence for a claim that the gate is green.
+- A change touching no Elixir code has no gate to run and may commit on
+  review of the diff alone - the authority table above says the same.
+- This gate is deliberately smaller than statifier-ex's, and `.quality.exs`
+  records that decision. Documentation may point at the gate; it never
+  enlarges it.
+
 ## Conventions
 
 Inherited from statifier-ex unless this project records otherwise:
