@@ -12,6 +12,11 @@ end
 
 {:ok, _pid} = StatifierPersistence.TestRepo.start_link()
 
+# The Ecto adapter tests (conformance and unit) run against the Default
+# and Overridden fixture hosts' tables; create them once for the whole
+# suite, idempotently. Only DDL persists - the sandbox rolls rows back.
+:ok = StatifierPersistence.BootstrapMigrations.up(StatifierPersistence.TestRepo)
+
 # The sandbox stays :manual for everything except the live migration tests
 # (migrations_test.exs, async: false), which manage their own DDL and
 # inserts: they switch the repo to :auto for the duration of their
