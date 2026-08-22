@@ -340,9 +340,9 @@ from the macro's real behavior). Sabotage per convention.
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] Full quality gate passes (`mix quality`)
-- [ ] `mix gate.verify` passes
-- [ ] The moduledoc's zero-config example compiles verbatim in a test
+- [x] Full quality gate passes (`mix quality`)
+- [x] `mix gate.verify` passes
+- [x] The moduledoc's zero-config example compiles verbatim in a test
 
 #### Manual Verification:
 - [ ] Schema module names and option spellings read as a host author would
@@ -486,5 +486,16 @@ surfaced once at the end.
 - [ ] Generated UXID/UUIDv7 examples eyeballed once for sanity
 
 **Implementation Note**: same loop/full-gate discipline as Phase 1.
+
+---
+
+### Phase 3
+
+- [ ] Schema module names and option spellings read as a host author would
+      expect (naming judgment, not machine-checkable)
+
+**Implementation Note**: same loop/full-gate discipline. Schemas are
+exercised against live DDL in Phase 4; in this phase their metadata is the
+test surface.
 
 ---
