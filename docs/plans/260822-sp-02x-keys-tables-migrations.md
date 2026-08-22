@@ -278,8 +278,8 @@ database assignment. Sabotage each per repo convention.
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] Full quality gate passes (`mix quality`)
-- [ ] `mix gate.verify` passes
+- [x] Full quality gate passes (`mix quality`)
+- [x] `mix gate.verify` passes
 
 #### Manual Verification:
 - [ ] Generated UXID/UUIDv7 examples eyeballed once for sanity
@@ -478,5 +478,13 @@ iterating; run the full gate as the phase gate. In looped (`--loop`)
 execution, Automated Verification gates advancement automatically (via
 `/wurk:commit --auto`), and Manual Verification items are deferred and
 surfaced once at the end.
+
+---
+
+### Phase 2
+
+- [ ] Generated UXID/UUIDv7 examples eyeballed once for sanity
+
+**Implementation Note**: same loop/full-gate discipline as Phase 1.
 
 ---
