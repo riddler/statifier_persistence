@@ -43,6 +43,9 @@ defmodule StatifierPersistence.Test.FlakyAdapter do
   def fetch_run(%{inner: inner}, run_id), do: InMemory.fetch_run(inner, run_id)
 
   @impl true
+  def lock_run(%{inner: inner}, run_id, fun), do: InMemory.lock_run(inner, run_id, fun)
+
+  @impl true
   def update_run(%{inner: inner, trip: trip}, run_record) do
     if Agent.get_and_update(trip, fn tripped -> {tripped, true} end) do
       InMemory.update_run(inner, run_record)

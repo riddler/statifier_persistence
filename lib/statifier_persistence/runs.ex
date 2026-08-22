@@ -31,9 +31,14 @@ defmodule StatifierPersistence.Runs do
   their failures are not re-entered again, so a deterministically failing
   executor cannot loop this library.
 
-  One Phase 4 boundary, lifted by the plan's next phase: this module
-  documents no concurrency guarantee yet (per-run serialization arrives as
-  a pluggable strategy, ADR-0004 decision 5).
+  Concurrent deliveries to one run are ordered by a pluggable per-run
+  serialization strategy (ADR-0004 decision 5): every entry point runs its
+  fetch-to-persist tail inside the strategy's
+  `c:StatifierPersistence.Serialization.with_run/3`, selected per call with
+  `serialization: {module, config}` and defaulting to
+  `{StatifierPersistence.Serialization.AdapterLock, store}` - the adapter's
+  own optional `lock_run/3`. A strategy refusal surfaces unchanged as
+  `{:error, {:serialization, reason}}`.
   """
 
   alias Statifier.{Event, Interpreter, Machine, MachineState}
@@ -50,6 +55,7 @@ defmodule StatifierPersistence.Runs do
 
   alias Statifier.Machine.Identity
   alias StatifierPersistence.{Executor, Run, Storage}
+  alias StatifierPersistence.Serialization.AdapterLock
   alias StatifierPersistence.Storage.Adapter
 
   @typedoc "A run's caller-supplied opaque key (ADR-0004 decision 2)."
@@ -58,9 +64,15 @@ defmodule StatifierPersistence.Runs do
   @typedoc """
   This module's error vocabulary: the facade's arms, unflattened, plus the
   `{:budget_exhausted, payload}` arm returned after a budget-exhausted step
-  or create has persisted its `:failed` run record.
+  or create has persisted its `:failed` run record, plus the serialization
+  strategy's own refusal, surfaced unchanged
+  (`{:serialization, :not_supported}` from the default strategy over an
+  adapter with no `lock_run/3`).
   """
-  @type error :: Storage.error() | {:budget_exhausted, BudgetExhausted.t()}
+  @type error ::
+          Storage.error()
+          | {:budget_exhausted, BudgetExhausted.t()}
+          | {:serialization, term()}
 
   @typedoc """
   Options `create/4` and `step/5` accept:
@@ -75,12 +87,17 @@ defmodule StatifierPersistence.Runs do
     the same way (st-ADR-0051). Defaults to `nil`, "the built-in set only".
   - `initialize:` (`create/4` only) - passed to
     `Statifier.Interpreter.initialize/2` unchanged.
+  - `serialization:` - the `{module, config}` per-run serialization
+    strategy the fetch-to-persist tail runs inside (ADR-0004 decision 5;
+    `fail/4` accepts it too). Defaults to
+    `{StatifierPersistence.Serialization.AdapterLock, store}`.
   """
   @type opt ::
           {:executor, Executor.t()}
           | {:routes, MachineState.routes()}
           | {:invoke_types, MachineState.invoke_types()}
           | {:initialize, keyword()}
+          | {:serialization, {module(), term()}}
 
   @doc """
   Creates a run: `Statifier.Interpreter.initialize/2` (which cannot fail),
@@ -106,7 +123,9 @@ defmodule StatifierPersistence.Runs do
     {machine_state, effects} =
       Interpreter.initialize(machine, Keyword.get(opts, :initialize, []))
 
-    persist_tail(store, run_id, machine_state, effects, executor, :insert)
+    serialized(store, run_id, opts, fn ->
+      persist_tail(store, run_id, machine_state, effects, executor, :insert)
+    end)
   end
 
   @doc """
@@ -129,6 +148,14 @@ defmodule StatifierPersistence.Runs do
   def step(%Storage{} = store, run_id, %Machine{} = machine, %Event{} = event, opts) do
     executor = Keyword.fetch!(opts, :executor)
 
+    serialized(store, run_id, opts, fn ->
+      step_tail(store, run_id, machine, event, opts, executor)
+    end)
+  end
+
+  @spec step_tail(Storage.t(), run_id(), Machine.t(), Event.t(), [opt()], Executor.t()) ::
+          {:ok, Run.t(), MachineState.t()} | {:discarded, Run.t()} | {:error, error()}
+  defp step_tail(store, run_id, machine, event, opts, executor) do
     case Storage.fetch_run(store, run_id) do
       {:ok, %{status: status} = run_record} when status in [:completed, :failed] ->
         {:discarded, Run.from_record(run_record)}
@@ -153,13 +180,20 @@ defmodule StatifierPersistence.Runs do
   `reason` is the short string stored as the run's `failure` - keep it a
   prefixed, console-readable reason, not an inspect dump.
 
-  `opts` is accepted for forward compatibility (the plan's next phase adds
-  a `serialization:` option shared by every lifecycle entry point) and is
-  currently unused.
+  `opts` accepts `serialization:` only - the same `{module, config}`
+  strategy `create/4` and `step/5` take, with the same default.
   """
   @spec fail(store :: Storage.t(), run_id :: run_id(), reason :: String.t(), opts :: keyword()) ::
           {:ok, Run.t()} | {:discarded, Run.t()} | {:error, error()}
-  def fail(%Storage{} = store, run_id, reason, _opts \\ []) when is_binary(reason) do
+  def fail(%Storage{} = store, run_id, reason, opts \\ []) when is_binary(reason) do
+    serialized(store, run_id, opts, fn ->
+      fail_tail(store, run_id, reason)
+    end)
+  end
+
+  @spec fail_tail(Storage.t(), run_id(), String.t()) ::
+          {:ok, Run.t()} | {:discarded, Run.t()} | {:error, error()}
+  defp fail_tail(store, run_id, reason) do
     case Storage.fetch_run(store, run_id) do
       {:ok, %{status: status} = run_record} when status in [:completed, :failed] ->
         {:discarded, Run.from_record(run_record)}
@@ -171,6 +205,25 @@ defmodule StatifierPersistence.Runs do
 
       {:error, _reason} = error ->
         error
+    end
+  end
+
+  # Runs `fun` - one entry point's whole fetch-to-persist tail - inside the
+  # selected serialization strategy's `with_run/3` (ADR-0004 decision 5),
+  # unwrapping the strategy's `{:ok, result}` envelope back to the tail's
+  # own result. A strategy refusal (`{:error, {:serialization, _}}` from
+  # the default over an adapter with no `lock_run/3`) surfaces unchanged.
+  # Nothing inside any tail calls back into this function, so `with_run/3`
+  # never nests on one run id.
+  @spec serialized(Storage.t(), run_id(), keyword(), (-> result)) ::
+          result | {:error, error()}
+        when result: term()
+  defp serialized(store, run_id, opts, fun) do
+    {strategy, config} = Keyword.get(opts, :serialization, {AdapterLock, store})
+
+    case strategy.with_run(config, run_id, fun) do
+      {:ok, result} -> result
+      {:error, _reason} = error -> error
     end
   end
 

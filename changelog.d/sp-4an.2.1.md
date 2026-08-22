@@ -30,3 +30,13 @@
   active run `:failed` with a reason, leaves the stored position untouched,
   and discards on a terminal run - backed by the new status-only writer
   `StatifierPersistence.Storage.update_run_status/4`.
+- Pluggable per-run serialization: the `StatifierPersistence.Serialization`
+  behaviour (`with_run/3`), selected per lifecycle call with
+  `serialization: {module, config}` on `Runs.create/4`, `step/5`, and
+  `fail/4`. The default strategy,
+  `StatifierPersistence.Serialization.AdapterLock`, delegates to the new
+  optional adapter callback
+  `StatifierPersistence.Storage.Adapter.lock_run/3` (implemented by
+  `InMemory`, conformance-tested when exported) and refuses with
+  `{:error, {:serialization, :not_supported}}` when the adapter does not
+  export it.

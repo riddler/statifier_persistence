@@ -2,7 +2,10 @@
 
 Status: accepted (2026-08-21) - amended 2026-08-21 (sp-5qa Phase 4: adds the
 optional per-test isolation callback, `isolate/1`, to the behaviour's
-contract surface, alongside the conformance suite decision 5 already names)
+contract surface, alongside the conformance suite decision 5 already names);
+amended 2026-08-22 (sp-4an.2.1 Phase 5: adds the optional per-run lock
+callback, `lock_run/3`, to the behaviour's contract surface, as the seam
+ADR-0004 decision 5's default serialization strategy delegates to)
 
 ## Context
 
@@ -47,9 +50,10 @@ it. This is why the chart record's payload is opaque here - see Decision 1.
 `fetch_chart/2`, `save_position/2`, `fetch_position/2` - takes and returns
 binaries plus engine identity strings. No callback receives a
 `Statifier.Machine.t()` and none returns a `Statifier.MachineState.t()`. (The
-optional `isolate/1` this ADR's 2026-08-21 amendment adds is the one
-exception, by design: it carries no chart or position data at all - see the
-amendment under Decision 5.) The chart record's
+optional `isolate/1` and `lock_run/3` this ADR's 2026-08-21 and 2026-08-22
+amendments add are the exceptions, by design: neither carries chart or
+position data at all - see the amendments under Decision 5.) The chart
+record's
 `chart_blob` is opaque to this layer: this record does not choose between
 `Statifier.Chart.to_binary/1`'s envelope and a host's own retained source,
 because both satisfy the only property the layer needs - given the blob
@@ -109,6 +113,23 @@ template alone establishes; decision 5's shape - test-side surface shipped
 in `lib/` for a downstream adapter to reuse - is what makes the hook
 possible in the first place, so it belongs with that decision rather than as
 a new one.)*
+
+*(Amended 2026-08-22, sp-4an.2.1 Phase 5: the behaviour gains a second
+optional callback, `c:StatifierPersistence.Storage.Adapter.lock_run/3` -
+mutual exclusion per `run_id`, running the given fun while the exclusion is
+held and releasing it on any exit, a raise escaping the fun included, so
+the lock cannot leak. It is the seam ADR-0004 decision 5's default
+serialization strategy (`StatifierPersistence.Serialization.AdapterLock`)
+delegates to, and the strategy refuses with
+`{:error, {:serialization, :not_supported}}` when an adapter does not
+export it; an Ecto adapter implements it as a transaction-scoped row lock
+(sp-4an.3). Like `isolate/1` it is declared `@optional_callbacks` with no
+default implementation, carries no chart or position data, and decodes
+nothing, so decision 1's blobs-only rule holds; the conformance suite
+exercises it only when the adapter under test exports it, the same
+`function_exported?/3` shape the isolate amendment records - which is why
+this widening, like that one, is recorded here with decision 5 rather than
+as a new decision.)*
 
 ## Consequences
 
