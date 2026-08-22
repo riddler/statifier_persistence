@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Full quality gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Single source of truth for the toolchain: a version duplicated into
+      # this file drifts the first time mise.toml moves. mise itself is not
+      # used to provision CI - it would build Erlang from source.
+      - name: Read the toolchain out of mise.toml
+        id: toolchain
+        run: |
+          set -euo pipefail
+          erlang="$(sed -n 's/^erlang *= *"\(.*\)".*$/\1/p' mise.toml | head -1)"
+          elixir="$(sed -n 's/^elixir *= *"\(.*\)".*$/\1/p' mise.toml | head -1)"
+          test -n "$erlang" || { echo "no erlang version in mise.toml" >&2; exit 1; }
+          test -n "$elixir" || { echo "no elixir version in mise.toml" >&2; exit 1; }
+          echo "erlang=$erlang" >> "$GITHUB_OUTPUT"
+          echo "elixir=$elixir" >> "$GITHUB_OUTPUT"
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ steps.toolchain.outputs.erlang }}
+          elixir-version: ${{ steps.toolchain.outputs.elixir }}
+
+      # _build carries the Dialyzer PLT
+      # (_build/dev/dialyxir_erlang-*_elixir-*_deps-dev.plt), so this cache is
+      # the PLT cache too. statifier is a git dependency whose SHA mix.lock
+      # pins (st-ADR-0061), so the hash key moves whenever the engine pin
+      # moves - CI never sets STATIFIER_PATH, so the pin in mix.lock is
+      # exactly what gets built. The restore-keys fallback means a lockfile
+      # bump rebuilds the PLT incrementally from the previous one rather than
+      # from scratch.
+      #
+      # Known tradeoff, the same one statifier-ex and statifier-ui accept: a
+      # warm _build means the compile stage is incremental, so
+      # warnings_as_errors only sees files this push actually recompiles.
+      # Deleting the cache is how to get a from-scratch compile when one is
+      # wanted.
+      - name: Cache deps and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: mix-${{ runner.os }}-otp${{ steps.toolchain.outputs.erlang }}-ex${{ steps.toolchain.outputs.elixir }}-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            mix-${{ runner.os }}-otp${{ steps.toolchain.outputs.erlang }}-ex${{ steps.toolchain.outputs.elixir }}-
+
+      - name: Fetch dependencies
+        run: mix deps.get
+
+      # The gate is the whole job. It formats, compiles with warnings as
+      # errors, runs credo --strict, dialyzer, the deps audit, and the full
+      # suite with coverage, printing detail under any failing stage - so a
+      # red run is diagnosable from this log alone. Three stages report as
+      # skipped and always will: doctor, gettext, and sobelow, none installed
+      # here.
+      #
+      # Same reasoning as the toolchain step, applied to the gate itself: the
+      # command is read out of .claude/wurk.json rather than written here, so
+      # the gate CI runs and the gate an agent must have green before
+      # committing are one definition with one place to change it. A gate.full
+      # that grows a flag is picked up on the next run, with nothing to
+      # remember. It is read and executed inside the step rather than
+      # interpolated into `run:`, so a repository file never reaches the shell
+      # as expression text.
+      - name: Full quality gate
+        run: |
+          set -euo pipefail
+          mapfile -t cmd < <(jq -er '.gate.full[]' .claude/wurk.json)
+          test "${#cmd[@]}" -gt 0 || { echo "gate.full is empty" >&2; exit 1; }
+          echo "gate command (.claude/wurk.json gate.full): ${cmd[*]}"
+          "${cmd[@]}"
