@@ -332,6 +332,113 @@ defmodule StatifierPersistence.Demo.Host do
     end
   end
 
+  @doc """
+  Re-establishes liveness after a cold `boot/4`, per st-ADR-0060 decision
+  7's "resume restores position, not liveness". Performs no step and emits
+  no event - it only repopulates `runtime`/`ledger` state the position
+  never carried:
+
+  1. **Timers.** Every `Ledger.open_timers/2` row for this run is
+     `Runtime.arm/3`ed again, unconditionally - the engine is not
+     consulted, because nothing about a pending delayed send survives the
+     position (the plan's Key Discoveries).
+  2. **Invocations.** For each `{_key, invoke_id}` the durable position's
+     `active_invocations` still names *and* the ledger still shows `:open`,
+     `handler.start/2` is re-run and its instructions performed - the
+     engine is the liveness authority (which ids are still active), the
+     ledger is the payload source (the `type`/`params` that id started
+     with); an id either side has dropped is left alone. Re-running
+     `Ledger.record_invocation/3` here is idempotent on `invoke_id`, so
+     re-establishing a still-open invocation records no second
+     side-effect entry.
+  3. Returns the rebuilt `%Host{}`. `invoke_handlers:`/`invoke_types:` must
+     already be set on `host` (a caller re-supplies them after `boot/4`,
+     same as any other per-deployment declaration).
+  """
+  @spec recover(t()) :: t()
+  def recover(%__MODULE__{} = host) do
+    host.ledger
+    |> Ledger.open_timers(host.run_id)
+    |> Enum.each(fn row -> Runtime.arm(host.runtime, row.ordinal, row.due_at_ms) end)
+
+    {:ok, machine_state} = position(host)
+
+    open_invoke_ids =
+      host.ledger |> Ledger.open_invocations(host.run_id) |> MapSet.new(& &1.invoke_id)
+
+    machine_state.active_invocations
+    |> Map.values()
+    |> Enum.filter(&MapSet.member?(open_invoke_ids, &1))
+    |> Enum.each(&reestablish_invocation(host, &1))
+
+    host
+  end
+
+  @spec reestablish_invocation(t(), String.t()) :: :ok
+  defp reestablish_invocation(host, invoke_id) do
+    type = invocation_type(host, invoke_id)
+    params = invocation_params(host, invoke_id)
+
+    case Map.fetch(host.invoke_handlers, type) do
+      {:ok, handler} ->
+        # state_index/invoke_index/macrostep/microstep/round are the
+        # interpreter's own bookkeeping for a freshly-planned `<invoke>` -
+        # meaningless for one re-established outside a step, but
+        # `%Invoke{}`'s `@enforce_keys` still requires a value for each.
+        invoke = %Invoke{
+          invoke_id: invoke_id,
+          type: type,
+          params: params,
+          state_index: 0,
+          invoke_index: 0,
+          macrostep: 0,
+          microstep: 0,
+          round: 0
+        }
+
+        {:ok, instructions} = handler.start(invoke, handler_ctx(host))
+        Enum.each(instructions, &perform_instruction(host, type, &1))
+        :ok
+
+      :error ->
+        {:error, {:no_handler, type}}
+    end
+  end
+
+  @spec invocation_params(t(), String.t()) :: term()
+  defp invocation_params(host, invoke_id) do
+    host.ledger
+    |> Ledger.open_invocations(host.run_id)
+    |> Enum.find_value(fn row -> row.invoke_id == invoke_id and row.params end)
+  end
+
+  @doc """
+  Simulates the node coming back up knowing only `run_id`: `Runtime.stop/1`
+  the old (dead-by-assumption) runtime, discard the old `%Host{}`, start a
+  fresh `Runtime`, `boot/4`, `recover/1`. Returns a new struct rather than
+  mutating one, so a test that keeps using the pre-restart binding is a
+  test that fails.
+
+  `invoke_handlers:`/`invoke_types:` are carried forward from `host` onto
+  the rebuilt struct, same per-deployment declaration `boot/4`'s own
+  moduledoc describes a caller re-supplying.
+  """
+  @spec restart(t()) :: {:ok, t()} | {:error, term()}
+  def restart(%__MODULE__{} = host) do
+    :ok = Runtime.stop(host.runtime)
+    {:ok, runtime} = Runtime.start_link([])
+
+    with {:ok, rebooted} <- boot(host.store, host.ledger, runtime, host.run_id) do
+      rebooted = %{
+        rebooted
+        | invoke_handlers: host.invoke_handlers,
+          invoke_types: host.invoke_types
+      }
+
+      {:ok, recover(rebooted)}
+    end
+  end
+
   @doc "The last-observed run record - `nil` before `start_run/6`/`boot/4`."
   @spec run(t()) :: Run.t() | nil
   def run(%__MODULE__{run: run}), do: run
