@@ -60,22 +60,10 @@ defmodule StatifierPersistence.MixProject do
   # Export STATIFIER_PATH to point at a local checkout while co-developing a
   # change that spans both repos. It is an env var rather than a mix.exs edit
   # so the override never lands in a commit by accident.
-  #
-  # TEMPORARY: the default pin is a `ref:` on an unmerged upstream branch,
-  # `st-otr0-position-snapshot-fields`, rather than `branch: "main"`. That
-  # branch carries st-ADR-0064 ("The position blob drops the per-drive
-  # snapshot fields"), which this package's conformance suite depends on.
-  # Upstream request: riddler/statifier-ex#211. Re-pin this back to
-  # `branch: "main"` as soon as that request merges - this branch pin must
-  # not outlive it.
   defp statifier_dep do
     case System.get_env("STATIFIER_PATH") do
-      nil ->
-        {:statifier,
-         github: "riddler/statifier-ex", ref: "9a52b172148e4eb72ac09dbb71ac67d7800968d1"}
-
-      path ->
-        {:statifier, path: path, override: true}
+      nil -> {:statifier, github: "riddler/statifier-ex", branch: "main"}
+      path -> {:statifier, path: path, override: true}
     end
   end
 end
