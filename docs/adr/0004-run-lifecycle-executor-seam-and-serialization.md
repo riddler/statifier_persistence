@@ -177,3 +177,22 @@ a host decision about the run, not a chart transition.
 - The Ecto adapter (sp-4an.3) inherits three run callbacks, two error
   arms, and an optional `lock_run/3` to implement as a transaction-scoped
   row lock, all conformance-tested through the sp-4an.1 suite.
+
+## Amendment (2026-08-22, sp-4an.3.1): the Ecto lock is advisory plus row
+
+Decision 5 (and the Consequences bullet above) named the Ecto adapter's
+`lock_run/3` a transaction-scoped row lock. Implementing it showed the
+row lock alone cannot honor the callback's contract: `SELECT ... FOR
+UPDATE` excludes nothing when no run row matches, and the contract (with
+the conformance suite's lock tests) requires mutual exclusion for a
+`run_id` that has not been inserted yet.
+
+So the Ecto adapter's transaction takes
+`pg_advisory_xact_lock(hashtextextended(run_id, 0))` first -
+unconditional per-run exclusion, row or no row - and then locks the run
+row with `SELECT ... FOR UPDATE` when it exists, keeping this decision's
+ordering against the row itself. Both are transaction-scoped, so any
+exit from `fun` (a raise included) releases them with the transaction.
+The rowless hole and the fix are pinned by a live two-connection test
+outside the SQL sandbox, whose single shared connection would otherwise
+serialize the callers by ownership and mask a broken lock.
