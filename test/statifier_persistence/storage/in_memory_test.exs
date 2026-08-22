@@ -44,4 +44,32 @@ defmodule StatifierPersistence.Storage.InMemoryTest do
     assert :ok = InMemory.save_chart(first_opts, chart_record)
     assert {:error, :chart_not_found} = InMemory.fetch_chart(second_opts, "sha256:lifecycle")
   end
+
+  # sabotage: in InMemory.insert_run/2, drop the exists-check inside
+  # Agent.get_and_update/2 and always write with :ok -> red, all 25
+  # concurrent inserts returned :ok instead of exactly one. Verified red
+  # (together with the conformance suite's duplicate-insert test under
+  # this one mutation), reverted.
+  test "insert_run/2 admits exactly one of many concurrent inserts for one run_id" do
+    {:ok, opts} = InMemory.init([])
+
+    run_record = %{
+      run_id: "run-atomic",
+      status: :active,
+      content_hash: "sha256:lifecycle",
+      identity_blob: <<1, 2, 3>>,
+      position_blob: <<7, 8, 9>>,
+      failure: nil
+    }
+
+    results =
+      1..25
+      |> Task.async_stream(fn _index -> InMemory.insert_run(opts, run_record) end,
+        max_concurrency: 25
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    assert Enum.count(results, &(&1 == :ok)) == 1
+    assert Enum.count(results, &(&1 == {:error, :run_exists})) == 24
+  end
 end

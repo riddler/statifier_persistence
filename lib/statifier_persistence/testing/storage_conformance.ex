@@ -211,6 +211,137 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         assert fetched.position_blob == position_blob
       end
 
+      # -- Adapter level: run records ------------------------------------
+
+      # sabotage: in the adapter under test's insert_run/2, store under a
+      # fixed key instead of run_id -> red, fetch_run/2 below returned
+      # {:error, :run_not_found} instead of the round-tripped record.
+      # Verified red, reverted.
+      test "adapter: round-trips an inserted run byte-identically", %{store: store} do
+        run_record = %{
+          run_id: "run-conformance-a",
+          status: :active,
+          content_hash: "sha256:conformance-chart-a",
+          identity_blob: <<9, 0, 8, 255, 7>>,
+          position_blob: <<0, 255, 1, 2, 3, 0, 0, 254>>,
+          failure: nil
+        }
+
+        assert :ok = @conformance_adapter.insert_run(store.opts, run_record)
+
+        assert {:ok, ^run_record} =
+                 @conformance_adapter.fetch_run(store.opts, "run-conformance-a")
+      end
+
+      # sabotage: in the adapter under test's insert_run/2, drop the
+      # exists-check and always write with :ok -> red, the second insert
+      # below returned :ok instead of {:error, :run_exists}. Verified red
+      # (together with InMemoryTest's concurrent-insert test under this one
+      # mutation), reverted.
+      test "adapter: insert_run/2 refuses a duplicate run_id with :run_exists", %{store: store} do
+        run_record = %{
+          run_id: "run-conformance-duplicate",
+          status: :active,
+          content_hash: "sha256:conformance-chart-a",
+          identity_blob: <<1, 2, 3>>,
+          position_blob: <<7, 8, 9>>,
+          failure: nil
+        }
+
+        assert :ok = @conformance_adapter.insert_run(store.opts, run_record)
+
+        assert {:error, :run_exists} =
+                 @conformance_adapter.insert_run(store.opts, %{run_record | status: :failed})
+
+        assert {:ok, ^run_record} =
+                 @conformance_adapter.fetch_run(store.opts, "run-conformance-duplicate")
+      end
+
+      # sabotage: in the adapter under test's update_run/2, upsert on a
+      # missing run_id (write and return :ok) instead of refusing -> red,
+      # the update below returned :ok instead of {:error, :run_not_found}.
+      # Verified red, reverted.
+      test "adapter: update_run/2 reports :run_not_found for an unknown run_id", %{store: store} do
+        run_record = %{
+          run_id: "run-conformance-update-missing",
+          status: :failed,
+          content_hash: "sha256:conformance-chart-a",
+          identity_blob: <<1, 2, 3>>,
+          position_blob: nil,
+          failure: "abandoned"
+        }
+
+        assert {:error, :run_not_found} =
+                 @conformance_adapter.update_run(store.opts, run_record)
+
+        assert {:error, :run_not_found} =
+                 @conformance_adapter.fetch_run(store.opts, "run-conformance-update-missing")
+      end
+
+      # sabotage: in the adapter under test's fetch_run/2, return
+      # {:ok, a_placeholder_record} instead of :run_not_found for an
+      # unknown id -> red, this test's pattern match on
+      # {:error, :run_not_found} saw the placeholder. Verified red,
+      # reverted.
+      test "adapter: fetch_run/2 reports :run_not_found for an unknown run_id", %{store: store} do
+        assert {:error, :run_not_found} =
+                 @conformance_adapter.fetch_run(store.opts, "run-conformance-missing")
+      end
+
+      # sabotage: in the adapter under test's insert_run/2, normalize a nil
+      # position_blob to <<>> before storing -> red, the equality assertion
+      # on nil below saw "" instead. This is the arm ADR-0004 decision 1
+      # makes nullable; an adapter must not paper over it. Verified red,
+      # reverted.
+      test "adapter: a nil position_blob round-trips as nil", %{store: store} do
+        run_record = %{
+          run_id: "run-conformance-nil-blob",
+          status: :failed,
+          content_hash: "sha256:conformance-chart-a",
+          identity_blob: <<1, 2, 3>>,
+          position_blob: nil,
+          failure: "budget_exhausted: 100 rounds"
+        }
+
+        assert :ok = @conformance_adapter.insert_run(store.opts, run_record)
+
+        assert {:ok, fetched} =
+                 @conformance_adapter.fetch_run(store.opts, "run-conformance-nil-blob")
+
+        assert fetched.position_blob == nil
+      end
+
+      # sabotage: in the adapter under test's update_run/2, keep the stored
+      # record's status and failure instead of overwriting them (a partial
+      # update) -> red, the fetch below returned the inserted :active/nil
+      # pair instead of the updated :failed/reason pair. Verified red,
+      # reverted.
+      test "adapter: update_run/2 overwrites the full record, status and failure verbatim", %{
+        store: store
+      } do
+        inserted = %{
+          run_id: "run-conformance-overwrite",
+          status: :active,
+          content_hash: "sha256:conformance-chart-a",
+          identity_blob: <<1, 2, 3>>,
+          position_blob: <<7, 8, 9>>,
+          failure: nil
+        }
+
+        updated = %{
+          inserted
+          | status: :failed,
+            position_blob: <<10, 11, 12>>,
+            failure: "abandoned: operator request"
+        }
+
+        assert :ok = @conformance_adapter.insert_run(store.opts, inserted)
+        assert :ok = @conformance_adapter.update_run(store.opts, updated)
+
+        assert {:ok, ^updated} =
+                 @conformance_adapter.fetch_run(store.opts, "run-conformance-overwrite")
+      end
+
       # -- Facade level --------------------------------------------------
 
       # sabotage: in StatifierPersistence.Storage.save_position/3, drop the
