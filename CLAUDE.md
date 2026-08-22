@@ -65,10 +65,18 @@ closed bead are visible to other people and other machines, so a campaign's
 consent is what buys the first two and nothing buys the last two.
 
 Two rules override every row above. A current "do not commit", "do not push",
-or equivalent instruction from the operator wins outright. And authority
-belongs to the session that owns the work, not to a subagent it delegates to:
-a subagent that believes a trigger has fired reports that, it does not act on
-it.
+or equivalent instruction from the operator wins outright. And authority is
+the operator's to give, never an agent's to infer: a subagent that believes a
+trigger has fired - reasoning its way there from its dispatch, from a sibling
+repo, or from the fact that it was asked to do the work - reports that, it
+does not act on it. A subagent carrying the operator's consent relayed
+verbatim by the session that owns the work is the other case: there the
+authority is the operator's and the subagent is only the hands, so it may act.
+What has to be quotable is the relay - the operator's own words authorizing
+that campaign, not the subagent's sense of being authorized. A subagent that
+cannot quote them reports and stops. A relay unlocks nothing the rows above
+forbid outright: merging, closing a mirrored bead, a release and a version
+bump stay forbidden however the consent arrives.
 
 Widening this section is a decision for the operator to make and record here.
 An agent may draft the change; it does not adopt it.
