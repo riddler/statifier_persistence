@@ -18,9 +18,11 @@ defmodule StatifierPersistence.Demo.Scenario do
   exists to control.
   """
 
+  alias Statifier.{Event, Machine, MachineState}
   alias Statifier.Invoke.Types, as: InvokeTypes
+  alias Statifier.Send.Routes
   alias StatifierPersistence.Demo.{EnrichHandler, Host, Ledger, Runtime}
-  alias StatifierPersistence.Storage
+  alias StatifierPersistence.{Runs, Storage}
 
   @chart_source """
   <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="intake">
@@ -159,6 +161,7 @@ defmodule StatifierPersistence.Demo.Scenario do
           open_timers_after_recover: [Ledger.timer_row()],
           host: Host.t(),
           ledger: Ledger.t(),
+          run_id: String.t(),
           configs: [[String.t()]]
         }
   def across_restart({adapter, opts}) do
@@ -252,6 +255,7 @@ defmodule StatifierPersistence.Demo.Scenario do
       open_timers_after_recover: open_timers_after_recover,
       host: host,
       ledger: ledger,
+      run_id: run_id,
       configs: [after_finish, after_tick]
     }
   end

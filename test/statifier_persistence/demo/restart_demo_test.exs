@@ -92,6 +92,11 @@ defmodule StatifierPersistence.Demo.RestartDemoTest do
     refute Enum.any?(result.configs, &("escalated" in &1))
     assert %Run{status: :completed} = Host.run(result.host)
 
+    # The reminder-timer row (armed after the restart) is dropped once its
+    # cancel is driven by the sla-timer's fire - no row of any kind is left
+    # open once the run settles.
+    assert Ledger.open_timers(result.ledger, result.run_id) == []
+
     # --- no duplicate side effects across the restart ---
     # The host's idempotency ledger, on exact contents: one row per key
     # even though `recover/1` re-ran `handler.start/2` (the re-arm and the
