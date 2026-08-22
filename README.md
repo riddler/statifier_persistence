@@ -61,6 +61,17 @@ which brings up `postgres:17` on `localhost:5432` with user/password
 `config/test.exs` for the defaults) if a server is already running
 elsewhere.
 
+## Surviving a restart
+
+`docs/restart-demo.md` walks through the demo embedder that drives this
+package's whole surface across a simulated restart with no Session
+process: persist mid-run with a pending durable timer and an in-flight
+async invocation, drop everything volatile, cold-boot from the run id
+alone, and finish with zero duplicate side effects and a replay that
+reproduces the path. The executable version lives in
+`test/statifier_persistence/demo/restart_demo_test.exs` (and its
+Postgres variant beside it).
+
 ## The contract this package builds on
 
 The persisted-position story is already specified upstream, and this package

@@ -196,3 +196,24 @@ exit from `fun` (a raise included) releases them with the transaction.
 The rowless hole and the fix are pinned by a live two-connection test
 outside the SQL sandbox, whose single shared connection would otherwise
 serialize the callers by ownership and mask a broken lock.
+
+## Validation note (2026-08-22, sp-4an.4): driven end to end by a demo embedder
+
+Decisions 3, 4 and 6 were exercised end to end by a demo embedder
+(`test/statifier_persistence/demo/`, walkthrough in
+`docs/restart-demo.md`) running a multi-step chart across a simulated
+restart with no Session process - persist mid-run with a pending durable
+timer and an in-flight async invocation, drop everything volatile, boot
+from the run id alone, recover, finish - over both adapters, with the
+executor call log asserted on exact contents and a replay reproducing
+the path struct for struct. Not an amendment: nothing decided here
+changes.
+
+One finding about the API surface: a byte-identical replay needs the
+session id, the one input `Runs.create/4` otherwise generates fresh
+(`MachineState.new/2` stamps it into the `:datamodel_init` effect's
+`_sessionid`/`_ioprocessors` system variables). The existing
+`initialize: [session_id: ...]` pass-through already covers it - no new
+surface needed - but a host that wants replayable runs must record that
+id alongside its input tape, which `docs/restart-demo.md` now says out
+loud.
