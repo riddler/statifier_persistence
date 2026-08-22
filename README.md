@@ -12,7 +12,40 @@ crash semantics. This package is that loop, packaged.
 
 ## Status
 
-Nothing is implemented yet. This repository holds the scaffold only.
+Pre-release, under active development. The storage-adapter behaviour with
+its identity guard, the in-memory reference adapter, the run lifecycle,
+and the Ecto layer (configurable keys/tables, versioned migrations, and
+the Postgres adapter below) exist; nothing is published to Hex yet.
+
+## The Ecto adapter
+
+Configure a persistence module on your own repo once, and migrate:
+
+    defmodule MyApp.Persistence do
+      use StatifierPersistence.Ecto, repo: MyApp.Repo
+    end
+
+    defmodule MyApp.Repo.Migrations.AddStatifierPersistence do
+      use Ecto.Migration
+      def up, do: StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence)
+      def down, do: StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence)
+    end
+
+then build the guarded store the rest of the package works through:
+
+    {:ok, store} =
+      StatifierPersistence.Storage.new(
+        StatifierPersistence.Storage.Ecto,
+        persistence: MyApp.Persistence
+      )
+
+The adapter passes the same conformance suite the in-memory reference
+does (`StatifierPersistence.Testing.StorageConformance` - point it at
+your own adapter to hold it to the identical bar), stores engine
+identities verbatim, and implements the optional per-run `lock_run/3`
+as a transaction-scoped advisory-plus-row lock (ADR-0004 as amended).
+In your test suite, pass `sandbox: true` so each test runs in its own
+`Ecto.Adapters.SQL.Sandbox` checkout via the adapter's `isolate/1`.
 
 ## Running the tests
 
