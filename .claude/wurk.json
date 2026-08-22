@@ -82,7 +82,8 @@
   },
 
   "changelog": {
-    "mode": "none"
+    "mode": "fragments",
+    "dir": "changelog.d"
   },
 
   "release": null
