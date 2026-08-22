@@ -12,6 +12,10 @@ end
 
 {:ok, _pid} = StatifierPersistence.TestRepo.start_link()
 
+# The sandbox stays :manual for everything except the live migration tests
+# (migrations_test.exs, async: false), which manage their own DDL and
+# inserts: they switch the repo to :auto for the duration of their
+# setup_all/on_exit work and restore :manual afterward.
 Ecto.Adapters.SQL.Sandbox.mode(StatifierPersistence.TestRepo, :manual)
 
 ExUnit.start()

@@ -415,8 +415,8 @@ is `async: false`), restoring `:manual` afterward; the sandbox stays
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] Full quality gate passes (`mix quality`)
-- [ ] `mix gate.verify` passes
+- [x] Full quality gate passes (`mix quality`)
+- [x] `mix gate.verify` passes
 
 #### Manual Verification:
 - [ ] `psql \d` on the migrated default tables matches ADR-0002's sketch
@@ -497,5 +497,18 @@ surfaced once at the end.
 **Implementation Note**: same loop/full-gate discipline. Schemas are
 exercised against live DDL in Phase 4; in this phase their metadata is the
 test surface.
+
+---
+
+### Phase 4
+
+- [ ] `psql \d` on the migrated default tables matches ADR-0002's sketch
+- [ ] CI green on the pushed branch (service container exercised by the
+      live tests)
+
+**Implementation Note**: same loop/full-gate discipline. This phase closes
+sp-02x's acceptance criteria: behaviour + macro + helper exist and agree
+on options (one `Config`), identity guard provably independent of the key,
+defaults work with zero options beyond `repo:`.
 
 ---
