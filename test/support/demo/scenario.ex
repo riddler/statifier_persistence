@@ -18,7 +18,7 @@ defmodule StatifierPersistence.Demo.Scenario do
   exists to control.
   """
 
-  alias Statifier.{Event, Machine, MachineState}
+  alias Statifier.Event
   alias Statifier.Invoke.Types, as: InvokeTypes
   alias Statifier.Send.Routes
   alias StatifierPersistence.Demo.{EnrichHandler, Host, Ledger, Runtime}
@@ -207,10 +207,16 @@ defmodule StatifierPersistence.Demo.Scenario do
     {:ok, new_runtime} = Runtime.start_link([])
     {:ok, host_after_boot} = Host.boot(store, ledger, new_runtime, run_id)
 
+    # The input tape is the recorder's own log, carried across the restart
+    # by this scenario (the recorder never died - only the node did), not
+    # restored by `boot/4`: recording inputs durably is a host concern
+    # outside the position's scope, same as the handler palette re-supplied
+    # below.
     host_after_boot = %{
       host_after_boot
       | invoke_handlers: handlers(),
-        invoke_types: invoke_types()
+        invoke_types: invoke_types(),
+        tape: Host.tape(host_at_kill)
     }
 
     # Captured before `recover/1` runs, on the same fresh runtime pid
@@ -258,6 +264,73 @@ defmodule StatifierPersistence.Demo.Scenario do
       run_id: run_id,
       configs: [after_finish, after_tick]
     }
+  end
+
+  @doc """
+  Replays `tape` (`Host.tape/1`'s events, oldest first) against a fresh
+  `{store, ledger}` pair and a fresh `run_id` - with **no `Demo.Runtime`
+  at all**: no timers, no workers, nothing but the recorded inputs driven
+  straight through `Runs.create/4` then one `Runs.step/5` per event. The
+  executor here only records onto `ledger`; it dispatches nothing, because
+  a replay proves the loop is deterministic, not that the demo host's
+  side-effecting dispatch is (Phase 1-2 already prove that).
+
+  Returns the leaf-id configuration observed after `create/4` and after
+  every step, in order (so `length(configs) == length(tape) + 1`), plus
+  the exact effects the executor saw, in call order.
+
+  `opts` accepts `initialize:` (passed through to `Runs.create/4`'s own
+  `initialize:` option). The one non-deterministic input a create takes is
+  the session id `MachineState.new/2` otherwise generates fresh - it is
+  stamped into the `:datamodel_init` effect's `_sessionid` and
+  `_ioprocessors` system variables - so a replay that must reproduce the
+  original effects byte for byte re-supplies the recorded one via
+  `initialize: [session_id: ...]`, the same way it re-supplies the
+  recorded events.
+  """
+  @spec replay([Event.t()], {Storage.t(), Ledger.t()}, Runs.run_id(), keyword()) :: %{
+          configs: [[String.t()]],
+          effects: [Statifier.Effect.t()]
+        }
+  def replay(tape, {%Storage{} = store, ledger}, run_id, opts \\ []) do
+    machine = machine!()
+
+    executor = fn effect, context ->
+      :ok = Ledger.record_call(ledger, effect, context)
+      :ok
+    end
+
+    {:ok, _run, machine_state} =
+      Runs.create(store, run_id, machine,
+        executor: executor,
+        invoke_types: invoke_types(),
+        initialize: Keyword.get(opts, :initialize, [])
+      )
+
+    {_final_state, configs} =
+      Enum.reduce(tape, {machine_state, [leaf_config(machine_state)]}, fn event,
+                                                                          {_state, configs} ->
+        {:ok, _run, machine_state} =
+          Runs.step(store, run_id, machine, event,
+            executor: executor,
+            invoke_types: invoke_types(),
+            routes: Routes.new()
+          )
+
+        {machine_state, configs ++ [leaf_config(machine_state)]}
+      end)
+
+    effects = ledger |> Ledger.calls() |> Enum.map(fn {effect, _context} -> effect end)
+
+    %{configs: configs, effects: effects}
+  end
+
+  @spec leaf_config(Statifier.MachineState.t()) :: [String.t()]
+  defp leaf_config(machine_state) do
+    machine_state
+    |> Statifier.MachineState.active_leaf_states()
+    |> Enum.map(&Statifier.Machine.id(machine_state.machine, &1))
+    |> Enum.sort()
   end
 
   @spec unique_run_id() :: String.t()
