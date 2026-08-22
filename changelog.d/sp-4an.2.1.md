@@ -19,3 +19,14 @@
   `StatifierPersistence.Executor` (behaviour or arity-2 fun) and returning
   the host-facing `StatifierPersistence.Run` struct; events to a terminal
   run come back as `{:discarded, run}`.
+- Failure semantics on the loop: executor failures on actionable effects
+  re-enter the chart as `error.communication` events (single wave per step,
+  observational failures discarded); effect execution is at-least-once, with
+  a failed persist re-driving the same event and re-emitting the same
+  effects under identical deterministic keys; budget exhaustion persists a
+  `:failed` run (position untouched) and returns
+  `{:error, {:budget_exhausted, payload}}`.
+- `StatifierPersistence.Runs.fail/4`, the host-driven abandonment: marks an
+  active run `:failed` with a reason, leaves the stored position untouched,
+  and discards on a terminal run - backed by the new status-only writer
+  `StatifierPersistence.Storage.update_run_status/4`.

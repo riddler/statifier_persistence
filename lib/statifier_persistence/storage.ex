@@ -273,6 +273,32 @@ defmodule StatifierPersistence.Storage do
   end
 
   @doc """
+  Overwrites only the status and failure of the run stored under `run_id`,
+  carrying every other stored field - both blobs included - forward
+  verbatim.
+
+  This is the writer for a host-driven terminal transition that has no
+  `MachineState` in hand (`StatifierPersistence.Runs.fail/4`, ADR-0004
+  decision 6): nothing is derived, decoded, or re-encoded, so the identity
+  guard is preserved by construction - the stored `identity_blob` and
+  `position_blob` bytes never change. `opts` accepts `failure:` only
+  (default `nil`). Returns `{:error, :run_not_found}` when no run exists
+  for the id.
+  """
+  @spec update_run_status(
+          store :: t(),
+          run_id :: Adapter.run_id(),
+          status :: Adapter.run_status(),
+          opts :: [run_write_opt()]
+        ) :: :ok | {:error, error()}
+  def update_run_status(%__MODULE__{} = store, run_id, status, opts \\ []) do
+    with {:ok, run_record} <- store.adapter.fetch_run(store.opts, run_id) do
+      updated = %{run_record | status: status, failure: Keyword.get(opts, :failure)}
+      store.adapter.update_run(store.opts, updated)
+    end
+  end
+
+  @doc """
   Fetches the run record stored under `run_id`.
   """
   @spec fetch_run(store :: t(), run_id :: Adapter.run_id()) ::

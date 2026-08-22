@@ -20,14 +20,34 @@ defmodule StatifierPersistence.Runs do
   run is discarded with a typed `{:discarded, run}` result, never an
   exception and never a silent step.
 
-  Two Phase 3 boundaries, both lifted by later phases of this bead's plan:
-  this module documents no concurrency guarantee yet (per-run serialization
-  arrives as a pluggable strategy, ADR-0004 decision 5), and executor
-  `{:error, _}` results are collected but not yet re-entered as
-  `error.communication` events (ADR-0004 decision 4).
+  Executor failures on actionable effects re-enter the chart as
+  `error.communication` events through `Statifier.Interpreter.deliver_internal/5`
+  (st-ADR-0039's seam), per st-ADR-0051's failed-communication row: the core
+  alone mints the planning-time execution-error events, before any effect is
+  emitted, so every failure an executor can report re-enters uniformly as
+  `error.communication` (ADR-0004
+  decision 4). Failures on observational effects are discarded. Re-entry is
+  single-wave per step: effects the re-entries emit are executed too, but
+  their failures are not re-entered again, so a deterministically failing
+  executor cannot loop this library.
+
+  One Phase 4 boundary, lifted by the plan's next phase: this module
+  documents no concurrency guarantee yet (per-run serialization arrives as
+  a pluggable strategy, ADR-0004 decision 5).
   """
 
   alias Statifier.{Event, Interpreter, Machine, MachineState}
+
+  alias Statifier.Effect.{
+    Autoforward,
+    BudgetExhausted,
+    Cancel,
+    CancelInvoke,
+    Invoke,
+    Send,
+    SendDelayed
+  }
+
   alias Statifier.Machine.Identity
   alias StatifierPersistence.{Executor, Run, Storage}
   alias StatifierPersistence.Storage.Adapter
@@ -35,8 +55,12 @@ defmodule StatifierPersistence.Runs do
   @typedoc "A run's caller-supplied opaque key (ADR-0004 decision 2)."
   @type run_id :: Adapter.run_id()
 
-  @typedoc "This module's error vocabulary: the facade's arms, unflattened."
-  @type error :: Storage.error()
+  @typedoc """
+  This module's error vocabulary: the facade's arms, unflattened, plus the
+  `{:budget_exhausted, payload}` arm returned after a budget-exhausted step
+  or create has persisted its `:failed` run record.
+  """
+  @type error :: Storage.error() | {:budget_exhausted, BudgetExhausted.t()}
 
   @typedoc """
   Options `create/4` and `step/5` accept:
@@ -67,6 +91,12 @@ defmodule StatifierPersistence.Runs do
   Create-exactly-once rests on the adapter's atomic `:run_exists` refusal
   (ADR-0004 decision 2), not on a pre-check here: creating an existing
   `run_id` returns `{:error, :run_exists}`.
+
+  A create whose `initialize/2` exhausts its macrostep budget persists a
+  `:failed` run with no position blob (there is no quiescent position to
+  store - ADR-0004 decision 1) and then returns
+  `{:error, {:budget_exhausted, payload}}`, so the caller sees both the
+  durable state and the reason.
   """
   @spec create(store :: Storage.t(), run_id :: run_id(), machine :: Machine.t(), opts :: [opt()]) ::
           {:ok, Run.t(), MachineState.t()} | {:error, error()}
@@ -106,6 +136,37 @@ defmodule StatifierPersistence.Runs do
       {:ok, _run_record} ->
         with {:ok, machine_state} <- Storage.load_run_position(store, run_id, machine) do
           step_loaded(store, run_id, machine_state, event, opts, executor)
+        end
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  @doc """
+  Abandons a run: the only host-driven terminal transition (ADR-0004
+  decision 6). No interpreter is involved - abandonment is a host decision
+  about the run, not a chart transition - so the stored position is left
+  untouched and only the record's status and failure reason change.
+
+  A terminal run is discarded, same as `step/5`: `{:discarded, run}`.
+  `reason` is the short string stored as the run's `failure` - keep it a
+  prefixed, console-readable reason, not an inspect dump.
+
+  `opts` is accepted for forward compatibility (the plan's next phase adds
+  a `serialization:` option shared by every lifecycle entry point) and is
+  currently unused.
+  """
+  @spec fail(store :: Storage.t(), run_id :: run_id(), reason :: String.t(), opts :: keyword()) ::
+          {:ok, Run.t()} | {:discarded, Run.t()} | {:error, error()}
+  def fail(%Storage{} = store, run_id, reason, _opts \\ []) when is_binary(reason) do
+    case Storage.fetch_run(store, run_id) do
+      {:ok, %{status: status} = run_record} when status in [:completed, :failed] ->
+        {:discarded, Run.from_record(run_record)}
+
+      {:ok, run_record} ->
+        with :ok <- Storage.update_run_status(store, run_id, :failed, failure: reason) do
+          {:ok, Run.from_record(%{run_record | status: :failed, failure: reason})}
         end
 
       {:error, _reason} = error ->
@@ -176,22 +237,155 @@ defmodule StatifierPersistence.Runs do
         {:error, :unidentified_chart}
 
       identity ->
-        {lifecycle, actionable} = Enum.split_with(effects, &lifecycle_effect?/1)
+        {lifecycle, executable} = Enum.split_with(effects, &lifecycle_effect?/1)
         context = %{run_id: run_id, content_hash: identity.content_hash}
 
-        # Phase 3 of this bead's plan collects executor failures without
-        # re-entry; error re-entry through `Interpreter.deliver_internal/5`
-        # is the next phase (ADR-0004 decision 4).
-        _failures = execute_effects(actionable, executor, context)
+        failures = execute_effects(executable, executor, context)
+
+        {machine_state, lifecycle} =
+          reenter_failures(machine_state, failures, executor, context, lifecycle)
 
         status = run_status(machine_state, lifecycle)
         :ok = assert_quiescent(machine_state, lifecycle)
 
         with :ok <- write_run(write, store, run_id, machine_state, status, lifecycle) do
-          {:ok, run(run_id, status, identity), machine_state}
+          tail_result(run_id, status, identity, lifecycle, machine_state)
         end
     end
   end
+
+  # The persisted-run return: `{:ok, ...}` for a live or completed run,
+  # `{:error, {:budget_exhausted, payload}}` AFTER the `:failed` record is
+  # durable, so the caller sees both the state and the reason.
+  @spec tail_result(
+          run_id(),
+          Adapter.run_status(),
+          Identity.t(),
+          [Statifier.Effect.t()],
+          MachineState.t()
+        ) :: {:ok, Run.t(), MachineState.t()} | {:error, error()}
+  defp tail_result(run_id, status, identity, lifecycle, machine_state) do
+    case budget_effect(lifecycle) do
+      nil -> {:ok, run(run_id, status, identity), machine_state}
+      %BudgetExhausted{} = payload -> {:error, {:budget_exhausted, payload}}
+    end
+  end
+
+  # ADR-0004 decision 4's error re-entry: each executor failure on an
+  # actionable effect re-enters the chart as `error.communication` through
+  # `Interpreter.deliver_internal/5` - st-ADR-0051's failed-communication
+  # row, the only row an executor failure can be, because the core accepted
+  # the effect before emitting it. Observational failures are discarded:
+  # observation must never steer a run. Effects the re-entries emit go
+  # through the executor too, but their failures are NOT re-entered (single
+  # wave), so a deterministically failing executor cannot recurse here.
+  # `{:error, :not_running}` (a re-entry itself reached a final state) ends
+  # the wave, as does a re-entry exhausting the macrostep budget - the tail
+  # then reads status normally. A wave is never opened into a state the
+  # primary pass already reported budget-exhausted.
+  @spec reenter_failures(
+          MachineState.t(),
+          [{Statifier.Effect.t(), term()}],
+          Executor.t(),
+          Executor.context(),
+          [Statifier.Effect.t()]
+        ) :: {MachineState.t(), [Statifier.Effect.t()]}
+  defp reenter_failures(machine_state, failures, executor, context, lifecycle) do
+    if budget_exhausted?(lifecycle) do
+      {machine_state, lifecycle}
+    else
+      Enum.reduce_while(failures, {machine_state, lifecycle}, fn {effect, _reason}, acc ->
+        reenter_one(effect, acc, executor, context)
+      end)
+    end
+  end
+
+  @spec reenter_one(
+          Statifier.Effect.t(),
+          {MachineState.t(), [Statifier.Effect.t()]},
+          Executor.t(),
+          Executor.context()
+        ) :: {:cont | :halt, {MachineState.t(), [Statifier.Effect.t()]}}
+  defp reenter_one(effect, {_machine_state, _lifecycle} = acc, executor, context) do
+    case reentry_origin(effect) do
+      :observational -> {:cont, acc}
+      {origin, opts} -> deliver_reentry(acc, origin, opts, executor, context)
+    end
+  end
+
+  @spec deliver_reentry(
+          {MachineState.t(), [Statifier.Effect.t()]},
+          Statifier.Event.Cause.origin(),
+          keyword(),
+          Executor.t(),
+          Executor.context()
+        ) :: {:cont | :halt, {MachineState.t(), [Statifier.Effect.t()]}}
+  defp deliver_reentry({machine_state, lifecycle} = acc, origin, opts, executor, context) do
+    case Interpreter.deliver_internal(
+           machine_state,
+           :platform,
+           "error.communication",
+           origin,
+           opts
+         ) do
+      {:ok, machine_state, wave_effects} ->
+        {wave_lifecycle, wave_executable} = Enum.split_with(wave_effects, &lifecycle_effect?/1)
+
+        # Single wave: these failures are dropped, never re-entered.
+        _wave_failures = execute_effects(wave_executable, executor, context)
+
+        lifecycle = lifecycle ++ wave_lifecycle
+        flow = if budget_exhausted?(wave_lifecycle), do: :halt, else: :cont
+        {flow, {machine_state, lifecycle}}
+
+      {:error, :not_running} ->
+        {:halt, acc}
+    end
+  end
+
+  # The origin each re-entry carries, mirroring the shapes upstream's
+  # session builds on its own failed-communication paths - this package
+  # invents no origin vocabulary (every arm below is a
+  # `t:Statifier.Event.Cause.origin/0` constructor):
+  #
+  # - `:invoke` -> `{:invoke, state_index, invoke_index}` with no opts,
+  #   exactly as `Statifier.Session.invoke_error/4` builds it
+  #   (`deps/statifier/lib/statifier/session.ex`, the st-ADR-0039 decision 4
+  #   write).
+  # - `:send`/`:send_delayed` -> `{:content, c_index, owner}` with the
+  #   failing send's `sendid`, exactly as `Statifier.Session.origin_of/1`
+  #   and `communication_error/4` build it.
+  # - `:cancel` -> the same `{:content, c_index, owner}` arm (the `<cancel>`
+  #   element's own content node carries both fields for exactly this
+  #   identity), with no `sendid` - there is no failing `<send>` here to
+  #   name one.
+  # - `:cancel_invoke`/`:autoforward` -> `{:state, state_index}`, the
+  #   platform-raised-with-no-content-node arm, since neither payload
+  #   carries an `invoke_index` to name the `{:invoke, _, _}` arm with.
+  #
+  # Everything else is observational (`:log`, `:datamodel_change`,
+  # `:datamodel_init`, `:trace`) and its failure is discarded.
+  @spec reentry_origin(Statifier.Effect.t()) ::
+          {Statifier.Event.Cause.origin(), keyword()} | :observational
+  defp reentry_origin({:invoke, %Invoke{state_index: state_index, invoke_index: invoke_index}}),
+    do: {{:invoke, state_index, invoke_index}, []}
+
+  defp reentry_origin({:send, %Send{c_index: c_index, owner: owner, send_id: send_id}}),
+    do: {{:content, c_index, owner}, [sendid: send_id]}
+
+  defp reentry_origin({:send_delayed, %SendDelayed{} = payload}),
+    do: {{:content, payload.c_index, payload.owner}, [sendid: payload.send_id]}
+
+  defp reentry_origin({:cancel, %Cancel{c_index: c_index, owner: owner}}),
+    do: {{:content, c_index, owner}, []}
+
+  defp reentry_origin({:cancel_invoke, %CancelInvoke{state_index: state_index}}),
+    do: {{:state, state_index}, []}
+
+  defp reentry_origin({:autoforward, %Autoforward{state_index: state_index}}),
+    do: {{:state, state_index}, []}
+
+  defp reentry_origin(_observational_effect), do: :observational
 
   @spec lifecycle_effect?(Statifier.Effect.t()) :: boolean()
   defp lifecycle_effect?({:done, _payload}), do: true
@@ -211,10 +405,9 @@ defmodule StatifierPersistence.Runs do
     |> Enum.reverse()
   end
 
-  # `:done` is the only path to `:completed` (ADR-0004 decision 6).
-  # `:budget_exhausted` is handled minimally in Phase 3 of this bead's
-  # plan - the run persists as `:failed` with its position untouched, and
-  # the next phase owns the full semantics (failure reason, error return).
+  # `:done` is the only path to `:completed` (ADR-0004 decision 6);
+  # `:budget_exhausted` - from the primary pass or from a re-entry wave -
+  # is the only chart-driven path to `:failed`.
   @spec run_status(MachineState.t(), [Statifier.Effect.t()]) :: Adapter.run_status()
   defp run_status(machine_state, lifecycle_effects) do
     cond do
@@ -227,6 +420,14 @@ defmodule StatifierPersistence.Runs do
   @spec budget_exhausted?([Statifier.Effect.t()]) :: boolean()
   defp budget_exhausted?(lifecycle_effects),
     do: Enum.any?(lifecycle_effects, &match?({:budget_exhausted, _payload}, &1))
+
+  @spec budget_effect([Statifier.Effect.t()]) :: BudgetExhausted.t() | nil
+  defp budget_effect(lifecycle_effects) do
+    Enum.find_value(lifecycle_effects, fn
+      {:budget_exhausted, %BudgetExhausted{} = payload} -> payload
+      _effect -> nil
+    end)
+  end
 
   # A non-quiescent state without `:budget_exhausted` cannot come out of
   # `initialize/2` or `handle_event/2` - both fold to quiescence - so a
@@ -245,7 +446,8 @@ defmodule StatifierPersistence.Runs do
 
   # A budget-exhausted state is not quiescent, so its position is never
   # persisted: `:skip` stores `nil` on insert and carries the stored blob
-  # forward on update (ADR-0004 decision 1).
+  # forward on update (ADR-0004 decision 1). The failure string is short
+  # and prefixed - a psql-console reason, not an inspect dump.
   @spec write_run(
           :insert | :update,
           Storage.t(),
@@ -255,11 +457,17 @@ defmodule StatifierPersistence.Runs do
           [Statifier.Effect.t()]
         ) :: :ok | {:error, error()}
   defp write_run(write, store, run_id, machine_state, status, lifecycle_effects) do
-    position = if budget_exhausted?(lifecycle_effects), do: :skip, else: :persist
+    {position, failure} =
+      case budget_effect(lifecycle_effects) do
+        nil -> {:persist, nil}
+        %BudgetExhausted{budget: budget} -> {:skip, "budget_exhausted: #{budget} rounds"}
+      end
+
+    opts = [position: position, failure: failure]
 
     case write do
-      :insert -> Storage.insert_run(store, run_id, machine_state, status, position: position)
-      :update -> Storage.update_run(store, run_id, machine_state, status, position: position)
+      :insert -> Storage.insert_run(store, run_id, machine_state, status, opts)
+      :update -> Storage.update_run(store, run_id, machine_state, status, opts)
     end
   end
 
