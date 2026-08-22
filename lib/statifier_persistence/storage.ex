@@ -3,19 +3,21 @@ defmodule StatifierPersistence.Storage do
   The guarded entry point from a storage adapter to a
   `Statifier.MachineState.t()`.
 
-  Every load runs through `load_position/3`, and every load is checked
-  against the exact chart revision that produced the stored position
-  (ADR-0003 decision 2). No adapter callback ever holds both the stored
-  identity and a caller-supplied `Statifier.Machine.t()` at the same time
-  (`StatifierPersistence.Storage.Adapter`'s moduledoc), so the guard cannot
-  be skipped or weakened per adapter - it lives here, above every one of
-  them, and nowhere else in this package decodes a position blob.
+  Every load runs through `load_position/3` or `load_run_position/3`, and
+  every load is checked against the exact chart revision that produced the
+  stored position (ADR-0003 decision 2). No adapter callback ever holds
+  both the stored identity and a caller-supplied `Statifier.Machine.t()` at
+  the same time (`StatifierPersistence.Storage.Adapter`'s moduledoc), so
+  the guard cannot be skipped or weakened per adapter - it lives here,
+  above every one of them, and nowhere else in this package decodes a
+  position blob.
 
-  `save_chart/3` and `save_position/3` derive a chart's `content_hash` and
-  `identity_blob` from `Machine.identity/1` on the machine they are given -
-  never from a caller-supplied value - and refuse an unidentified machine
-  with `{:error, :unidentified_chart}` rather than writing a row a later
-  load has no way to check.
+  Every writer taking a machine or machine state - `save_chart/3`,
+  `save_position/3`, `insert_run/5`, `update_run/5` - derives a chart's
+  `content_hash` and `identity_blob` from `Machine.identity/1` on the
+  machine it is given - never from a caller-supplied value - and refuses an
+  unidentified machine with `{:error, :unidentified_chart}` rather than
+  writing a row a later load has no way to check.
 
   Every function here returns an error tuple instead of throwing; nothing
   in this module ever downgrades a failure to a default value.
@@ -39,8 +41,21 @@ defmodule StatifierPersistence.Storage do
           Adapter.error()
           | :not_a_statifier_blob
           | :unidentified_chart
+          | :run_position_missing
           | {:unsupported_format_version, term()}
           | {:identity_mismatch, Identity.t(), Identity.t() | nil}
+
+  @typedoc """
+  Options the run writers (`insert_run/5`, `update_run/5`) accept:
+
+  - `failure:` - the short reason stored on a `:failed` run; defaults to
+    `nil`.
+  - `position:` - `:persist` (the default) encodes the given machine state
+    with `Position.to_binary/1` and stores it as the run's `position_blob`;
+    `:skip` stores `nil` on insert and carries the currently stored blob
+    forward verbatim on update.
+  """
+  @type run_write_opt :: {:failure, String.t() | nil} | {:position, :persist | :skip}
 
   @doc """
   Initializes `adapter` with `opts` and returns the handle every other
@@ -173,6 +188,164 @@ defmodule StatifierPersistence.Storage do
     with {:ok, position_record} <- store.adapter.fetch_position(store.opts, session_id),
          :ok <- precheck_identity(position_record.identity_blob, machine) do
       Position.from_binary(position_record.position_blob, machine)
+    end
+  end
+
+  @doc """
+  Inserts a run record for `run_id`, keyed by the content hash and identity
+  envelope of `machine_state.machine`'s own `Machine.identity/1` - never a
+  caller-supplied hash - and refusing an unidentified machine with
+  `{:error, :unidentified_chart}` before calling the adapter.
+
+  Writers always take a `MachineState`: even a run failed at creation has
+  one, because `Statifier.Interpreter.initialize/2` cannot fail (ADR-0004
+  decision 1). Under `position: :persist` (the default) the state is
+  encoded with `Position.to_binary/1` and stored as the run's
+  `position_blob`; under `position: :skip` the blob is stored `nil` - the
+  arm for a run with no quiescent position to store. Uniqueness comes from
+  the adapter's `insert_run/2` `:run_exists` refusal, not a pre-check here.
+  """
+  @spec insert_run(
+          store :: t(),
+          run_id :: Adapter.run_id(),
+          machine_state :: MachineState.t(),
+          status :: Adapter.run_status(),
+          opts :: [run_write_opt()]
+        ) :: :ok | {:error, error()}
+  def insert_run(
+        %__MODULE__{} = store,
+        run_id,
+        %MachineState{} = machine_state,
+        status,
+        opts \\ []
+      ) do
+    case Machine.identity(machine_state.machine) do
+      nil ->
+        {:error, :unidentified_chart}
+
+      identity ->
+        with {:ok, position_blob} <- insert_position_blob(machine_state, position_opt(opts)) do
+          run_record = run_record(run_id, status, identity, position_blob, opts)
+          store.adapter.insert_run(store.opts, run_record)
+        end
+    end
+  end
+
+  @doc """
+  Overwrites the run stored under `run_id` with a full record derived the
+  same way `insert_run/5` derives one: identity always from
+  `machine_state.machine`'s own `Machine.identity/1`, refusal of an
+  unidentified machine, `position_blob` encoded under `position: :persist`
+  (the default).
+
+  Under `position: :skip` the currently stored `position_blob` is carried
+  forward verbatim: because the adapter's `update_run/2` is a full-record
+  overwrite, this function fetches the current record and reuses its blob
+  bytes unchanged, so a status-only update (a failed step, an abandonment)
+  never touches the stored position. Returns `{:error, :run_not_found}`
+  when no run exists for the id.
+  """
+  @spec update_run(
+          store :: t(),
+          run_id :: Adapter.run_id(),
+          machine_state :: MachineState.t(),
+          status :: Adapter.run_status(),
+          opts :: [run_write_opt()]
+        ) :: :ok | {:error, error()}
+  def update_run(
+        %__MODULE__{} = store,
+        run_id,
+        %MachineState{} = machine_state,
+        status,
+        opts \\ []
+      ) do
+    case Machine.identity(machine_state.machine) do
+      nil ->
+        {:error, :unidentified_chart}
+
+      identity ->
+        with {:ok, position_blob} <-
+               update_position_blob(store, run_id, machine_state, position_opt(opts)) do
+          run_record = run_record(run_id, status, identity, position_blob, opts)
+          store.adapter.update_run(store.opts, run_record)
+        end
+    end
+  end
+
+  @doc """
+  Fetches the run record stored under `run_id`.
+  """
+  @spec fetch_run(store :: t(), run_id :: Adapter.run_id()) ::
+          {:ok, Adapter.run_record()} | {:error, error()}
+  def fetch_run(%__MODULE__{} = store, run_id) do
+    store.adapter.fetch_run(store.opts, run_id)
+  end
+
+  @doc """
+  Fetches the run stored under `run_id` and rebuilds its position into a
+  `Statifier.MachineState.t()` walking `machine`, refusing a chart-revision
+  mismatch instead of silently resuming the wrong configuration.
+
+  Runs in `load_position/3`'s order, with one extra arm: the same cheap
+  identity pre-check against the stored `identity_blob`, then
+  `{:error, :run_position_missing}` for a run whose `position_blob` is
+  `nil` (a run that failed at creation stores none - ADR-0004 decision 1),
+  then `Position.from_binary/2` as the authoritative check, its result
+  returned unchanged.
+
+  Like `load_position/3`, the returned state carries `nil` for both
+  `routes` and `invoke_types` (st-ADR-0064); re-stamping them before the
+  next drive is the stepper's job, not this function's.
+  """
+  @spec load_run_position(
+          store :: t(),
+          run_id :: Adapter.run_id(),
+          machine :: Machine.t()
+        ) :: {:ok, MachineState.t()} | {:error, error()}
+  def load_run_position(%__MODULE__{} = store, run_id, %Machine{} = machine) do
+    with {:ok, run_record} <- store.adapter.fetch_run(store.opts, run_id),
+         :ok <- precheck_identity(run_record.identity_blob, machine) do
+      case run_record.position_blob do
+        nil -> {:error, :run_position_missing}
+        position_blob -> Position.from_binary(position_blob, machine)
+      end
+    end
+  end
+
+  @spec run_record(
+          Adapter.run_id(),
+          Adapter.run_status(),
+          Identity.t(),
+          binary() | nil,
+          [run_write_opt()]
+        ) :: Adapter.run_record()
+  defp run_record(run_id, status, identity, position_blob, opts) do
+    %{
+      run_id: run_id,
+      status: status,
+      content_hash: identity.content_hash,
+      identity_blob: Identity.to_binary(identity),
+      position_blob: position_blob,
+      failure: Keyword.get(opts, :failure)
+    }
+  end
+
+  @spec position_opt([run_write_opt()]) :: :persist | :skip
+  defp position_opt(opts), do: Keyword.get(opts, :position, :persist)
+
+  @spec insert_position_blob(MachineState.t(), :persist | :skip) ::
+          {:ok, binary() | nil} | {:error, error()}
+  defp insert_position_blob(_machine_state, :skip), do: {:ok, nil}
+  defp insert_position_blob(machine_state, :persist), do: Position.to_binary(machine_state)
+
+  @spec update_position_blob(t(), Adapter.run_id(), MachineState.t(), :persist | :skip) ::
+          {:ok, binary() | nil} | {:error, error()}
+  defp update_position_blob(_store, _run_id, machine_state, :persist),
+    do: Position.to_binary(machine_state)
+
+  defp update_position_blob(store, run_id, _machine_state, :skip) do
+    with {:ok, run_record} <- store.adapter.fetch_run(store.opts, run_id) do
+      {:ok, run_record.position_blob}
     end
   end
 

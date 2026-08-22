@@ -1,7 +1,8 @@
 defmodule StatifierPersistence.Storage.InMemory do
   @moduledoc """
-  The reference `StatifierPersistence.Storage.Adapter`: an Agent holding two
-  maps, charts keyed by content hash and positions keyed by session id.
+  The reference `StatifierPersistence.Storage.Adapter`: an Agent holding
+  three maps - charts keyed by content hash, positions keyed by session id,
+  and runs keyed by run id.
 
   It ships in `lib/`, not the test-only `support/` directory, for two
   reasons: the conformance template this package ships in `lib/` (this
@@ -14,10 +15,11 @@ defmodule StatifierPersistence.Storage.InMemory do
 
   alias StatifierPersistence.Storage.Adapter
 
-  @typedoc "This adapter's state: the two maps `init/1` starts the Agent with."
+  @typedoc "This adapter's state: the three maps `init/1` starts the Agent with."
   @type state :: %{
           charts: %{Adapter.content_hash() => Adapter.chart_record()},
-          positions: %{Adapter.session_id() => Adapter.position_record()}
+          positions: %{Adapter.session_id() => Adapter.position_record()},
+          runs: %{Adapter.run_id() => Adapter.run_record()}
         }
 
   @doc """
@@ -27,7 +29,7 @@ defmodule StatifierPersistence.Storage.InMemory do
   @impl Adapter
   @spec init(Adapter.opts()) :: {:ok, Adapter.opts()} | {:error, Adapter.error()}
   def init(opts) do
-    case Agent.start_link(fn -> %{charts: %{}, positions: %{}} end) do
+    case Agent.start_link(fn -> %{charts: %{}, positions: %{}, runs: %{}} end) do
       {:ok, pid} -> {:ok, Keyword.put(opts, :pid, pid)}
       {:error, reason} -> {:error, {:adapter, reason}}
     end
@@ -82,6 +84,55 @@ defmodule StatifierPersistence.Storage.InMemory do
       nil -> {:error, :position_not_found}
       position_record -> {:ok, position_record}
     end
+  end
+
+  @doc """
+  Inserts `run_record` under its `run_id`, refusing a duplicate with
+  `{:error, :run_exists}`.
+
+  The exists-check and the write run inside one `Agent.get_and_update/2`
+  call, so they are a single atomic state transition: two concurrent
+  inserts of the same `run_id` cannot both return `:ok`.
+  """
+  @impl Adapter
+  @spec insert_run(Adapter.opts(), Adapter.run_record()) :: :ok | {:error, Adapter.error()}
+  def insert_run(opts, %{run_id: run_id} = run_record) do
+    Agent.get_and_update(pid(opts), fn state ->
+      if Map.has_key?(state.runs, run_id) do
+        {{:error, :run_exists}, state}
+      else
+        {:ok, put_in(state, [:runs, run_id], run_record)}
+      end
+    end)
+  end
+
+  @doc """
+  Fetches the run stored under `run_id`, or `:run_not_found`.
+  """
+  @impl Adapter
+  @spec fetch_run(Adapter.opts(), Adapter.run_id()) ::
+          {:ok, Adapter.run_record()} | {:error, Adapter.error()}
+  def fetch_run(opts, run_id) do
+    case Agent.get(pid(opts), &get_in(&1, [:runs, run_id])) do
+      nil -> {:error, :run_not_found}
+      run_record -> {:ok, run_record}
+    end
+  end
+
+  @doc """
+  Overwrites the run stored under `run_record`'s `run_id` with the full
+  record, or refuses with `:run_not_found` when no run exists for the id.
+  """
+  @impl Adapter
+  @spec update_run(Adapter.opts(), Adapter.run_record()) :: :ok | {:error, Adapter.error()}
+  def update_run(opts, %{run_id: run_id} = run_record) do
+    Agent.get_and_update(pid(opts), fn state ->
+      if Map.has_key?(state.runs, run_id) do
+        {:ok, put_in(state, [:runs, run_id], run_record)}
+      else
+        {{:error, :run_not_found}, state}
+      end
+    end)
   end
 
   @spec pid(Adapter.opts()) :: pid()
