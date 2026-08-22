@@ -1,6 +1,21 @@
 defmodule StatifierPersistence.RunsTest do
   use ExUnit.Case, async: true
 
+  defmodule SpyStrategy do
+    @moduledoc false
+    # A pass-through StatifierPersistence.Serialization strategy whose
+    # config is the test pid: it reports every invocation, which is what
+    # lets a test assert the serialization: {module, config} opt is
+    # honored rather than the default strategy being hardwired.
+    @behaviour StatifierPersistence.Serialization
+
+    @impl StatifierPersistence.Serialization
+    def with_run(test_pid, run_id, fun) do
+      send(test_pid, {:with_run, run_id})
+      {:ok, fun.()}
+    end
+  end
+
   alias Statifier.Effect.{BudgetExhausted, Log, SendDelayed}
   alias Statifier.Event
   alias Statifier.Invoke.Types, as: InvokeTypes
@@ -9,7 +24,7 @@ defmodule StatifierPersistence.RunsTest do
   alias Statifier.Send.Routes
   alias StatifierPersistence.{Run, Runs, Storage}
   alias StatifierPersistence.Storage.InMemory
-  alias StatifierPersistence.Test.{FlakyAdapter, RecordingExecutor}
+  alias StatifierPersistence.Test.{FlakyAdapter, NoLockAdapter, RecordingExecutor}
   alias StatifierPersistence.Testing.Charts
 
   # Reaches top-level final on "finish", executing two <log> blocks in
@@ -148,6 +163,29 @@ defmodule StatifierPersistence.RunsTest do
           </transition>
       </state>
       <state id="b"/>
+  </scxml>
+  """
+
+  # The serialization proof's fixture: from s0, the two events reach
+  # order-specific final states (e1 then e2 -> s12; e2 then e1 -> s21),
+  # while a lost-update interleaving - both steps loading s0 - persists a
+  # one-event state (s1 or s2) that no serial order produces. The <log> on
+  # every transition gives a slow executor something to stall on, widening
+  # the load-to-persist window an unserialized pair would interleave in.
+  @order_chart_source """
+  <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="s0">
+      <state id="s0">
+          <transition event="e1" target="s1"><log label="t1"/></transition>
+          <transition event="e2" target="s2"><log label="t2"/></transition>
+      </state>
+      <state id="s1">
+          <transition event="e2" target="s12"><log label="t12"/></transition>
+      </state>
+      <state id="s2">
+          <transition event="e1" target="s21"><log label="t21"/></transition>
+      </state>
+      <state id="s12"/>
+      <state id="s21"/>
   </scxml>
   """
 
@@ -522,6 +560,85 @@ defmodule StatifierPersistence.RunsTest do
     # sabotage: fail/4's fetch error arm rewrites the reason -> red
     test "on a missing run returns {:error, :run_not_found}", %{store: store} do
       assert {:error, :run_not_found} = Runs.fail(store, "absent", "operator: abandoned")
+    end
+  end
+
+  describe "per-run serialization (ADR-0004 decision 5)" do
+    # sabotage: InMemory.lock_run/3 runs fun without the exclusion
+    # ({:ok, fun.()} with no acquire) -> red (both steps load s0 and the
+    # persisted state is a one-event s1/s2, which no serial order produces)
+    test "two concurrent steps on one run serialize to some order of the two events",
+         %{store: store} do
+      machine = compile!(@order_chart_source)
+
+      # The slow executor stalls each step between load and persist, so an
+      # unserialized pair reliably overlaps there instead of racing past
+      # each other by luck.
+      executor = fn _effect, _context ->
+        Process.sleep(50)
+        :ok
+      end
+
+      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: executor)
+
+      tasks =
+        for event <- ["e1", "e2"] do
+          Task.async(fn ->
+            Runs.step(store, "run-1", machine, Event.external(event), executor: executor)
+          end)
+        end
+
+      results = Task.await_many(tasks, 10_000)
+      assert Enum.all?(results, &match?({:ok, %Run{status: :active}, %MachineState{}}, &1))
+
+      # The final persisted state is one of the two serial orders' results,
+      # never an interleaving's.
+      assert {:ok, loaded} = Storage.load_run_position(store, "run-1", machine)
+      assert active_ids(loaded) in [["s12"], ["s21"]]
+    end
+
+    # sabotage: Runs.serialized/4 ignores the :serialization opt and always
+    # uses the {AdapterLock, store} default -> red (no {:with_run, _}
+    # message ever arrives)
+    test "the serialization: {module, config} override is honored on every entry point",
+         %{store: store} do
+      {_source, machine} = Charts.chart_a()
+      serialization = {SpyStrategy, self()}
+
+      assert {:ok, _run, _ms} =
+               Runs.create(store, "run-1", machine,
+                 executor: RecordingExecutor,
+                 serialization: serialization
+               )
+
+      assert_receive {:with_run, "run-1"}
+
+      assert {:ok, _run, _ms} =
+               Runs.step(store, "run-1", machine, Event.external("go"),
+                 executor: RecordingExecutor,
+                 serialization: serialization
+               )
+
+      assert_receive {:with_run, "run-1"}
+
+      assert {:ok, %Run{status: :failed}} =
+               Runs.fail(store, "run-1", "operator: abandoned", serialization: serialization)
+
+      assert_receive {:with_run, "run-1"}
+    end
+
+    # sabotage: AdapterLock.with_run/3 falls back to {:ok, fun.()} when the
+    # adapter exports no lock_run/3 -> red (create returns {:ok, ...} and
+    # the run exists)
+    test "an adapter without lock_run/3 under the default strategy is refused" do
+      {:ok, store} = Storage.new(NoLockAdapter, [])
+      {_source, machine} = Charts.chart_a()
+
+      assert {:error, {:serialization, :not_supported}} =
+               Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+
+      # The refusal precedes the tail: nothing was inserted.
+      assert {:error, :run_not_found} = Storage.fetch_run(store, "run-1")
     end
   end
 

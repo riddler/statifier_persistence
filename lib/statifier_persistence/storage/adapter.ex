@@ -223,5 +223,28 @@ defmodule StatifierPersistence.Storage.Adapter do
   """
   @callback isolate(opts()) :: :ok | {:error, error()}
 
-  @optional_callbacks isolate: 1
+  @doc """
+  Optional per-run lock (ADR-0003 amendment, 2026-08-22; ADR-0004
+  decision 5).
+
+  Provides mutual exclusion per `run_id`: while one `lock_run/3` call for a
+  given `run_id` is running `fun`, no other `lock_run/3` call for the same
+  `run_id` may run its own. `fun` runs while the exclusion is held, and the
+  exclusion is released on ANY exit from `fun` - a normal return, a throw,
+  and a raise escaping `fun` alike. The lock must not leak: a raising `fun`
+  propagates to the caller, but the next `lock_run/3` for that `run_id`
+  must still acquire.
+
+  This is the callback the default serialization strategy
+  (`StatifierPersistence.Serialization.AdapterLock`) delegates to; an
+  adapter that does not export it makes that strategy refuse with
+  `{:error, {:serialization, :not_supported}}`. An Ecto adapter implements
+  it as a transaction-scoped row lock - `SELECT ... FOR UPDATE` on the run
+  row inside a transaction that spans `fun` (sp-4an.3).
+  """
+  @callback lock_run(opts(), run_id(), (-> result)) ::
+              {:ok, result} | {:error, error()}
+            when result: var
+
+  @optional_callbacks isolate: 1, lock_run: 3
 end

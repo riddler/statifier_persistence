@@ -27,6 +27,13 @@ defmodule StatifierPersistence.Testing.StorageConformance do
   no such callback, like `StatifierPersistence.Storage.InMemory`, is
   unaffected: the check is a `function_exported?/3` guard, not a
   requirement.
+
+  The optional `c:StatifierPersistence.Storage.Adapter.lock_run/3` gets the
+  same treatment at generation time: when the adapter under test exports
+  it, the suite generates the per-run lock tests (mutual exclusion of two
+  concurrent bodies, release after a raising fun); when it does not, they
+  are not generated at all - exporting the callback is what opts an
+  adapter into its contract.
   """
 
   use ExUnit.CaseTemplate
@@ -340,6 +347,70 @@ defmodule StatifierPersistence.Testing.StorageConformance do
 
         assert {:ok, ^updated} =
                  @conformance_adapter.fetch_run(store.opts, "run-conformance-overwrite")
+      end
+
+      # -- Adapter level: the optional per-run lock ----------------------
+      #
+      # Generated only when the adapter under test exports the optional
+      # lock_run/3 (ADR-0003 amendment 2026-08-22, ADR-0004 decision 5) -
+      # the same shape as the isolate/1 hook: exporting the callback is
+      # what opts an adapter into its contract.
+
+      if Code.ensure_loaded?(conformance_adapter) and
+           function_exported?(conformance_adapter, :lock_run, 3) do
+        # sabotage: in the adapter under test's lock_run/3, run fun without
+        # the exclusion ({:ok, fun.()} with no acquire) -> red, the two
+        # sleeping bodies below interleave and the enter/enter prefix
+        # breaks the paired pattern. Verified red (together with
+        # RunsTest's concurrent-step test under this one mutation),
+        # reverted.
+        test "adapter: lock_run/3 never overlaps two bodies for one run_id", %{store: store} do
+          {:ok, events} = Agent.start_link(fn -> [] end)
+
+          body = fn tag ->
+            fn ->
+              Agent.update(events, &[{:enter, tag} | &1])
+              Process.sleep(30)
+              Agent.update(events, &[{:exit, tag} | &1])
+              tag
+            end
+          end
+
+          tasks =
+            for tag <- [:first, :second] do
+              Task.async(fn ->
+                @conformance_adapter.lock_run(store.opts, "run-conformance-lock", body.(tag))
+              end)
+            end
+
+          assert [{:ok, _tag_a}, {:ok, _tag_b}] = Task.await_many(tasks, 5_000)
+
+          recorded = events |> Agent.get(& &1) |> Enum.reverse()
+          assert [{:enter, one}, {:exit, one}, {:enter, other}, {:exit, other}] = recorded
+          assert one != other
+        end
+
+        # sabotage: in the adapter under test's lock_run/3, release only on
+        # a normal return (move the release out of the after block, after
+        # {:ok, fun.()}) -> red, the raise leaks the lock and the
+        # reacquisition below times out (Task.yield returns nil). Verified
+        # red, reverted.
+        test "adapter: lock_run/3 releases the lock after a raising fun", %{store: store} do
+          assert_raise RuntimeError, "lock body boom", fn ->
+            @conformance_adapter.lock_run(store.opts, "run-conformance-lock-raise", fn ->
+              raise "lock body boom"
+            end)
+          end
+
+          task =
+            Task.async(fn ->
+              @conformance_adapter.lock_run(store.opts, "run-conformance-lock-raise", fn ->
+                :reacquired
+              end)
+            end)
+
+          assert {:ok, {:ok, :reacquired}} = Task.yield(task, 1_000) || Task.shutdown(task)
+        end
       end
 
       # -- Facade level --------------------------------------------------

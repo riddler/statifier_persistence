@@ -15,12 +15,19 @@ defmodule StatifierPersistence.Storage.InMemory do
 
   alias StatifierPersistence.Storage.Adapter
 
-  @typedoc "This adapter's state: the three maps `init/1` starts the Agent with."
+  @typedoc """
+  This adapter's state: the three record maps `init/1` starts the Agent
+  with, plus the per-run lock table `lock_run/3` acquires through.
+  """
   @type state :: %{
           charts: %{Adapter.content_hash() => Adapter.chart_record()},
           positions: %{Adapter.session_id() => Adapter.position_record()},
-          runs: %{Adapter.run_id() => Adapter.run_record()}
+          runs: %{Adapter.run_id() => Adapter.run_record()},
+          locks: %{Adapter.run_id() => reference()}
         }
+
+  # How long a contended lock_run/3 sleeps between acquisition attempts.
+  @lock_spin_sleep_ms 5
 
   @doc """
   Starts the backing Agent and returns `opts` with `:pid` merged in - the
@@ -29,7 +36,7 @@ defmodule StatifierPersistence.Storage.InMemory do
   @impl Adapter
   @spec init(Adapter.opts()) :: {:ok, Adapter.opts()} | {:error, Adapter.error()}
   def init(opts) do
-    case Agent.start_link(fn -> %{charts: %{}, positions: %{}, runs: %{}} end) do
+    case Agent.start_link(fn -> %{charts: %{}, positions: %{}, runs: %{}, locks: %{}} end) do
       {:ok, pid} -> {:ok, Keyword.put(opts, :pid, pid)}
       {:error, reason} -> {:error, {:adapter, reason}}
     end
@@ -131,6 +138,67 @@ defmodule StatifierPersistence.Storage.InMemory do
         {:ok, put_in(state, [:runs, run_id], run_record)}
       else
         {{:error, :run_not_found}, state}
+      end
+    end)
+  end
+
+  @doc """
+  Runs `fun` under this adapter's per-run mutual exclusion for `run_id`
+  (the optional `c:StatifierPersistence.Storage.Adapter.lock_run/3`).
+
+  Acquisition is an insert-if-absent on the Agent's lock table, one atomic
+  `Agent.get_and_update/2` transition; contention spins with a small
+  bounded sleep (#{@lock_spin_sleep_ms}ms) between attempts. The lock is
+  released in an `after` block, so any exit from `fun` - a raise included -
+  releases it; the raise itself propagates to the caller.
+
+  Simple and honest for a reference adapter. A production adapter should
+  prefer its backend's native lock - the Ecto adapter implements this as a
+  transaction-scoped row lock (sp-4an.3).
+  """
+  @impl Adapter
+  @spec lock_run(Adapter.opts(), Adapter.run_id(), (-> result)) ::
+          {:ok, result} | {:error, Adapter.error()}
+        when result: term()
+  def lock_run(opts, run_id, fun) do
+    token = acquire_lock(pid(opts), run_id)
+
+    try do
+      {:ok, fun.()}
+    after
+      release_lock(pid(opts), run_id, token)
+    end
+  end
+
+  @spec acquire_lock(pid(), Adapter.run_id()) :: reference()
+  defp acquire_lock(pid, run_id) do
+    token = make_ref()
+
+    acquired? =
+      Agent.get_and_update(pid, fn state ->
+        if Map.has_key?(state.locks, run_id) do
+          {false, state}
+        else
+          {true, put_in(state, [:locks, run_id], token)}
+        end
+      end)
+
+    if acquired? do
+      token
+    else
+      Process.sleep(@lock_spin_sleep_ms)
+      acquire_lock(pid, run_id)
+    end
+  end
+
+  @spec release_lock(pid(), Adapter.run_id(), reference()) :: :ok
+  defp release_lock(pid, run_id, token) do
+    Agent.update(pid, fn state ->
+      case state.locks do
+        # Only the holder's own token releases: a stray release can never
+        # drop a lock some later acquirer holds.
+        %{^run_id => ^token} -> %{state | locks: Map.delete(state.locks, run_id)}
+        _other -> state
       end
     end)
   end
