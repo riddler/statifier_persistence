@@ -23,6 +23,15 @@
   compile: [
     warnings_as_errors: true
   ],
+
+  # Check-mode, not reformat-mode (sui-b5y, fleet-wide decision 2026-08-22):
+  # a gate that rewrites drifting files cannot report drift as a finding, so
+  # unformatted code would pass instead of going red. Drift fails the stage;
+  # run `mix format` yourself before committing.
+  format: [
+    check: true
+  ],
+
   credo: [
     strict: true
   ],

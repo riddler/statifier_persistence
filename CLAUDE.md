@@ -145,9 +145,11 @@ mix quality                  # full gate: + dialyzer, deps audit, coverage floor
 mix test                     # just the suite
 ```
 
-Full `mix quality` must be green before any commit. The gate formats your code
-for you - do not run `mix format` as a separate step. The gate is deliberately
-smaller than statifier-ex's; `.quality.exs` records why.
+Full `mix quality` must be green before any commit. The format stage runs in
+check mode (`format: [check: true]` in `.quality.exs`, sp-987): drift fails
+the gate and nothing is rewritten, so run `mix format` yourself before
+committing. The gate is deliberately smaller than statifier-ex's;
+`.quality.exs` records why.
 
 <!-- usage-rules-start -->
 ## ExQuality (`mix quality`)
