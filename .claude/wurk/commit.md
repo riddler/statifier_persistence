@@ -63,12 +63,12 @@ reason to move it. Report the finding and stop. `.quality.exs` carries its
 reasoning in comments; a change that moves a value without moving its reason
 is incomplete regardless of who asked.
 
-## Gate attestation is not wired up yet
+## Gate attestation: dep-provided mix gate.verify
 
-The manifest declares no `gate.attest` command, so an unattended
-(`/wurk:commit --auto`) run records `attested: false` and refuses to advance.
-That is the known state, not a fault to work around: bead `sp-7cu` adopts
-`mix gate.verify` (the family's one adoptable verifier - it adds no gate
-stage) and wires `gate.attest` to it. Until that lands, review the full gate
-output directly in interactive runs, and treat an `--auto` refusal on
-attestation as expected - report it, do not fake an attestation.
+The manifest wires `gate.attest` to `mix gate.verify` (bead `sp-7cu`). The
+task ships with the statifier dependency - this repo carries no local copy
+of it, on purpose, per the upstream ruling on st-hcgl. It adds no gate stage
+and does not touch `.quality.exs`; it runs the gate with a machine-readable
+report and attests only a full run (status ok, scope all, no profile, no
+run-narrowing skip). An `--auto` run that reports `attested: false` is the
+check working - report it, do not fake an attestation.
