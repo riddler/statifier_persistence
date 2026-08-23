@@ -80,8 +80,21 @@ defmodule StatifierPersistence.Ecto.KeyGenerator do
             "StatifierPersistence.Ecto.KeyGenerator"
   end
 
+  # `Code.ensure_compiled/1`, not `Code.ensure_loaded?/1`: resolve/1 runs at
+  # the HOST's compile time (inside `use StatifierPersistence.Ecto`), and a
+  # generator module defined in the same app may still be in flight in the
+  # host's parallel compiler. ensure_loaded?/1 answers false for such a
+  # module, failing validation spuriously; ensure_compiled/1 waits for the
+  # in-flight compilation to finish before answering (sp-dp6).
   defp implements_behaviour?(module) do
-    Code.ensure_loaded?(module) and
-      __MODULE__ in List.flatten(Keyword.get_values(module.module_info(:attributes), :behaviour))
+    case Code.ensure_compiled(module) do
+      {:module, ^module} ->
+        __MODULE__ in List.flatten(
+          Keyword.get_values(module.module_info(:attributes), :behaviour)
+        )
+
+      {:error, _reason} ->
+        false
+    end
   end
 end

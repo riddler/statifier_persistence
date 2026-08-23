@@ -36,6 +36,67 @@ defmodule StatifierPersistence.Ecto.KeyGeneratorTest do
     end
   end
 
+  describe "resolve/1 under the host's parallel compiler" do
+    @tag :tmp_dir
+    # sabotage: implements_behaviour? reverted to Code.ensure_loaded?/1 -> red
+    # (the generator is still in flight when resolve/1 runs, so validation
+    # fails spuriously and the compile errors)
+    test "waits for a generator whose compilation is still in flight", %{tmp_dir: tmp_dir} do
+      generator_path = Path.join(tmp_dir, "slow_generator.ex")
+      user_path = Path.join(tmp_dir, "user.ex")
+
+      File.write!(generator_path, """
+      defmodule StatifierPersistence.KeyGeneratorRaceTest.SlowGenerator do
+        @behaviour StatifierPersistence.Ecto.KeyGenerator
+
+        # Keeps this module in flight long enough that the sibling file's
+        # compile-time resolve/1 call reliably runs first.
+        Process.sleep(500)
+
+        @impl true
+        def ecto_type(_opts), do: :string
+        @impl true
+        def migration_type(_opts), do: :text
+        @impl true
+        def autogenerate(_table, _opts), do: nil
+      end
+      """)
+
+      # Mirrors what `use StatifierPersistence.Ecto` does in a host app:
+      # resolve/1 runs in the module body, at compile time, against a
+      # generator module the same parallel compile is still producing.
+      File.write!(user_path, """
+      defmodule StatifierPersistence.KeyGeneratorRaceTest.User do
+        {mod, []} =
+          StatifierPersistence.Ecto.KeyGenerator.resolve(
+            {StatifierPersistence.KeyGeneratorRaceTest.SlowGenerator, []}
+          )
+
+        def resolved, do: unquote(mod)
+      end
+      """)
+
+      on_exit(fn ->
+        for mod <- [
+              StatifierPersistence.KeyGeneratorRaceTest.SlowGenerator,
+              StatifierPersistence.KeyGeneratorRaceTest.User
+            ] do
+          :code.purge(mod)
+          :code.delete(mod)
+        end
+      end)
+
+      assert {:ok, modules, _warnings} =
+               Kernel.ParallelCompiler.compile([user_path, generator_path])
+
+      assert StatifierPersistence.KeyGeneratorRaceTest.User in modules
+
+      # Dynamic dispatch: the module only exists once the compile above ran.
+      user = StatifierPersistence.KeyGeneratorRaceTest.User
+      assert StatifierPersistence.KeyGeneratorRaceTest.SlowGenerator == user.resolved()
+    end
+  end
+
   describe "UXID" do
     # sabotage: UXID.ecto_type/1 returns :binary_id -> red (match on :string)
     test "declares :string schema fields over :text columns" do
