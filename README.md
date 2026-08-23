@@ -10,12 +10,24 @@ span days or survive deploys should not need long-lived Session processes at
 all - but every host currently hand-rolls the loop, the storage guard, and the
 crash semantics. This package is that loop, packaged.
 
+## Installation
+
+```elixir
+def deps do
+  [
+    {:statifier_persistence, "~> 0.1"},
+    # Optional, for the Postgres adapter:
+    {:ecto_sql, "~> 3.10"}
+  ]
+end
+```
+
 ## Status
 
-Pre-release, under active development. The storage-adapter behaviour with
+Early, under active development. The storage-adapter behaviour with
 its identity guard, the in-memory reference adapter, the run lifecycle,
 and the Ecto layer (configurable keys/tables, versioned migrations, and
-the Postgres adapter below) exist; nothing is published to Hex yet.
+the Postgres adapter below) all exist and are conformance-tested.
 
 ## The Ecto adapter
 
