@@ -50,8 +50,9 @@ is the expected outcome, not a step you skipped.
 
 ## Version bump: never
 
-`mix.exs` holds `0.1.0-dev` until a release bead says otherwise, and the
-authority table marks releases and version bumps as never an agent's. Never
+`mix.exs` holds the last released version (`0.1.2` as of this writing) until
+a release bead says otherwise, and the authority table marks releases and
+version bumps as never an agent's. Never
 edit the version field as part of an ordinary commit.
 
 ## Gate thresholds are the operator's call

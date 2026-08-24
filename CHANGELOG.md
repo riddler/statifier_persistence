@@ -10,6 +10,22 @@ fragment in [`changelog.d/`](changelog.d/README.md); the fragments are assembled
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
 
+## [0.1.2] 2026-08-24
+
+Docs release: the hexdocs/README overhaul from PR #20. No library code changes.
+
+### Changed
+
+- Hexdocs no longer publishes the ADRs: the ADR extras and their
+  `groups_for_extras` entry are removed, so the published docs are the README,
+  this changelog, and the restart-demo guide.
+- `ex_doc` is pinned to `~> 0.40`, and `CHANGELOG.md` is listed in
+  `skip_undefined_reference_warnings_on`; `mix docs` now completes with zero
+  warnings.
+- The README gains the standard badge row (CI, hex.pm version/downloads,
+  hexdocs, license) and a documentation index line linking the published
+  restart-demo guide.
+
 ## [0.1.1] 2026-08-24
 
 Patch release: the key-generator compile-race fix from PR #18.
