@@ -47,17 +47,15 @@ defmodule StatifierPersistence.MixProject do
       canonical: "https://hexdocs.pm/statifier_persistence",
       source_url: @source_url,
       main: "readme",
-      extras:
-        [
-          "README.md",
-          "CHANGELOG.md",
-          "docs/restart-demo.md",
-          {"docs/adr/README.md", [title: "Architecture Decision Records", filename: "adr-index"]}
-        ] ++ Enum.sort(Path.wildcard("docs/adr/0*.md")),
+      extras: [
+        "README.md",
+        "CHANGELOG.md",
+        "docs/restart-demo.md"
+      ],
       groups_for_extras: [
-        Guides: ~r{docs/(?!adr)},
-        "Architecture Decision Records": ~r{docs/adr}
-      ]
+        Guides: ~r{docs/}
+      ],
+      skip_undefined_reference_warnings_on: ["CHANGELOG.md"]
     ]
   end
 
@@ -84,7 +82,7 @@ defmodule StatifierPersistence.MixProject do
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:excoveralls, "~> 0.18", only: :test},
-      {:ex_doc, "~> 0.34", only: :dev, runtime: false},
+      {:ex_doc, "~> 0.40", only: :dev, runtime: false},
       {:postgrex, "~> 0.19", only: :test}
     ]
   end
