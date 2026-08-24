@@ -10,6 +10,17 @@ fragment in [`changelog.d/`](changelog.d/README.md); the fragments are assembled
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
 
+## [0.1.1] 2026-08-24
+
+Patch release: the key-generator compile-race fix from PR #18.
+
+### Fixed
+
+- Custom key-generator validation in `use StatifierPersistence.Ecto` no longer
+  fails spuriously when the generator module is still being compiled by the
+  host's parallel compiler; validation now waits for in-flight compilation
+  (`Code.ensure_compiled/1`) instead of checking `Code.ensure_loaded?/1`.
+
 ## [0.1.0] 2026-08-22
 
 First release: the persistence-first execution loop for the
