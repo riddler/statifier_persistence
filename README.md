@@ -1,7 +1,16 @@
 # StatifierPersistence
 
+[![CI](https://github.com/riddler/statifier_persistence/actions/workflows/ci.yml/badge.svg)](https://github.com/riddler/statifier_persistence/actions/workflows/ci.yml)
+[![Hex.pm Version](https://img.shields.io/hexpm/v/statifier_persistence.svg)](https://hex.pm/packages/statifier_persistence)
+[![Hex Downloads](https://img.shields.io/hexpm/dt/statifier_persistence.svg)](https://hex.pm/packages/statifier_persistence)
+[![Hex Docs](https://img.shields.io/badge/hex-docs-lightgreen.svg)](https://hexdocs.pm/statifier_persistence/)
+[![License](https://img.shields.io/hexpm/l/statifier_persistence.svg)](https://github.com/riddler/statifier_persistence/blob/main/LICENSE)
+
 Durable stepper and storage adapters for
 [Statifier](https://github.com/riddler/statifier-ex).
+
+Documentation lives on [hexdocs](https://hexdocs.pm/statifier_persistence/),
+including the [Surviving a restart](docs/restart-demo.md) guide.
 
 Statifier's pure interpreter contract (machine_state, event -> machine_state,
 effects) makes a persistence-first execution model possible: load a persisted
