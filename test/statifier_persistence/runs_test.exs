@@ -65,7 +65,7 @@ defmodule StatifierPersistence.RunsTest do
           <transition event="go" target="b"/>
       </state>
       <state id="b">
-          <invoke type="myapp:enrich" id="inv1"/>
+          <invoke type="myapp:authorize" id="inv1"/>
           <transition event="error.communication" target="errored"/>
       </state>
       <state id="errored"/>
@@ -410,7 +410,7 @@ defmodule StatifierPersistence.RunsTest do
          %{store: store} do
       machine = compile!(@invoke_chart_source)
       executor = failing_executor([:invoke])
-      invoke_types = InvokeTypes.new(types: ["myapp:enrich"])
+      invoke_types = InvokeTypes.new(types: ["myapp:authorize"])
 
       {:ok, _run, _ms} =
         Runs.create(store, "run-1", machine, executor: executor, invoke_types: invoke_types)

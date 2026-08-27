@@ -17,23 +17,24 @@ disagree, the tests win.
 - `test/statifier_persistence/demo/restart_demo_ecto_test.exs` - the same
   scenario bodies over `Storage.Ecto` and real Postgres.
 - `test/support/demo/` - the host the tests drive: `Host`, `Ledger`,
-  `Runtime`, `EnrichHandler`, `Scenario`.
+  `Runtime`, `AuthorizeHandler`, `Scenario`.
 
 ## The chart and the kill point
 
-The chart (`test/support/demo/scenario.ex`) walks
-`intake -> enriching -> cooling -> settling -> settled`, with an
-`escalated` state as the negative target - reaching it means the host
-lost a race it exists to control, and the tests assert it is never
-entered.
+The chart (`test/support/demo/scenario.ex`) is the family's credit-card
+example domain: a transaction is authorized, captured before its capture
+window closes, then settled. It walks
+`intake -> authorizing -> awaiting_capture -> settling -> settled`, with
+a `voided` state as the negative target - reaching it means the host lost
+a race it exists to control, and the tests assert it is never entered.
 
-The kill point is `enriching`, chosen so the restart happens with the
+The kill point is `authorizing`, chosen so the restart happens with the
 maximum in flight:
 
-- a **pending durable timer** - `enriching`'s onentry armed a 900s
-  `sla-timer`;
-- an **in-flight async invocation** - the `myapp:enrich` invoke started a
-  real worker process.
+- a **pending durable timer** - `authorizing`'s onentry armed a 900s
+  `capture-timer`;
+- an **in-flight async invocation** - the `myapp:authorize` invoke
+  started a real worker process.
 
 At that moment the volatile runtime is stopped - every worker pid and
 armed in-memory timer dies with it - and a fresh host is booted from
@@ -62,8 +63,8 @@ demo makes each half of that visible:
 2. **Timers do not.** Nothing about a pending delayed send survives in
    the position - `delay_ms` is relative and no wall-clock instant is
    stored. `recover/1` re-arms every open timer from the host's own
-   durable rows; the `sla-timer` that fires after the restart was armed
-   before it, and fires from that durable row.
+   durable rows; the `capture-timer` that fires after the restart was
+   armed before it, and fires from that durable row.
 3. **Invocations do not.** The position's `active_invocations` records
    *what was invoked*, never a pid. `recover/1` re-establishes each
    invocation the engine still considers active and the ledger still

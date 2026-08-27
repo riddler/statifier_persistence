@@ -1,8 +1,8 @@
-defmodule StatifierPersistence.Demo.EnrichHandler do
+defmodule StatifierPersistence.Demo.AuthorizeHandler do
   @moduledoc """
-  Serves `<invoke type="myapp:enrich">` for the restart demo
+  Serves `<invoke type="myapp:authorize">` for the restart demo
   (`docs/plans/260822-sp-4an.4-restart-demo-host.md`, Phase 1), following
-  `deps/statifier/docs/extending.md`'s own `MyApp.EnrichHandler` example.
+  the handler shape statifier's own `docs/extending.md` walks through.
 
   `@behaviour Statifier.Invoke.Handler`'s planning callbacks are pure: they
   return instructions, they never touch the ledger or the runtime

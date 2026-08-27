@@ -6,47 +6,53 @@ defmodule StatifierPersistence.Demo.Scenario do
   `StatifierPersistence.Storage.InMemory` (Phase 1-3) and
   `StatifierPersistence.Storage.Ecto` (Phase 4).
 
-  The chart, probe-verified end to end before this plan was written (see
-  the plan's Key Discoveries): `intake` submits into `enriching`, which
-  arms a 900s `sla-timer` and starts an async `myapp:enrich` invocation in
-  parallel; `done.invoke.enrich` moves to `cooling`, which arms a 3600s
-  `reminder-timer`; the still-armed `sla-timer` (never explicitly
-  cancelled - only `<invoke>` exit-cancels, never a plain `<send>`) fires
-  `sla.breach` from inside `cooling`, cancelling `reminder-timer` on the
-  way to `settling`; `ack` reaches the top-level final `settled`. `escalated`
-  is the negative target: reaching it means the demo lost the race it
-  exists to control.
+  The chart is the family's credit-card example domain (the umbrella's
+  `docs/terminology-firewall.md`, "Example domains"): a transaction is
+  authorized, then captured before its capture window closes, then
+  settled.
+
+  Probe-verified end to end before this plan was written (see the plan's
+  Key Discoveries): `intake` submits into `authorizing`, which arms a 900s
+  `capture-timer` and starts an async `myapp:authorize` invocation in
+  parallel; `done.invoke.authorize` moves to `awaiting_capture`, which
+  arms a 3600s `reminder-timer`; the still-armed `capture-timer` (never
+  explicitly cancelled - only `<invoke>` exit-cancels, never a plain
+  `<send>`) fires `capture.window` from inside `awaiting_capture`,
+  cancelling `reminder-timer` on the way to `settling`; `ack` reaches the
+  top-level final `settled`. `voided` is the negative target: reaching it
+  means the demo lost the race it exists to control - the authorization
+  expired unused, or the capture reminder beat the window closing.
   """
 
   alias Statifier.Event
   alias Statifier.Invoke.Types, as: InvokeTypes
   alias Statifier.Send.Routes
-  alias StatifierPersistence.Demo.{EnrichHandler, Host, Ledger, Runtime}
+  alias StatifierPersistence.Demo.{AuthorizeHandler, Host, Ledger, Runtime}
   alias StatifierPersistence.{Runs, Storage}
 
   @chart_source """
   <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="intake">
     <state id="intake">
-      <transition event="submit" target="enriching"/>
+      <transition event="submit" target="authorizing"/>
     </state>
 
-    <state id="enriching">
+    <state id="authorizing">
       <onentry>
-        <send event="sla.breach" id="sla-timer" delay="900s"/>
+        <send event="capture.window" id="capture-timer" delay="900s"/>
       </onentry>
-      <invoke type="myapp:enrich" id="enrich"/>
-      <transition event="done.invoke.enrich" target="cooling"/>
-      <transition event="sla.breach" target="escalated"/>
+      <invoke type="myapp:authorize" id="authorize"/>
+      <transition event="done.invoke.authorize" target="awaiting_capture"/>
+      <transition event="capture.window" target="voided"/>
     </state>
 
-    <state id="cooling">
+    <state id="awaiting_capture">
       <onentry>
         <send event="reminder" id="reminder-timer" delay="3600s"/>
       </onentry>
-      <transition event="sla.breach" target="settling">
+      <transition event="capture.window" target="settling">
         <cancel sendid="reminder-timer"/>
       </transition>
-      <transition event="reminder" target="escalated"/>
+      <transition event="reminder" target="voided"/>
     </state>
 
     <state id="settling">
@@ -54,7 +60,7 @@ defmodule StatifierPersistence.Demo.Scenario do
     </state>
 
     <final id="settled"/>
-    <state id="escalated"/>
+    <state id="voided"/>
   </scxml>
   """
 
@@ -71,16 +77,16 @@ defmodule StatifierPersistence.Demo.Scenario do
 
   @doc "The registered-types snapshot every step in this scenario stamps."
   @spec invoke_types() :: InvokeTypes.t()
-  def invoke_types, do: InvokeTypes.new(types: ["myapp:enrich"])
+  def invoke_types, do: InvokeTypes.new(types: ["myapp:authorize"])
 
   @doc "The handler palette every step in this scenario stamps."
   @spec handlers() :: %{String.t() => module()}
-  def handlers, do: %{"myapp:enrich" => EnrichHandler}
+  def handlers, do: %{"myapp:authorize" => AuthorizeHandler}
 
   @doc """
   Drives the chart straight through, with no restart: `submit` ->
   `finish_invocation` -> a `tick` long enough for the still-armed
-  `sla-timer` to fire -> `ack`. Returns a map with the final `Host.t()`,
+  `capture-timer` to fire -> `ack`. Returns a map with the final `Host.t()`,
   the ledger and runtime it ran against (for a caller that wants to inspect
   them directly), and the leaf-id configuration observed after each of the
   three non-terminal steps, in order.
@@ -110,11 +116,11 @@ defmodule StatifierPersistence.Demo.Scenario do
     host = Host.submit(host, "submit")
     after_submit = Host.config(host)
 
-    host = Host.finish_invocation(host, "enrich", %{"score" => 7})
+    host = Host.finish_invocation(host, "authorize", %{"auth_code" => "A7F3C1"})
     after_finish = Host.config(host)
 
-    # Long enough for the still-armed 900s sla-timer to fire; short of the
-    # 3600s reminder-timer cooling armed, which must never fire.
+    # Long enough for the still-armed 900s capture-timer to fire; short of the
+    # 3600s reminder-timer awaiting_capture armed, which must never fire.
     host = Host.tick(host, :timer.minutes(20))
     after_tick = Host.config(host)
 
@@ -129,8 +135,8 @@ defmodule StatifierPersistence.Demo.Scenario do
   end
 
   @doc """
-  Drives the chart to the kill point (`enriching`, `sla-timer` pending,
-  `enrich` in flight), stops the volatile runtime to simulate the node
+  Drives the chart to the kill point (`authorizing`, `capture-timer` pending,
+  `authorize` in flight), stops the volatile runtime to simulate the node
   dying, cold-boots a fresh `Host.t()` from `run_id` alone, `recover/1`s
   it, then drives the rest of the chart to `:completed` exactly as
   `straight_through/1` does after its own kill point.
@@ -190,7 +196,7 @@ defmodule StatifierPersistence.Demo.Scenario do
     {:ok, machine_state_at_kill} = Host.position(host_at_kill)
     active_invocations_at_kill = map_size(machine_state_at_kill.active_invocations)
 
-    pid_before = Runtime.worker(host_at_kill.runtime, "enrich")
+    pid_before = Runtime.worker(host_at_kill.runtime, "authorize")
     alive_before_stop = Process.alive?(pid_before)
     armed_before_stop = Runtime.armed(host_at_kill.runtime)
 
@@ -225,18 +231,18 @@ defmodule StatifierPersistence.Demo.Scenario do
     armed_after_boot = Runtime.armed(host_after_boot.runtime)
 
     host_after_recover = Host.recover(host_after_boot)
-    pid_after_recover = Runtime.worker(host_after_recover.runtime, "enrich")
+    pid_after_recover = Runtime.worker(host_after_recover.runtime, "authorize")
     # Captured now, before `finish_invocation/4` below cancel-stops this
     # very worker as part of driving the tail - same reason every other
     # "as of this moment" field here is captured eagerly.
     alive_after_recover = pid_after_recover != nil and Process.alive?(pid_after_recover)
     open_timers_after_recover = Ledger.open_timers(ledger, run_id)
 
-    host = Host.finish_invocation(host_after_recover, "enrich", %{"score" => 7})
+    host = Host.finish_invocation(host_after_recover, "authorize", %{"auth_code" => "A7F3C1"})
     after_finish = Host.config(host)
 
-    # Long enough for the still-armed 900s sla-timer to fire; short of the
-    # 3600s reminder-timer cooling armed after the restart, which must
+    # Long enough for the still-armed 900s capture-timer to fire; short of the
+    # 3600s reminder-timer awaiting_capture armed after the restart, which must
     # never fire.
     host = Host.tick(host, :timer.minutes(20))
     after_tick = Host.config(host)

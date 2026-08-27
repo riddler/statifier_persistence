@@ -47,16 +47,16 @@ defmodule StatifierPersistence.Demo.RestartDemoEctoTest do
   test "drives the chart straight through over Postgres" do
     result = Scenario.straight_through({@adapter, @adapter_opts})
 
-    assert result.configs == [["enriching"], ["cooling"], ["settling"]]
-    refute Enum.any?(result.configs, &("escalated" in &1))
+    assert result.configs == [["authorizing"], ["awaiting_capture"], ["settling"]]
+    refute Enum.any?(result.configs, &("voided" in &1))
     assert %Run{status: :completed} = Host.run(result.host)
 
     calls = result.ledger |> Ledger.calls() |> Enum.map(fn {effect, _context} -> effect end)
 
     assert [
              {:datamodel_init, %DatamodelInit{}},
-             {:send_delayed, %SendDelayed{send_id: "sla-timer", event: "sla.breach"}},
-             {:invoke, %Invoke{type: "myapp:enrich", invoke_id: invoke_id}},
+             {:send_delayed, %SendDelayed{send_id: "capture-timer", event: "capture.window"}},
+             {:invoke, %Invoke{type: "myapp:authorize", invoke_id: invoke_id}},
              {:cancel_invoke, %CancelInvoke{invoke_id: invoke_id}},
              {:send_delayed, %SendDelayed{send_id: "reminder-timer", event: "reminder"}},
              {:cancel, %Cancel{send_id: "reminder-timer"}}
@@ -65,7 +65,7 @@ defmodule StatifierPersistence.Demo.RestartDemoEctoTest do
 
   # sabotage: shared with RestartDemoTest's restart test - Runs.write_run/6
   # passing position: :skip on the :update path leaves the stored blob in
-  # intake, so `config_at_kill == ["enriching"]` reds here identically
+  # intake, so `config_at_kill == ["authorizing"]` reds here identically
   # (same scenario body). Run and confirmed red on the InMemory variant,
   # reverted.
   test "resumes from a simulated restart over Postgres" do
@@ -73,7 +73,7 @@ defmodule StatifierPersistence.Demo.RestartDemoEctoTest do
 
     # Kill point, node death, and re-established liveness - same claims
     # the InMemory variant pins in full.
-    assert result.config_at_kill == ["enriching"]
+    assert result.config_at_kill == ["authorizing"]
     refute result.alive_after_stop
     assert is_pid(result.pid_after_recover)
     refute result.pid_after_recover == result.pid_before
@@ -94,15 +94,15 @@ defmodule StatifierPersistence.Demo.RestartDemoEctoTest do
     # The tail finishes with the exact same executor call log - nothing
     # re-emitted across the restart, now with every step's write behind
     # `Storage.Ecto.lock_run/3`.
-    assert result.configs == [["cooling"], ["settling"]]
+    assert result.configs == [["awaiting_capture"], ["settling"]]
     assert %Run{status: :completed} = Host.run(result.host)
 
     calls = result.ledger |> Ledger.calls() |> Enum.map(fn {effect, _context} -> effect end)
 
     assert [
              {:datamodel_init, %DatamodelInit{}},
-             {:send_delayed, %SendDelayed{send_id: "sla-timer", event: "sla.breach"}},
-             {:invoke, %Invoke{type: "myapp:enrich", invoke_id: invoke_id}},
+             {:send_delayed, %SendDelayed{send_id: "capture-timer", event: "capture.window"}},
+             {:invoke, %Invoke{type: "myapp:authorize", invoke_id: invoke_id}},
              {:cancel_invoke, %CancelInvoke{invoke_id: invoke_id}},
              {:send_delayed, %SendDelayed{send_id: "reminder-timer", event: "reminder"}},
              {:cancel, %Cancel{send_id: "reminder-timer"}}
