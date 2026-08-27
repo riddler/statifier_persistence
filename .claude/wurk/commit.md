@@ -64,12 +64,18 @@ reason to move it. Report the finding and stop. `.quality.exs` carries its
 reasoning in comments; a change that moves a value without moving its reason
 is incomplete regardless of who asked.
 
-## Gate attestation: dep-provided mix gate.verify
+## Gate attestation: dep-provided mix quality.verify
 
-The manifest wires `gate.attest` to `mix gate.verify` (bead `sp-7cu`). The
-task ships with the statifier dependency - this repo carries no local copy
-of it, on purpose, per the upstream ruling on st-hcgl. It adds no gate stage
-and does not touch `.quality.exs`; it runs the gate with a machine-readable
-report and attests only a full run (status ok, scope all, no profile, no
-run-narrowing skip). An `--auto` run that reports `attested: false` is the
-check working - report it, do not fake an attestation.
+The manifest wires `gate.attest` to `mix quality.verify`. The task ships with
+`ex_quality` (`~> 0.14`, dev-only), so this repo carries no local copy of it,
+on purpose, per the upstream ruling on st-hcgl. It adds no gate stage and does
+not touch `.quality.exs`; it runs the gate with a machine-readable report and
+attests only a full run (status ok, scope all, no profile, no run-narrowing
+skip). An `--auto` run that reports `attested: false` is the check working -
+report it, do not fake an attestation.
+
+The earlier wiring named `mix gate.verify` (bead `sp-7cu`), which no dep ever
+shipped; it was dropped entirely in f76db7d (`sp-cs0`, fleet ruling F2
+2026-08-27) because the dangling declaration could yield a blocked
+`gate_attest_could_not_start` envelope. Re-pointing it at the published
+`ex_quality` task is what that commit deferred.
