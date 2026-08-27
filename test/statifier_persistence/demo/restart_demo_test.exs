@@ -16,26 +16,26 @@ defmodule StatifierPersistence.Demo.RestartDemoTest do
     result = Scenario.straight_through({InMemory, []})
 
     # The configuration path after each non-terminal step, in order:
-    # intake -> enriching -> cooling -> settling. `escalated` - the
+    # intake -> authorizing -> awaiting_capture -> settling. `voided` - the
     # negative target reached only if the demo lost the race it exists to
     # control - is never among them.
-    assert result.configs == [["enriching"], ["cooling"], ["settling"]]
-    refute Enum.any?(result.configs, &("escalated" in &1))
+    assert result.configs == [["authorizing"], ["awaiting_capture"], ["settling"]]
+    refute Enum.any?(result.configs, &("voided" in &1))
 
     assert %Run{status: :completed} = Host.run(result.host)
 
     # The exact executor call log: the create-time `:datamodel_init`
     # baseline, one send_delayed per armed timer, one invoke, one
     # cancel_invoke on the invocation's exit, and one cancel of the
-    # reminder-timer the still-armed sla-timer's fire drives - nothing
+    # reminder-timer the still-armed capture-timer's fire drives - nothing
     # executed twice, and `:done` never reaches the executor at all (the
     # lifecycle consumes it before the seam).
     calls = result.ledger |> Ledger.calls() |> Enum.map(fn {effect, _context} -> effect end)
 
     assert [
              {:datamodel_init, %DatamodelInit{}},
-             {:send_delayed, %SendDelayed{send_id: "sla-timer", event: "sla.breach"}},
-             {:invoke, %Invoke{type: "myapp:enrich", invoke_id: invoke_id}},
+             {:send_delayed, %SendDelayed{send_id: "capture-timer", event: "capture.window"}},
+             {:invoke, %Invoke{type: "myapp:authorize", invoke_id: invoke_id}},
              {:cancel_invoke, %CancelInvoke{invoke_id: invoke_id}},
              {:send_delayed, %SendDelayed{send_id: "reminder-timer", event: "reminder"}},
              {:cancel, %Cancel{send_id: "reminder-timer"}}
@@ -47,7 +47,7 @@ defmodule StatifierPersistence.Demo.RestartDemoTest do
   # post-create step (`step_tail/6` reloads the position from storage on
   # every call) then persists nothing, so the stored blob never leaves
   # `intake`: this test's very first assertion, `config_at_kill ==
-  # ["enriching"]`, fails immediately (left: `["intake"]`). Confirmed by
+  # ["authorizing"]`, fails immediately (left: `["intake"]`). Confirmed by
   # actually running the mutation - it also fails the straight-through
   # test the same way, but this test's own kill-point assertion is
   # sufficient to make it red on its own. Reverted and confirmed green.
@@ -55,9 +55,9 @@ defmodule StatifierPersistence.Demo.RestartDemoTest do
     result = Scenario.across_restart({InMemory, []})
 
     # --- at the kill point ---
-    assert result.config_at_kill == ["enriching"]
-    assert [%{send_id: "sla-timer"}] = result.open_timers_at_kill
-    assert [%{invoke_id: "enrich", type: "myapp:enrich"}] = result.open_invocations_at_kill
+    assert result.config_at_kill == ["authorizing"]
+    assert [%{send_id: "capture-timer"}] = result.open_timers_at_kill
+    assert [%{invoke_id: "authorize", type: "myapp:authorize"}] = result.open_invocations_at_kill
     assert result.active_invocations_at_kill == 1
 
     assert is_pid(result.pid_before)
@@ -87,15 +87,15 @@ defmodule StatifierPersistence.Demo.RestartDemoTest do
     assert is_pid(result.pid_after_recover)
     assert result.alive_after_recover
     refute result.pid_after_recover == result.pid_before
-    assert [%{send_id: "sla-timer"}] = result.open_timers_after_recover
+    assert [%{send_id: "capture-timer"}] = result.open_timers_after_recover
 
     # --- the tail: finish_invocation -> tick -> ack ---
-    assert result.configs == [["cooling"], ["settling"]]
-    refute Enum.any?(result.configs, &("escalated" in &1))
+    assert result.configs == [["awaiting_capture"], ["settling"]]
+    refute Enum.any?(result.configs, &("voided" in &1))
     assert %Run{status: :completed} = Host.run(result.host)
 
     # The reminder-timer row (armed after the restart) is dropped once its
-    # cancel is driven by the sla-timer's fire - no row of any kind is left
+    # cancel is driven by the capture-timer's fire - no row of any kind is left
     # open once the run settles.
     assert Ledger.open_timers(result.ledger, result.run_id) == []
 
@@ -107,26 +107,26 @@ defmodule StatifierPersistence.Demo.RestartDemoTest do
     run_id = result.host.run_id
 
     assert [
-             {:arm_timer, {^run_id, sla_ordinal}},
-             {:record_invocation, {^run_id, "enrich"}},
+             {:arm_timer, {^run_id, capture_ordinal}},
+             {:record_invocation, {^run_id, "authorize"}},
              {:chart_fetched, ^content_hash},
              {:arm_timer, {^run_id, reminder_ordinal}}
            ] = Ledger.side_effects(result.ledger)
 
-    refute sla_ordinal == reminder_ordinal
+    refute capture_ordinal == reminder_ordinal
 
     # The executor call log, on exact contents - identical to the
     # straight-through run's. The restart added no executor call at all:
     # `recover/1` re-establishes liveness host-side, through the handler,
     # never back through the seam, so neither the `:invoke` nor the
-    # sla-timer's `:send_delayed` was re-emitted - st-ADR-0060's "resume
+    # capture-timer's `:send_delayed` was re-emitted - st-ADR-0060's "resume
     # restores position, not liveness" stated as an assertion.
     calls = result.ledger |> Ledger.calls() |> Enum.map(fn {effect, _context} -> effect end)
 
     assert [
              {:datamodel_init, %DatamodelInit{}},
-             {:send_delayed, %SendDelayed{send_id: "sla-timer", event: "sla.breach"}},
-             {:invoke, %Invoke{type: "myapp:enrich", invoke_id: invoke_id}},
+             {:send_delayed, %SendDelayed{send_id: "capture-timer", event: "capture.window"}},
+             {:invoke, %Invoke{type: "myapp:authorize", invoke_id: invoke_id}},
              {:cancel_invoke, %CancelInvoke{invoke_id: invoke_id}},
              {:send_delayed, %SendDelayed{send_id: "reminder-timer", event: "reminder"}},
              {:cancel, %Cancel{send_id: "reminder-timer"}}
@@ -163,14 +163,14 @@ defmodule StatifierPersistence.Demo.RestartDemoTest do
       )
 
     host = Host.submit(host, "submit")
-    assert Host.config(host) == ["enriching"]
+    assert Host.config(host) == ["authorizing"]
     {:ok, position_before} = Host.position(host)
 
     {:ok, wrong_machine} = Statifier.compile(@wrong_revision_source)
     refute wrong_machine.identity.content_hash == host.machine.identity.content_hash
 
     result =
-      Runs.step(store, run_id, wrong_machine, Event.external("sla.breach"),
+      Runs.step(store, run_id, wrong_machine, Event.external("capture.window"),
         executor: fn _effect, _context -> :ok end,
         invoke_types: Scenario.invoke_types(),
         routes: Routes.new()
@@ -200,7 +200,7 @@ defmodule StatifierPersistence.Demo.RestartDemoTest do
   # stall (no step's result is ever stored), but asymmetrically: the
   # original's *loaded* configs stay `["intake"]` throughout, while the
   # replay's configs come off each step's *returned* state, whose first
-  # element still advances to `["enriching"]` - the sequences diverge and
+  # element still advances to `["authorizing"]` - the sequences diverge and
   # the `Enum.drop(replay_result.configs, 1) == original_configs`
   # assertion goes red (confirmed by running the mutation; the earlier
   # tests in this file go red on their own assertions too). Reverted and
@@ -227,7 +227,7 @@ defmodule StatifierPersistence.Demo.RestartDemoTest do
 
     # `result.config_at_kill` is the config after tape event 1 (`submit`);
     # `result.configs` are the configs after tape events 2 and 3
-    # (`finish_invocation`, the fired `sla-timer`); `Host.config/1` on the
+    # (`finish_invocation`, the fired `capture-timer`); `Host.config/1` on the
     # finished host is the config after tape event 4 (`ack`) - empty,
     # because reaching the top-level `<final>` exits every state. Dropping
     # `replay_result.configs`' element zero (the pre-tape config right
@@ -239,7 +239,7 @@ defmodule StatifierPersistence.Demo.RestartDemoTest do
     # that stalls the restarted run and the replay identically) still go
     # red rather than sliding through the comparison above.
     assert replay_result.configs ==
-             [["intake"], ["enriching"], ["cooling"], ["settling"], []]
+             [["intake"], ["authorizing"], ["awaiting_capture"], ["settling"], []]
 
     # Struct for struct, not tag for tag or count for count. This holds
     # because the deterministic fold state each effect carries -
