@@ -31,3 +31,6 @@ statifier_persistence-*.tar
 # Changelog fragments are tracked. A global gitignore rule for `*.d` (C/C++
 # dependency files) matches this directory name and would otherwise hide them.
 !changelog.d/
+
+# Local beads telemetry churn; the tracker syncs via refs/dolt/data.
+.beads/interactions.jsonl
