@@ -10,6 +10,22 @@ fragment in [`changelog.d/`](changelog.d/README.md); the fragments are assembled
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
 
+## [0.1.3] 2026-08-27
+
+Docs release: README and guide refresh onto the family's canonical example
+domains. No library code changes.
+
+### Changed
+
+- The README now walks a full worked run in the card-processing domain -
+  load, step, execute effects, persist - and continues it across a restart,
+  with a new module map; the examples are executed by a test so they cannot
+  drift from the real API.
+- Example domains follow the family rule: card processing and the signup
+  wizard with A/B testing only.
+- Agent tooling: gate attestation points at `mix quality.verify` (shipped
+  by ex_quality 0.14) instead of a retired local task.
+
 ## [0.1.2] 2026-08-24
 
 Docs release: the hexdocs/README overhaul from PR #20. No library code changes.
