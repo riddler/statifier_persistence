@@ -27,6 +27,7 @@
     "full": ["mix", "quality"],
     "loop": ["mix", "quality", "--profile", "loop"],
     "report": ["mix", "quality", "--report", "-"],
+    "attest": ["mix", "quality.verify"],
     "build_paths": ["lib/", "test/", "config/", "mix.exs", "mix.lock"],
     "also_gated_paths": [],
     "moving_files": [".quality.exs", "coveralls.json"],
