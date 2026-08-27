@@ -104,8 +104,10 @@ days or survive deploys should not need long-lived Session processes at all -
 but every host currently hand-rolls the loop, the storage guard, and the crash
 semantics. This package is that loop, packaged.
 
-**Nothing is implemented yet.** The repository holds the scaffold only, so
-almost every convention below is inherited rather than demonstrated.
+The package is released (0.1.x on Hex) and the whole loop exists: the
+storage-adapter behaviour and its identity guard, the in-memory and Ecto
+adapters, the run lifecycle, the executor seam, and per-run serialization.
+The README's worked example drives them end to end.
 
 Always refer to state machines as **state charts**, as statifier-ex does.
 
