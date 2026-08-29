@@ -11,6 +11,16 @@ if Code.ensure_loaded?(Ecto.Migration) do
     identity columns (`content_hash`, `session_id`, `run_id`) are `text`
     with their unique indexes regardless of the configured key scheme:
     the identity guard never touches a surrogate key.
+
+    This migration always emits `:binary` (`bytea`) for the three blob
+    columns (`identity_blob`, `chart_blob`, `position_blob`) and does
+    not read `Config`'s `:blob_type` option. A custom `:blob_type` whose
+    underlying database type is still binary (an envelope-encrypting
+    type that dumps to and loads from raw bytes, for example) needs no
+    DDL change - this migration already matches it. A `:blob_type` that
+    dumps to a different underlying type (text, jsonb, a Postgres
+    domain) needs the host to alter those three columns itself; this
+    helper does not do it for them.
     """
 
     use Ecto.Migration

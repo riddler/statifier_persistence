@@ -13,7 +13,8 @@ defmodule StatifierPersistence.BootstrapMigrations do
 
   @migrations [
     {20_260_822_000_101, __MODULE__.DefaultTables},
-    {20_260_822_000_102, __MODULE__.OverriddenTables}
+    {20_260_822_000_102, __MODULE__.OverriddenTables},
+    {20_260_829_000_103, __MODULE__.BlobTypedTables}
   ]
 
   defmodule DefaultTables do
@@ -36,6 +37,17 @@ defmodule StatifierPersistence.BootstrapMigrations do
 
     def up, do: Migrations.up(for: EctoHosts.Overridden)
     def down, do: Migrations.down(for: EctoHosts.Overridden)
+  end
+
+  defmodule BlobTypedTables do
+    @moduledoc false
+    use Ecto.Migration
+
+    alias StatifierPersistence.Ecto.Migrations
+    alias StatifierPersistence.EctoHosts
+
+    def up, do: Migrations.up(for: EctoHosts.BlobTyped)
+    def down, do: Migrations.down(for: EctoHosts.BlobTyped)
   end
 
   @doc "Applies every bootstrap migration, tolerating `:already_up`."

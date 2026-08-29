@@ -222,6 +222,61 @@ as a transaction-scoped advisory-plus-row lock (ADR-0004 as amended).
 In your test suite, pass `sandbox: true` so each test runs in its own
 `Ecto.Adapters.SQL.Sandbox` checkout via the adapter's `isolate/1`.
 
+### Encrypting the blob columns
+
+`use StatifierPersistence.Ecto` hard-codes `:binary` for its three blob
+columns (`identity_blob`, `chart_blob`, `position_blob`) by default -
+plain `bytea`, byte-identical round trip, nothing extra. Pass
+`:blob_type` to put a custom Ecto type on those three columns instead,
+and encryption at rest needs no wrapping adapter:
+
+    defmodule MyApp.Persistence do
+      use StatifierPersistence.Ecto,
+        repo: MyApp.Repo,
+        blob_type: MyApp.EncryptedBlob
+    end
+
+`:blob_type` accepts a bare module implementing `Ecto.Type`, or a
+`{module, opts}` tuple for an `Ecto.ParameterizedType`. It reaches only
+those three columns: keys and lookup columns (`content_hash`,
+`session_id`, `run_id`, `status`, `failure`) always stay plain text,
+because the identity guard and the unique indexes depend on reading
+them back verbatim.
+
+The shape a production `MyApp.EncryptedBlob` needs is a vault-backed or
+envelope-encrypting `Ecto.Type` - `dump/1` encrypts on the way in,
+`load/1` decrypts on the way out. This package takes no position on
+which key-management scheme backs it; that choice belongs to the host.
+To prove the shape without any encryption dependency, here is a minimal
+`Ecto.Type` that reversibly transforms every byte (not encryption - a
+stand-in to show the wiring):
+
+    defmodule MyApp.ReversibleBlob do
+      use Ecto.Type
+
+      @mask 0xA5
+
+      def type, do: :binary
+      def cast(binary) when is_binary(binary), do: {:ok, binary}
+      def cast(_other), do: :error
+      def dump(binary) when is_binary(binary), do: {:ok, transform(binary)}
+      def dump(_other), do: :error
+      def load(binary) when is_binary(binary), do: {:ok, transform(binary)}
+      def load(_other), do: :error
+
+      defp transform(binary) do
+        for <<byte <- binary>>, into: <<>>, do: <<Bitwise.bxor(byte, @mask)>>
+      end
+    end
+
+The shipped V01 migration always emits `:binary` (`bytea`) for the
+three blob columns and does not read `:blob_type`. A `:blob_type` whose
+underlying database type is still binary - an envelope-encrypting type
+that dumps to and loads from raw bytes, like the sketch above - needs
+no DDL change. A `:blob_type` that dumps to a different underlying type
+(text, jsonb, a Postgres domain) needs you to alter those three columns
+yourself; the migrations helper does not do it for you.
+
 ## Running the tests
 
 The suite includes database-backed tests against a real Postgres server -

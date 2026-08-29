@@ -4,8 +4,10 @@ defmodule StatifierPersistence.EctoTest do
   alias StatifierPersistence.Ecto.Config
   alias StatifierPersistence.Ecto.KeyGenerator
   alias StatifierPersistence.EctoHosts.Bigserial
+  alias StatifierPersistence.EctoHosts.BlobTyped
   alias StatifierPersistence.EctoHosts.Default
   alias StatifierPersistence.EctoHosts.Overridden
+  alias StatifierPersistence.Test.ReversibleBlobType
   alias StatifierPersistence.TestRepo
 
   describe "zero-config host (repo: only)" do
@@ -129,6 +131,39 @@ defmodule StatifierPersistence.EctoTest do
     end
   end
 
+  describe "blob_type option" do
+    # sabotage: Config.new/1 blob_type default changed from :binary to
+    # {ReversibleBlobType, []} -> red (Default's blob columns came back
+    # typed ReversibleBlobType instead of :binary). Verified red,
+    # reverted.
+    test "defaults to :binary, unchanged from before the option existed" do
+      assert %Config{blob_type: :binary} = Default.__statifier_persistence__(:config)
+      assert Default.Chart.__schema__(:type, :identity_blob) == :binary
+      assert Default.Chart.__schema__(:type, :chart_blob) == :binary
+      assert Default.Position.__schema__(:type, :position_blob) == :binary
+      assert Default.Run.__schema__(:type, :position_blob) == :binary
+    end
+
+    # sabotage: schema_ast's blob-column branch applied blob_type to
+    # content_hash too -> red (content_hash's type stopped being
+    # :string). Verified red, reverted.
+    test "a custom blob_type reaches only the three blob columns" do
+      assert %Config{blob_type: {ReversibleBlobType, []}} =
+               BlobTyped.__statifier_persistence__(:config)
+
+      assert BlobTyped.Chart.__schema__(:type, :identity_blob) == ReversibleBlobType
+      assert BlobTyped.Chart.__schema__(:type, :chart_blob) == ReversibleBlobType
+      assert BlobTyped.Position.__schema__(:type, :position_blob) == ReversibleBlobType
+      assert BlobTyped.Run.__schema__(:type, :position_blob) == ReversibleBlobType
+
+      assert BlobTyped.Chart.__schema__(:type, :content_hash) == :string
+      assert BlobTyped.Position.__schema__(:type, :session_id) == :string
+      assert BlobTyped.Run.__schema__(:type, :run_id) == :string
+      assert BlobTyped.Run.__schema__(:type, :status) == :string
+      assert BlobTyped.Run.__schema__(:type, :failure) == :string
+    end
+  end
+
   describe "compile-time validation" do
     # sabotage: reject_unknown! made a no-op -> red (nothing raised)
     test "an unknown option raises ArgumentError at compile time" do
@@ -173,6 +208,30 @@ defmodule StatifierPersistence.EctoTest do
         """)
       end
     end
+
+    # sabotage: ensure_blob_type_loaded! made a no-op (always :ok) -> red
+    # (nothing raised for a module that cannot be loaded)
+    test "a blob_type module that cannot be loaded raises ArgumentError at compile time" do
+      assert_raise ArgumentError, ~r/could not be loaded/, fn ->
+        Code.compile_string("""
+        defmodule StatifierPersistence.EctoTest.BadBlobTypeModule do
+          use StatifierPersistence.Ecto, repo: Foo, blob_type: NoSuchModuleAtAll
+        end
+        """)
+      end
+    end
+
+    # sabotage: validate_blob_type!'s Ecto.Type/ParameterizedType check dropped, always
+    # accepted -> red (nothing raised for a module that is neither)
+    test "a blob_type module implementing neither Ecto.Type nor Ecto.ParameterizedType raises" do
+      assert_raise ArgumentError, ~r/must implement Ecto.Type or Ecto.ParameterizedType/, fn ->
+        Code.compile_string("""
+        defmodule StatifierPersistence.EctoTest.BadBlobTypeBehaviour do
+          use StatifierPersistence.Ecto, repo: Foo, blob_type: Enum
+        end
+        """)
+      end
+    end
   end
 
   describe "Config.new/1 validation not reachable through a compiling use" do
@@ -209,6 +268,41 @@ defmodule StatifierPersistence.EctoTest do
 
       assert_raise ArgumentError, ~r/expected a keyword list/, fn ->
         Config.new(%{repo: TestRepo})
+      end
+    end
+
+    # sabotage: validate_blob_type!'s bare-atom clause resolved to :binary
+    # unconditionally -> red (a bogus module compiled to :binary instead of
+    # raising)
+    test "resolves a bare module as {module, []}" do
+      assert %Config{blob_type: {ReversibleBlobType, []}} =
+               Config.new(repo: TestRepo, blob_type: ReversibleBlobType)
+    end
+
+    # sabotage: validate_blob_type!'s {module, opts} branch stored {module, []},
+    # dropping the given opts -> red (this test caught it; the two "resolves"
+    # tests above/below stayed green because they never pass opts). Verified
+    # red, reverted.
+    test "resolves a {module, opts} tuple, keeping the opts" do
+      assert %Config{blob_type: {ReversibleBlobType, [foo: 1]}} =
+               Config.new(repo: TestRepo, blob_type: {ReversibleBlobType, foo: 1})
+    end
+
+    # sabotage: validate_blob_type! second-element check used is_list/1 instead
+    # of Keyword.keyword?/1 -> red (a non-keyword list like [1, 2] slipped
+    # through instead of raising)
+    test "rejects a {module, opts} tuple whose opts are not a keyword list" do
+      assert_raise ArgumentError, ~r/second element must be a keyword list/, fn ->
+        Config.new(repo: TestRepo, blob_type: {ReversibleBlobType, [1, 2]})
+      end
+    end
+
+    # sabotage: validate_blob_type!'s catch-all clause made a no-op
+    # (`do: other`) instead of raising -> red (nothing raised for a
+    # malformed value). Verified red, reverted.
+    test "rejects a malformed blob_type value" do
+      assert_raise ArgumentError, ~r/:blob_type option must be :binary/, fn ->
+        Config.new(repo: TestRepo, blob_type: "binary")
       end
     end
   end

@@ -20,19 +20,34 @@ if Code.ensure_loaded?(Ecto) do
     (ADR-0002 decision 3), and the migrations helper consumes the same
     resolved configuration so schemas and DDL cannot disagree. See
     `StatifierPersistence.Ecto.Config` for the options (`:key`,
-    `:table_prefix`, `:tables`, `:prefix`).
+    `:table_prefix`, `:tables`, `:prefix`, `:blob_type`).
 
     The engine identity columns (`content_hash`, `session_id`, `run_id`)
     are stored verbatim as strings and are never touched by the
     configured key scheme - ADR-0002 decision 1.
+
+    `:blob_type` reaches exactly three columns - `identity_blob`,
+    `chart_blob`, `position_blob` - and nothing else: a host wanting
+    encryption at rest for those payload columns passes a custom
+    `Ecto.Type` or `Ecto.ParameterizedType` there and gets it applied
+    with zero further wiring. The identity and lookup columns
+    (`content_hash`, `session_id`, `run_id`, `status`, `failure`) stay
+    plain text regardless - the identity guard and the unique indexes
+    depend on reading them back verbatim.
     """
 
     alias StatifierPersistence.Ecto.Config
 
     @schema_modules [{Chart, :charts}, {Position, :positions}, {Run, :runs}]
 
+    # The columns :blob_type reaches - identity/lookup columns never do
+    # (moduledoc, Config's :blob_type option).
+    @blob_columns [:identity_blob, :chart_blob, :position_blob]
+
     # The storage contract's field set is the column list (ADR-0003
     # decision 3); the migrations helper's V01 DDL mirrors these exactly.
+    # Blob columns are typed :binary here; schema_ast/3 substitutes the
+    # configured :blob_type for any column in @blob_columns.
     @fields %{
       charts: [content_hash: :string, identity_blob: :binary, chart_blob: :binary],
       positions: [
@@ -83,7 +98,14 @@ if Code.ensure_loaded?(Ecto) do
     defp schema_ast(host, table, %Config{} = config) do
       fields =
         for {field, type} <- Map.fetch!(@fields, table) do
-          quote do: field(unquote(field), unquote(type))
+          args =
+            if field in @blob_columns do
+              Config.blob_field_args(config, field)
+            else
+              [field, type]
+            end
+
+          quote do: field(unquote_splicing(args))
         end
 
       quote do
