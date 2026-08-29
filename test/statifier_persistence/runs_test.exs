@@ -41,6 +41,45 @@ defmodule StatifierPersistence.RunsTest do
   </scxml>
   """
 
+  # The queue-discard fixture: "finish" enters `outcome`, a <final> child of
+  # the compound `root`. Entering it runs the onentry <raise>, so
+  # `outcome.ok` and the `done.state.root` the final child generates are both
+  # on the internal queue; `outcome.ok` is processed first, root's transition
+  # takes the session into the top-level <final>, and the session exits with
+  # `done.state.root` never processed. Upstream discards the remaining queue
+  # as the last step of the exit procedure, so the terminated state is
+  # quiescent and reaches the persist tail.
+  @queued_done_state_chart_source """
+  <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="root">
+      <state id="root" initial="working">
+          <transition event="outcome.ok" target="completed"/>
+          <state id="working">
+              <transition event="finish" target="outcome"/>
+          </state>
+          <final id="outcome">
+              <onentry><raise event="outcome.ok"/></onentry>
+          </final>
+      </state>
+      <final id="completed"/>
+  </scxml>
+  """
+
+  # The other half of the same exit procedure: a top-level <final> whose
+  # <donedata> expression cannot evaluate. The failure raises an
+  # error.execution during the exit walk, which the same discard takes with
+  # the rest of the queue - so this terminates quiescent too, and the run
+  # completes rather than failing.
+  @failing_donedata_chart_source """
+  <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="a">
+      <state id="a">
+          <transition event="finish" target="done"/>
+      </state>
+      <final id="done">
+          <donedata><content expr="undeclared_var"/></donedata>
+      </final>
+  </scxml>
+  """
+
   # An immediate <send target="#_parent"> whose emission depends on the
   # routes snapshot stamped before the step (ADR-0048): unreachable parent
   # -> rejected in the core, no :send crosses the seam; reachable parent ->
@@ -292,6 +331,55 @@ defmodule StatifierPersistence.RunsTest do
 
       assert {:ok, %{status: :completed}} = Storage.fetch_run(store, "run-1")
       refute Enum.any?(RecordingExecutor.effects(), &match?({:done, _}, &1))
+    end
+
+    # sabotage: pointing the statifier dep back at the commit before the
+    # queue-discard fix (STATIFIER_PATH at 1f865f7^) -> red, the terminated
+    # state carries the unprocessed done.state.root and assert_quiescent/2
+    # raises "loop bug: non-quiescent MachineState reached the persist tail"
+    # before any run record is written. Verified red, reverted.
+    test "a top-level final reached with a sibling done.state still queued completes the run",
+         %{store: store} do
+      machine = compile!(@queued_done_state_chart_source)
+      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+
+      assert {:ok, %Run{status: :completed, failure: nil},
+              %MachineState{status: :done} = terminal} =
+               Runs.step(store, "run-1", machine, Event.external("finish"),
+                 executor: RecordingExecutor
+               )
+
+      assert MachineState.internal_queue_empty?(terminal)
+      assert {:ok, %{status: :completed}} = Storage.fetch_run(store, "run-1")
+
+      assert {:ok, persisted} = Storage.load_run_position(store, "run-1", machine)
+      assert MachineState.internal_queue_empty?(persisted)
+    end
+
+    # The failing <donedata> expression leaves Effect.Done's donedata
+    # :undefined upstream, and Runs consumes the {:done, _} effect rather
+    # than handing it to the executor, so what this asserts here is the
+    # persistence-visible half: the failure is not a run failure.
+    #
+    # sabotage: same dep mutation as the test above (STATIFIER_PATH at
+    # 1f865f7^) -> red, the error.execution the failed expression raises
+    # survives on the terminated state's queue and assert_quiescent/2
+    # raises. Verified red, reverted.
+    test "a top-level final whose <donedata> expression fails completes the run", %{store: store} do
+      machine = compile!(@failing_donedata_chart_source)
+      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+
+      assert {:ok, %Run{status: :completed, failure: nil},
+              %MachineState{status: :done} = terminal} =
+               Runs.step(store, "run-1", machine, Event.external("finish"),
+                 executor: RecordingExecutor
+               )
+
+      assert MachineState.internal_queue_empty?(terminal)
+      assert {:ok, %{status: :completed}} = Storage.fetch_run(store, "run-1")
+
+      assert {:ok, persisted} = Storage.load_run_position(store, "run-1", machine)
+      assert MachineState.internal_queue_empty?(persisted)
     end
 
     # sabotage: Run.from_record/1 hardcodes status: :active -> red
