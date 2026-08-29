@@ -4,13 +4,15 @@ Status: proposed (2026-08-29)
 
 ## Context
 
-A run record carries engine identities only: `run_id`, `status`,
-`content_hash`, `failure`, plus the position blob keyed by the engine
-session id (ADR-0003 decision 3, ADR-0004 decision 1). Nothing on it
-answers the question a multi-tenant host asks first - "list the runs for
-scope X" - where X is a tenant, a subject entity, or a correlation id the
-host already keys its own tables by. Today such a host maintains a side
-table keyed by `run_id` and joins it against the runs table itself.
+A run record is keyed by its `run_id` and carries engine identities and
+opaque blobs only: `status`, `content_hash`, `identity_blob`, a nullable
+`position_blob`, and `failure` (ADR-0004 decision 1). The positions table,
+not the run record, is the session-keyed one (ADR-0003 decision 3).
+Nothing on the run record answers the question a multi-tenant host asks
+first - "list the runs for scope X" - where X is a tenant, a subject
+entity, or a correlation id the host already keys its own tables by.
+Today such a host maintains a side table keyed by `run_id` and joins it
+against the runs table itself.
 
 The decision bead (sp-8in) framed two arms and asked that the trade be
 weighed explicitly rather than assumed:
@@ -34,13 +36,13 @@ so the pattern the guidance would bless is one this package cannot keep
 stable for the host anyway.
 
 The hazard arm (a) creates is disclosure, and it is created by a decision
-made elsewhere in this repository. sp-km3's `:blob_type` encrypts the
-chart and position blobs at rest; a metadata column is not a blob and is
-not covered by it. A host that files a customer's name, email, or card
-data into a queryable metadata column has defeated its own encryption at
-rest while believing it is on - the encryption is still working, on the
-columns it covers. That is why decision 2 below is written as a hard rule
-in the record rather than left as advice in a guide.
+made elsewhere in this repository. sp-km3's `:blob_type` option, now
+landed, encrypts the chart and position blobs at rest; a metadata column
+is not a blob and is not covered by it. A host that files a customer's
+name, email, or card data into a queryable metadata column has defeated
+its own encryption at rest while believing it is on - the encryption is
+still working, on the columns it covers. That is why decision 2 below is
+written as a hard rule in the record rather than left as advice in a guide.
 
 ## Decision
 
@@ -85,8 +87,28 @@ change. Concretely:
   all pairs is the whole query surface - no ranges, no partial matches, no
   containment operators, and no ordering guarantee. A host needing more
   than that is running its own query against its own column, which
-  ADR-0002's configurable table names already allow.
+  ADR-0002's configurable table names already allow. `jsonb` holds only
+  JSON-representable values, so `term` in the type above is narrower here
+  than in Elixir: a tuple, a pid, or a reference has no `jsonb` form. What
+  that adapter does with such a value - refuse at open, or raise from the
+  encoder - is a failure shape sp-6ac picks, not one this record fixes.
 - Any other adapter refuses, and refusing is conformance, not a gap.
+
+**This record amends ADR-0003 decision 1.** That decision says every
+data-bearing adapter callback takes and returns "binaries plus engine
+identity strings", echoed as "and nothing else" in
+`StatifierPersistence.Storage.Adapter`'s moduledoc, and its `isolate/1` and
+`lock_run/3` amendments left the clause standing because neither callback
+carries data at all. The metadata map does: it rides as a field on
+`Adapter.run_record`, through `insert_run/2`, `fetch_run/2`, and
+`update_run/2`. So decision 1's blobs-plus-identities clause is amended
+here to also admit that one optional map of host identities - opaque in
+the same strong sense as `chart_blob`, never decoded, inspected, or
+interpreted by an adapter beyond storing and returning it. Nothing else in
+ADR-0003 changes: the identity guard (decision 2), the engine-identity
+keying (decision 3), and the error vocabulary (decision 4) all hold
+unmodified. sp-6ac carries the moduledoc wording and ADR-0003's amendment
+line with the code.
 
 **4. Migration shape, conformance case, and worked example belong to the
 implementation bead.** They are named here so the record and the code
