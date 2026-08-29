@@ -7,7 +7,7 @@
 | [0003](0003-storage-adapter-behaviour-and-the-identity-guard.md) | The storage adapter stores opaque blobs keyed by engine identities; the identity guard lives above every adapter and cannot be skipped | accepted |
 | [0004](0004-run-lifecycle-executor-seam-and-serialization.md) | The run record owns its position, the loop's order is the contract, effects cross a host-executor seam (failures re-enter as `error.communication`), and per-run serialization is a pluggable strategy | accepted |
 | [0005](0005-ecto-in-package-and-postgres-test-harness.md) | The Ecto layer ships in this package behind optional `ecto_sql`; the test harness is a real Postgres server with the SQL sandbox, no skip tag | accepted |
-| [0006](0006-optional-opaque-run-metadata.md) | Runs carry an optional opaque `metadata` map of host identities (never personal data); an adapter that cannot store it refuses at open with `{:error, :metadata_unsupported}`, and the Ecto adapter stores jsonb with an equality-match list helper | proposed |
+| [0006](0006-optional-opaque-run-metadata.md) | Runs carry an optional opaque `metadata` map of host identities (never personal data); an adapter that cannot store it refuses at open with `{:error, :metadata_unsupported}`, and the Ecto adapter stores jsonb with an equality-match list helper | accepted |
 
 New ADRs: next number, same three-section format (Context, Decision,
 Consequences). Pick the number against a freshly fetched remote. A bare
