@@ -26,6 +26,22 @@ if Code.ensure_loaded?(Ecto.Migration) do
     the target (default: the newest this package knows); `down/1` rolls back
     from the newest through the target (default: V01, i.e. everything).
 
+    `from:` selects where `up/1` starts (default: V01). It is what a host
+    already running an older version writes its *next* migration with: a
+    host that ran the migration above when this package shipped only V01
+    picks up V02 with a second ordinary migration,
+
+        defmodule MyApp.Repo.Migrations.AddStatifierPersistenceRunMetadata do
+          use Ecto.Migration
+
+          def up, do: StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, from: 2)
+          def down, do: StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence, version: 2)
+        end
+
+    rather than re-running V01's `CREATE TABLE` against tables that already
+    exist. A host migrating a fresh database with the first spelling gets
+    every version in one call and needs no second migration at all.
+
     When `prefix:` names a Postgres schema, `up/1` creates the schema if it
     does not exist; `down/1` leaves the schema in place (dropping a schema
     the host may share is not this package's call).
@@ -34,21 +50,32 @@ if Code.ensure_loaded?(Ecto.Migration) do
     alias StatifierPersistence.Ecto.Config
 
     @initial_version 1
-    @current_version 1
+    @current_version 2
 
-    @migrations %{1 => StatifierPersistence.Ecto.Migrations.V01}
+    @migrations %{
+      1 => StatifierPersistence.Ecto.Migrations.V01,
+      2 => StatifierPersistence.Ecto.Migrations.V02
+    }
 
     @doc """
-    Migrates the tables up through `version:` (default: the newest).
+    Migrates the tables from `from:` (default: V01) up through `version:`
+    (default: the newest).
 
     Takes `for: HostModule` or the literal options `use` takes - see the
     moduledoc.
     """
     @spec up(keyword()) :: :ok
     def up(opts) when is_list(opts) do
+      {from, opts} = Keyword.pop(opts, :from, @initial_version)
+      validate_version!(from, "from")
       {config, target} = parse!(opts, @current_version)
 
-      Enum.each(@initial_version..target, fn version ->
+      if from > target do
+        raise ArgumentError,
+              "from: #{from} is above version: #{target}; up/1 does not roll back"
+      end
+
+      Enum.each(from..target, fn version ->
         Map.fetch!(@migrations, version).up(config)
       end)
     end
@@ -68,15 +95,20 @@ if Code.ensure_loaded?(Ecto.Migration) do
 
     defp parse!(opts, default_version) do
       {version, opts} = Keyword.pop(opts, :version, default_version)
+      validate_version!(version, "version")
 
+      {config!(opts), version}
+    end
+
+    defp validate_version!(version, name) do
       if not (is_integer(version) and version in @initial_version..@current_version) do
         raise ArgumentError,
-              "unknown migration version #{inspect(version)}; " <>
+              "unknown migration #{name} #{inspect(version)}; " <>
                 "this package knows versions #{@initial_version} " <>
                 "through #{@current_version}"
       end
 
-      {config!(opts), version}
+      :ok
     end
 
     defp config!(opts) do

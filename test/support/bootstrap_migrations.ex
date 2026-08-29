@@ -6,6 +6,10 @@ defmodule StatifierPersistence.BootstrapMigrations do
   place - the SQL sandbox rolls each test's rows back, so only the DDL
   persists between runs.
 
+  Migration 104 applies V02 (the runs `metadata` column) on its own with
+  the helper's `from:` option, because 101-103 are already recorded as up
+  in any database bootstrapped before V02 existed.
+
   The `Kx*` hosts are not bootstrapped here: the live migration tests
   own their DDL end to end, up and down, and prove the helper itself.
   Test-only support code.
@@ -14,7 +18,8 @@ defmodule StatifierPersistence.BootstrapMigrations do
   @migrations [
     {20_260_822_000_101, __MODULE__.DefaultTables},
     {20_260_822_000_102, __MODULE__.OverriddenTables},
-    {20_260_829_000_103, __MODULE__.BlobTypedTables}
+    {20_260_829_000_103, __MODULE__.BlobTypedTables},
+    {20_260_829_000_104, __MODULE__.RunMetadataColumns}
   ]
 
   defmodule DefaultTables do
@@ -24,7 +29,7 @@ defmodule StatifierPersistence.BootstrapMigrations do
     alias StatifierPersistence.Ecto.Migrations
     alias StatifierPersistence.EctoHosts
 
-    def up, do: Migrations.up(for: EctoHosts.Default)
+    def up, do: Migrations.up(for: EctoHosts.Default, version: 1)
     def down, do: Migrations.down(for: EctoHosts.Default)
   end
 
@@ -35,7 +40,7 @@ defmodule StatifierPersistence.BootstrapMigrations do
     alias StatifierPersistence.Ecto.Migrations
     alias StatifierPersistence.EctoHosts
 
-    def up, do: Migrations.up(for: EctoHosts.Overridden)
+    def up, do: Migrations.up(for: EctoHosts.Overridden, version: 1)
     def down, do: Migrations.down(for: EctoHosts.Overridden)
   end
 
@@ -46,8 +51,36 @@ defmodule StatifierPersistence.BootstrapMigrations do
     alias StatifierPersistence.Ecto.Migrations
     alias StatifierPersistence.EctoHosts
 
-    def up, do: Migrations.up(for: EctoHosts.BlobTyped)
+    def up, do: Migrations.up(for: EctoHosts.BlobTyped, version: 1)
     def down, do: Migrations.down(for: EctoHosts.BlobTyped)
+  end
+
+  defmodule RunMetadataColumns do
+    @moduledoc false
+    use Ecto.Migration
+
+    alias StatifierPersistence.Ecto.Migrations
+    alias StatifierPersistence.EctoHosts
+
+    # V02 alone (`from: 2`), for the same reason a host already running V01
+    # writes its second migration that way: the three migrations above ran
+    # against databases created before V02 existed and are `:already_up`
+    # there, so re-running them would not add the column.
+    def up do
+      for host <- [EctoHosts.Default, EctoHosts.Overridden, EctoHosts.BlobTyped] do
+        Migrations.up(for: host, from: 2)
+      end
+
+      :ok
+    end
+
+    def down do
+      for host <- [EctoHosts.Default, EctoHosts.Overridden, EctoHosts.BlobTyped] do
+        Migrations.down(for: host, version: 2)
+      end
+
+      :ok
+    end
   end
 
   @doc "Applies every bootstrap migration, tolerating `:already_up`."

@@ -26,6 +26,12 @@ if Code.ensure_loaded?(Ecto) do
     are stored verbatim as strings and are never touched by the
     configured key scheme - ADR-0002 decision 1.
 
+    The runs schema also carries `metadata`, the optional opaque map of
+    host identities ADR-0006 grants, as a `jsonb` column (V02 of the
+    migrations helper). It holds identities only, never personal data:
+    `:blob_type` does not reach it, so anything filed there is at rest in
+    the clear no matter how the blob columns are configured.
+
     `:blob_type` reaches exactly three columns - `identity_blob`,
     `chart_blob`, `position_blob` - and nothing else: a host wanting
     encryption at rest for those payload columns passes a custom
@@ -33,7 +39,9 @@ if Code.ensure_loaded?(Ecto) do
     with zero further wiring. The identity and lookup columns
     (`content_hash`, `session_id`, `run_id`, `status`, `failure`) stay
     plain text regardless - the identity guard and the unique indexes
-    depend on reading them back verbatim.
+    depend on reading them back verbatim, and `metadata` stays `jsonb`
+    regardless for the same reason: it is the column a host queries
+    (ADR-0006 decision 3).
     """
 
     alias StatifierPersistence.Ecto.Config
@@ -63,7 +71,8 @@ if Code.ensure_loaded?(Ecto) do
         identity_blob: :binary,
         position_blob: :binary,
         failure: :string,
-        session_id: :string
+        session_id: :string,
+        metadata: :map
       ]
     }
 

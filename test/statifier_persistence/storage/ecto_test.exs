@@ -31,7 +31,8 @@ defmodule StatifierPersistence.Storage.EctoTest do
         content_hash: "sha256:ecto-test-chart",
         identity_blob: <<1, 2, 3>>,
         position_blob: <<7, 8, 9>>,
-        failure: nil
+        failure: nil,
+        metadata: %{}
       },
       overrides
     )

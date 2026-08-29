@@ -87,6 +87,11 @@ defmodule StatifierPersistence.Runs do
     the same way (st-ADR-0051). Defaults to `nil`, "the built-in set only".
   - `initialize:` (`create/4` only) - passed to
     `Statifier.Interpreter.initialize/2` unchanged.
+  - `metadata:` (`create/4` only) - the optional opaque map of host
+    identities stored beside the run record (ADR-0006 decision 1),
+    defaulting to `%{}`. Identities only, never personal data (decision 2);
+    an adapter that cannot store a non-empty map refuses the create with
+    `{:error, :metadata_unsupported}` (decision 3).
   - `serialization:` - the `{module, config}` per-run serialization
     strategy the fetch-to-persist tail runs inside (ADR-0004 decision 5;
     `fail/4` accepts it too). Defaults to
@@ -98,6 +103,7 @@ defmodule StatifierPersistence.Runs do
           | {:invoke_types, MachineState.invoke_types()}
           | {:initialize, keyword()}
           | {:serialization, {module(), term()}}
+          | {:metadata, Adapter.metadata()}
 
   @doc """
   Creates a run: `Statifier.Interpreter.initialize/2` (which cannot fail),
@@ -114,19 +120,34 @@ defmodule StatifierPersistence.Runs do
   store - ADR-0004 decision 1) and then returns
   `{:error, {:budget_exhausted, payload}}`, so the caller sees both the
   durable state and the reason.
+
+  `metadata:` rides through to the inserted run record unchanged (ADR-0006
+  decision 1). Create is the only place it is set - `step/5` and `fail/4`
+  carry the stored map forward and take no `metadata:` of their own - and
+  an adapter that cannot store a non-empty map refuses here, before any
+  effect is executed: `{:error, :metadata_unsupported}`.
   """
   @spec create(store :: Storage.t(), run_id :: run_id(), machine :: Machine.t(), opts :: [opt()]) ::
           {:ok, Run.t(), MachineState.t()} | {:error, error()}
   def create(%Storage{} = store, run_id, %Machine{} = machine, opts) do
     executor = Keyword.fetch!(opts, :executor)
 
-    {machine_state, effects} =
-      Interpreter.initialize(machine, Keyword.get(opts, :initialize, []))
+    # ADR-0006 decision 3's refusal is at open, and "at open" has to mean
+    # before initialize/2's effects reach the executor: a create the
+    # adapter will refuse must not fire an effect on its way to the
+    # refusal, for the same reason the identity refusal runs first below.
+    with :ok <- Storage.check_metadata(store, opts) do
+      {machine_state, effects} =
+        Interpreter.initialize(machine, Keyword.get(opts, :initialize, []))
 
-    serialized(store, run_id, opts, fn ->
-      persist_tail(store, run_id, machine_state, effects, executor, :insert)
-    end)
+      serialized(store, run_id, opts, fn ->
+        persist_tail(store, run_id, machine_state, effects, executor, {:insert, metadata(opts)})
+      end)
+    end
   end
+
+  @spec metadata([opt()]) :: Adapter.metadata()
+  defp metadata(opts), do: Keyword.get(opts, :metadata, %{})
 
   @doc """
   Delivers one external event to a run, in ADR-0004 decision 3's order (the
@@ -282,7 +303,7 @@ defmodule StatifierPersistence.Runs do
           MachineState.t(),
           [Statifier.Effect.t()],
           Executor.t(),
-          :insert | :update
+          {:insert, Adapter.metadata()} | :update
         ) :: {:ok, Run.t(), MachineState.t()} | {:error, error()}
   defp persist_tail(store, run_id, machine_state, effects, executor, write) do
     case Machine.identity(machine_state.machine) do
@@ -502,7 +523,7 @@ defmodule StatifierPersistence.Runs do
   # forward on update (ADR-0004 decision 1). The failure string is short
   # and prefixed - a psql-console reason, not an inspect dump.
   @spec write_run(
-          :insert | :update,
+          {:insert, Adapter.metadata()} | :update,
           Storage.t(),
           run_id(),
           MachineState.t(),
@@ -519,8 +540,11 @@ defmodule StatifierPersistence.Runs do
     opts = [position: position, failure: failure]
 
     case write do
-      :insert -> Storage.insert_run(store, run_id, machine_state, status, opts)
-      :update -> Storage.update_run(store, run_id, machine_state, status, opts)
+      {:insert, metadata} ->
+        Storage.insert_run(store, run_id, machine_state, status, [{:metadata, metadata} | opts])
+
+      :update ->
+        Storage.update_run(store, run_id, machine_state, status, opts)
     end
   end
 
