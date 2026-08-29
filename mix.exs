@@ -94,10 +94,22 @@ defmodule StatifierPersistence.MixProject do
   # Export STATIFIER_PATH to point at a local checkout while co-developing a
   # change that spans both repos. It is an env var rather than a mix.exs edit
   # so the override never lands in a commit by accident.
+  #
+  # The default arm is pinned to a git ref rather than a Hex version while
+  # this package's completion conformance cases need the queue-discard-on-
+  # exit fix: a session that reaches a top-level <final> now leaves an empty
+  # internal queue, so a :done MachineState is quiescent by construction and
+  # reaches the persist tail. The fix is on statifier's main branch and in no
+  # release yet (2.2.0 does not carry it). Re-point this at a version
+  # requirement once a release does.
   defp statifier_dep do
     case System.get_env("STATIFIER_PATH") do
-      nil -> {:statifier, "~> 2.0"}
-      path -> {:statifier, path: path, override: true}
+      nil ->
+        {:statifier,
+         github: "riddler/statifier-ex", ref: "1f865f75f3d5d89514c019c77e15770fc5bb35f0"}
+
+      path ->
+        {:statifier, path: path, override: true}
     end
   end
 end
