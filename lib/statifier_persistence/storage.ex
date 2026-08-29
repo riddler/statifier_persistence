@@ -42,6 +42,7 @@ defmodule StatifierPersistence.Storage do
           | :not_a_statifier_blob
           | :unidentified_chart
           | :run_position_missing
+          | :metadata_unsupported
           | {:unsupported_format_version, term()}
           | {:identity_mismatch, Identity.t(), Identity.t() | nil}
 
@@ -54,8 +55,15 @@ defmodule StatifierPersistence.Storage do
     with `Position.to_binary/1` and stores it as the run's `position_blob`;
     `:skip` stores `nil` on insert and carries the currently stored blob
     forward verbatim on update.
+  - `metadata:` - `insert_run/5` only: the optional opaque map of host
+    identities stored beside the run (ADR-0006 decision 1), defaulting to
+    `%{}`. It is write-once - `update_run/5` and `update_run_status/4`
+    carry the stored map forward and accept no `metadata:` of their own.
   """
-  @type run_write_opt :: {:failure, String.t() | nil} | {:position, :persist | :skip}
+  @type run_write_opt ::
+          {:failure, String.t() | nil}
+          | {:position, :persist | :skip}
+          | {:metadata, Adapter.metadata()}
 
   @doc """
   Initializes `adapter` with `opts` and returns the handle every other
@@ -204,6 +212,23 @@ defmodule StatifierPersistence.Storage do
   `position_blob`; under `position: :skip` the blob is stored `nil` - the
   arm for a run with no quiescent position to store. Uniqueness comes from
   the adapter's `insert_run/2` `:run_exists` refusal, not a pre-check here.
+
+  `metadata:` is the optional opaque map of host identities ADR-0006
+  decision 1 grants, defaulting to `%{}`. Create is the only place it is
+  set. This function is where the refusal-at-open lives: a non-empty map
+  for an adapter that does not export
+  `c:StatifierPersistence.Storage.Adapter.supports_metadata?/1` (or whose
+  answer is `false`) returns `{:error, :metadata_unsupported}` before any
+  write, and an empty or absent map is never refused. A map that is not a
+  map of string keys raises `ArgumentError`: the shape is the one thing
+  ADR-0006 decision 1 does validate, and a malformed option is a caller
+  bug, not a storage event.
+
+  The map carries host identities only, never personal data (ADR-0006
+  decision 2). `:blob_type` encryption reaches the three blob columns and
+  not this map, so a name, an email address, or a card number filed here is
+  at rest in the clear. Nothing in this package can enforce that - the map
+  is opaque - so the contract states it and the host keeps it.
   """
   @spec insert_run(
           store :: t(),
@@ -224,8 +249,11 @@ defmodule StatifierPersistence.Storage do
         {:error, :unidentified_chart}
 
       identity ->
-        with {:ok, position_blob} <- insert_position_blob(machine_state, position_opt(opts)) do
-          run_record = run_record(run_id, status, identity, position_blob, opts)
+        metadata = metadata_opt!(opts)
+
+        with :ok <- check_metadata_supported(store, metadata),
+             {:ok, position_blob} <- insert_position_blob(machine_state, position_opt(opts)) do
+          run_record = run_record(run_id, status, identity, position_blob, metadata, opts)
           store.adapter.insert_run(store.opts, run_record)
         end
     end
@@ -244,6 +272,12 @@ defmodule StatifierPersistence.Storage do
   bytes unchanged, so a status-only update (a failed step, an abandonment)
   never touches the stored position. Returns `{:error, :run_not_found}`
   when no run exists for the id.
+
+  A run's `metadata` is write-once (ADR-0006 decision 1 grants a map at
+  create and no way to change it), so this function accepts no `metadata:`
+  option and passes `%{}` in the record; the adapter carries the stored map
+  forward verbatim, as
+  `c:StatifierPersistence.Storage.Adapter.update_run/2` records.
   """
   @spec update_run(
           store :: t(),
@@ -266,7 +300,7 @@ defmodule StatifierPersistence.Storage do
       identity ->
         with {:ok, position_blob} <-
                update_position_blob(store, run_id, machine_state, position_opt(opts)) do
-          run_record = run_record(run_id, status, identity, position_blob, opts)
+          run_record = run_record(run_id, status, identity, position_blob, %{}, opts)
           store.adapter.update_run(store.opts, run_record)
         end
     end
@@ -308,6 +342,43 @@ defmodule StatifierPersistence.Storage do
   end
 
   @doc """
+  Whether `store`'s adapter can store a run's opaque `metadata` map
+  (ADR-0006 decision 3).
+
+  True when the adapter exports the optional
+  `c:StatifierPersistence.Storage.Adapter.supports_metadata?/1` and it
+  answers `true` for this handle. This is the predicate `insert_run/5`'s
+  refusal-at-open consults, exposed because a host choosing between an
+  adapter's scope query and its own side table wants the answer before it
+  writes, and because the conformance suite branches on it.
+  """
+  @spec metadata_supported?(store :: t()) :: boolean()
+  def metadata_supported?(%__MODULE__{} = store) do
+    Code.ensure_loaded?(store.adapter) and
+      function_exported?(store.adapter, :supports_metadata?, 1) and
+      store.adapter.supports_metadata?(store.opts) == true
+  end
+
+  @doc """
+  Validates a writer's `metadata:` option against `store`'s adapter without
+  writing anything: `:ok`, or `{:error, :metadata_unsupported}` for a
+  non-empty map an adapter cannot store (ADR-0006 decision 3).
+
+  `insert_run/5` runs this check itself, so a caller writing through the
+  facade alone never needs it. It is public for the caller that has work to
+  do *before* the write and must not do it for a create that will be
+  refused: `StatifierPersistence.Runs.create/4` runs it ahead of
+  `Statifier.Interpreter.initialize/2` so no effect is executed for a run
+  whose metadata cannot be stored - the same reason `insert_run/5`'s
+  identity refusal runs before the position encode. Raises `ArgumentError`
+  on a malformed option, exactly as the writers do.
+  """
+  @spec check_metadata(store :: t(), opts :: [run_write_opt()]) :: :ok | {:error, error()}
+  def check_metadata(%__MODULE__{} = store, opts) do
+    check_metadata_supported(store, metadata_opt!(opts))
+  end
+
+  @doc """
   Fetches the run stored under `run_id` and rebuilds its position into a
   `Statifier.MachineState.t()` walking `machine`, refusing a chart-revision
   mismatch instead of silently resuming the wrong configuration.
@@ -343,17 +414,51 @@ defmodule StatifierPersistence.Storage do
           Adapter.run_status(),
           Identity.t(),
           binary() | nil,
+          Adapter.metadata(),
           [run_write_opt()]
         ) :: Adapter.run_record()
-  defp run_record(run_id, status, identity, position_blob, opts) do
+  defp run_record(run_id, status, identity, position_blob, metadata, opts) do
     %{
       run_id: run_id,
       status: status,
       content_hash: identity.content_hash,
       identity_blob: Identity.to_binary(identity),
       position_blob: position_blob,
-      failure: Keyword.get(opts, :failure)
+      failure: Keyword.get(opts, :failure),
+      metadata: metadata
     }
+  end
+
+  # ADR-0006 decision 1's whole validation: a map with string keys. Values
+  # are never inspected. A malformed option is a caller bug, so it raises
+  # rather than joining the error vocabulary.
+  @spec metadata_opt!([run_write_opt()]) :: Adapter.metadata()
+  defp metadata_opt!(opts) do
+    case Keyword.get(opts, :metadata, %{}) do
+      metadata when is_map(metadata) ->
+        if Enum.all?(Map.keys(metadata), &is_binary/1) do
+          metadata
+        else
+          raise ArgumentError,
+                "the :metadata option must be a map with string keys, got keys: " <>
+                  inspect(Map.keys(metadata))
+        end
+
+      other ->
+        raise ArgumentError,
+              "the :metadata option must be a map with string keys, got: #{inspect(other)}"
+    end
+  end
+
+  # ADR-0006 decision 3's refusal at open. An empty map is never refused -
+  # that is what keeps every pre-ADR-0006 adapter conformant unchanged -
+  # and a non-empty one reaches the adapter only when it has declared
+  # support by exporting supports_metadata?/1 and answering true.
+  @spec check_metadata_supported(t(), Adapter.metadata()) :: :ok | {:error, error()}
+  defp check_metadata_supported(_store, metadata) when map_size(metadata) == 0, do: :ok
+
+  defp check_metadata_supported(store, _metadata) do
+    if metadata_supported?(store), do: :ok, else: {:error, :metadata_unsupported}
   end
 
   @spec position_opt([run_write_opt()]) :: :persist | :skip

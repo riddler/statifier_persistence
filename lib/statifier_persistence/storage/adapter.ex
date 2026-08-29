@@ -2,8 +2,9 @@ defmodule StatifierPersistence.Storage.Adapter do
   @moduledoc """
   The storage contract: opaque blobs keyed by engine identities.
 
-  An adapter stores and returns binaries plus engine identity strings, and
-  nothing else (ADR-0003 decision 1). No callback receives a compiled
+  An adapter stores and returns binaries, engine identity strings, and one
+  optional opaque map of host identities on a run record - and nothing else
+  (ADR-0003 decision 1 as amended by ADR-0006). No callback receives a compiled
   `Statifier.Machine` and none returns a `Statifier.MachineState` value -
   the identity guard is not a callback here, and cannot be, because no
   callback ever holds both the stored identity and a caller-supplied machine
@@ -47,11 +48,31 @@ defmodule StatifierPersistence.Storage.Adapter do
   @type run_status :: :active | :completed | :failed
 
   @typedoc """
+  A run's optional opaque metadata (ADR-0006 decision 1): a map of string
+  keys to host-supplied values, opaque here in the strong sense
+  `chart_blob` is opaque. No callback reads a key or a value to make a
+  decision, validates it beyond the shape, or merges it into a blob.
+
+  The map carries **host identities only, never personal data** (ADR-0006
+  decision 2): a tenant id, a subject-entity id, a correlation id - never a
+  name, an email address, a postal address, a card number, or any other
+  personal or cardholder data. Blob encryption (`:blob_type`) covers the
+  three blob columns and does not reach this map, so anything filed here is
+  at rest in the clear. This package cannot enforce the rule - the map is
+  opaque by decision 1 - so the contract states it and the host keeps it.
+
+  The empty map means "no metadata" and is what an absent map resolves to.
+  """
+  @type metadata :: %{optional(String.t()) => term()}
+
+  @typedoc """
   A stored run (ADR-0004 decision 1): its caller-supplied key, its status,
   the content hash and identity envelope of the chart it runs, the opaque
   `position_blob` holding its current position - nullable, because a run
-  that fails at creation has no quiescent position to store - and a short
-  `failure` reason for a `:failed` run, `nil` otherwise.
+  that fails at creation has no quiescent position to store - a short
+  `failure` reason for a `:failed` run, `nil` otherwise, and the opaque
+  `metadata` map of host identities (ADR-0006 decision 1), `%{}` when the
+  caller supplied none.
   """
   @type run_record :: %{
           run_id: run_id(),
@@ -59,7 +80,8 @@ defmodule StatifierPersistence.Storage.Adapter do
           content_hash: content_hash(),
           identity_blob: binary(),
           position_blob: binary() | nil,
-          failure: String.t() | nil
+          failure: String.t() | nil,
+          metadata: metadata()
         }
 
   @typedoc """
@@ -91,7 +113,9 @@ defmodule StatifierPersistence.Storage.Adapter do
   This layer's own refusal arms. `:chart_not_found`, `:position_not_found`,
   and `:run_not_found` are the not-found arms every adapter must return
   instead of `nil` or a raise; `:run_exists` is `insert_run/2`'s refusal of
-  a duplicate `run_id`; `{:adapter, term()}` carries a backend failure (a
+  a duplicate `run_id`; `:metadata_unsupported` is the refusal-at-open arm
+  for a non-empty `metadata` map an adapter cannot store (ADR-0006
+  decision 3); `{:adapter, term()}` carries a backend failure (a
   database down, a timeout) that is not this layer's to interpret further.
   """
   @type error ::
@@ -99,6 +123,7 @@ defmodule StatifierPersistence.Storage.Adapter do
           | :position_not_found
           | :run_exists
           | :run_not_found
+          | :metadata_unsupported
           | {:adapter, term()}
 
   @doc """
@@ -176,6 +201,15 @@ defmodule StatifierPersistence.Storage.Adapter do
   not validate the status, and performs no identity check - the facade and
   the lifecycle own those (ADR-0003 decisions 1 and 2, ADR-0004
   decision 1).
+
+  `metadata` is stored as given and read back by `fetch_run/2` unchanged
+  (ADR-0006 decision 1). Insert is the only write that sets it: the map is
+  not mutable after create, and `update_run/2` says so. An adapter reaching
+  this callback has already declared `supports_metadata?/1` true for a
+  non-empty map - the facade refuses at open otherwise - but an adapter
+  whose backend cannot hold a particular value (a `jsonb` column and a
+  tuple, say) refuses that value here with
+  `{:error, :metadata_unsupported}` rather than storing something else.
   """
   @callback insert_run(opts(), StatifierPersistence.Storage.Adapter.run_record()) ::
               :ok | {:error, error()}
@@ -188,7 +222,8 @@ defmodule StatifierPersistence.Storage.Adapter do
   `position_blob` must be byte-identical to what was stored (a stored `nil`
   `position_blob` comes back as `nil`); an adapter must not normalize,
   truncate, or re-encode them, and it does not decode them either (ADR-0003
-  decision 1).
+  decision 1). The returned `metadata` is the map `insert_run/2` stored,
+  unchanged, and `%{}` when none was stored - never `nil`.
   """
   @callback fetch_run(opts(), run_id()) ::
               {:ok, StatifierPersistence.Storage.Adapter.run_record()} | {:error, error()}
@@ -200,7 +235,17 @@ defmodule StatifierPersistence.Storage.Adapter do
   Returns `{:error, :run_not_found}` when no run exists for the id. This is
   a full-record overwrite - there is no partial-update surface, so every
   field in the stored row after this call is the given record's, including
-  a `nil` `position_blob`. Like the other run callbacks it decodes nothing,
+  a `nil` `position_blob`.
+
+  `metadata` is the one exception, and it is an exception by decision:
+  ADR-0006 decision 1 grants a map supplied at create and grants no way to
+  change it afterwards, so this callback carries the stored map forward
+  verbatim and ignores the `metadata` field of the record it is given. The
+  facade passes `%{}` there for exactly that reason. An adapter that
+  overwrote it would make the map mutable, which is the reopener ADR-0006's
+  consequences name rather than a behaviour it grants.
+
+  Like the other run callbacks it decodes nothing,
   validates no status transition, and performs no identity check - the
   facade and the lifecycle own those (ADR-0003 decisions 1 and 2, ADR-0004
   decision 1).
@@ -249,5 +294,25 @@ defmodule StatifierPersistence.Storage.Adapter do
               {:ok, result} | {:error, error()}
             when result: var
 
-  @optional_callbacks isolate: 1, lock_run: 3
+  @doc """
+  Optional declaration that this adapter can store a run's `metadata` map
+  (ADR-0006 decision 3).
+
+  Exporting it and returning `true` is how an adapter opts into the
+  metadata contract - the same `@optional_callbacks` plus
+  `function_exported?/3` shape `isolate/1` and `lock_run/3` use. An adapter
+  that does not export it stores no metadata, and
+  `StatifierPersistence.Storage.insert_run/5` refuses a non-empty map for
+  it at open with `{:error, :metadata_unsupported}` before any write
+  happens. An empty or absent map is never refused, which is what keeps
+  every adapter written before ADR-0006 conformant without a line of
+  change.
+
+  The refusal is at open - at the create that supplies the map - so a host
+  learns on its first call rather than discovering a silently dropped scope
+  on a later fetch. Refusing is conformance, not a gap.
+  """
+  @callback supports_metadata?(opts()) :: boolean()
+
+  @optional_callbacks isolate: 1, lock_run: 3, supports_metadata?: 1
 end

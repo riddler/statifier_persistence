@@ -28,6 +28,14 @@ defmodule StatifierPersistence.Testing.StorageConformance do
   unaffected: the check is a `function_exported?/3` guard, not a
   requirement.
 
+  The optional run `metadata` map (ADR-0006) is treated differently again:
+  its cases are generated for every adapter and assert the answer this
+  adapter gives - a round trip when it declares support through
+  `c:StatifierPersistence.Storage.Adapter.supports_metadata?/1`, a
+  `{:error, :metadata_unsupported}` refusal at open when it does not.
+  Refusing is conformance; silently dropping the map is not, and that is
+  the failure these cases exist to catch.
+
   The optional `c:StatifierPersistence.Storage.Adapter.lock_run/3` gets the
   same treatment at generation time: when the adapter under test exports
   it, the suite generates the per-run lock tests (mutual exclusion of two
@@ -231,7 +239,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           content_hash: "sha256:conformance-chart-a",
           identity_blob: <<9, 0, 8, 255, 7>>,
           position_blob: <<0, 255, 1, 2, 3, 0, 0, 254>>,
-          failure: nil
+          failure: nil,
+          metadata: %{}
         }
 
         assert :ok = @conformance_adapter.insert_run(store.opts, run_record)
@@ -252,7 +261,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           content_hash: "sha256:conformance-chart-a",
           identity_blob: <<1, 2, 3>>,
           position_blob: <<7, 8, 9>>,
-          failure: nil
+          failure: nil,
+          metadata: %{}
         }
 
         assert :ok = @conformance_adapter.insert_run(store.opts, run_record)
@@ -275,7 +285,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           content_hash: "sha256:conformance-chart-a",
           identity_blob: <<1, 2, 3>>,
           position_blob: nil,
-          failure: "abandoned"
+          failure: "abandoned",
+          metadata: %{}
         }
 
         assert {:error, :run_not_found} =
@@ -307,7 +318,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           content_hash: "sha256:conformance-chart-a",
           identity_blob: <<1, 2, 3>>,
           position_blob: nil,
-          failure: "budget_exhausted: 100 rounds"
+          failure: "budget_exhausted: 100 rounds",
+          metadata: %{}
         }
 
         assert :ok = @conformance_adapter.insert_run(store.opts, run_record)
@@ -332,7 +344,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           content_hash: "sha256:conformance-chart-a",
           identity_blob: <<1, 2, 3>>,
           position_blob: <<7, 8, 9>>,
-          failure: nil
+          failure: nil,
+          metadata: %{}
         }
 
         updated = %{
@@ -347,6 +360,113 @@ defmodule StatifierPersistence.Testing.StorageConformance do
 
         assert {:ok, ^updated} =
                  @conformance_adapter.fetch_run(store.opts, "run-conformance-overwrite")
+      end
+
+      # -- Adapter level: the optional run metadata (ADR-0006) -----------
+      #
+      # A conformant adapter either round-trips a non-empty metadata map or
+      # refuses it at open; what it must never do is accept the create and
+      # silently drop the map (ADR-0006 decision 3). Both answers are
+      # generated for every adapter and the assertion branches on
+      # `Storage.metadata_supported?/1`, so the suite tests the answer this
+      # adapter actually gives rather than only the supporting one.
+
+      # sabotage: in StatifierPersistence.Storage.insert_run/5, drop the
+      # metadata from the built record (pass %{} instead of the validated
+      # option) -> red for a supporting adapter: the fetched record's
+      # metadata came back %{} instead of the two pairs. And in the same
+      # function, delete the check_metadata_supported/2 clause from the
+      # with-chain -> red for a non-supporting adapter: the insert returned
+      # :ok instead of {:error, :metadata_unsupported}. Verified red on
+      # both arms (InMemory and NoLockAdapter respectively), reverted.
+      test "adapter: a non-empty metadata map either round-trips or is refused at open", %{
+        store: store
+      } do
+        {_source, machine} = Charts.chart_a()
+
+        machine_state =
+          Statifier.MachineState.new(machine, session_id: "sess_conformance_metadata")
+
+        metadata = %{"tenant_id" => "acct_conformance", "processor_account_id" => "pacct_4471"}
+
+        result =
+          Storage.insert_run(store, "run-conformance-metadata", machine_state, :active,
+            metadata: metadata
+          )
+
+        if Storage.metadata_supported?(store) do
+          assert :ok = result
+
+          assert {:ok, fetched} = Storage.fetch_run(store, "run-conformance-metadata")
+          assert fetched.metadata == metadata
+        else
+          assert {:error, :metadata_unsupported} = result
+
+          # Refusal is at open, so nothing was written either.
+          assert {:error, :run_not_found} =
+                   Storage.fetch_run(store, "run-conformance-metadata")
+        end
+      end
+
+      # sabotage: in StatifierPersistence.Storage's
+      # check_metadata_supported/2, delete the map_size(metadata) == 0
+      # clause so every map consults the adapter -> red for a
+      # non-supporting adapter: this insert returned
+      # {:error, :metadata_unsupported} instead of :ok. Verified red,
+      # reverted.
+      test "adapter: an absent metadata map is never refused, and reads back as %{}", %{
+        store: store
+      } do
+        {_source, machine} = Charts.chart_a()
+
+        machine_state =
+          Statifier.MachineState.new(machine, session_id: "sess_conformance_no_metadata")
+
+        assert :ok =
+                 Storage.insert_run(store, "run-conformance-no-metadata", machine_state, :active)
+
+        assert {:ok, fetched} = Storage.fetch_run(store, "run-conformance-no-metadata")
+        assert fetched.metadata == %{}
+      end
+
+      # sabotage: in the adapter under test's update_run/2, write the given
+      # record's metadata instead of carrying the stored map forward (for
+      # the Ecto adapter, add metadata: run_record.metadata to the set:
+      # list; for InMemory, drop the Map.put that restores it) -> red, the
+      # fetch below saw %{} where the created map should still be.
+      # Verified red on both, reverted.
+      test "adapter: metadata is write-once - an update carries the stored map forward", %{
+        store: store
+      } do
+        if Storage.metadata_supported?(store) do
+          {_source, machine} = Charts.chart_a()
+
+          machine_state =
+            Statifier.MachineState.new(machine, session_id: "sess_conformance_metadata_update")
+
+          metadata = %{"tenant_id" => "acct_conformance_update"}
+
+          assert :ok =
+                   Storage.insert_run(
+                     store,
+                     "run-conformance-metadata-update",
+                     machine_state,
+                     :active,
+                     metadata: metadata
+                   )
+
+          assert :ok =
+                   Storage.update_run(
+                     store,
+                     "run-conformance-metadata-update",
+                     machine_state,
+                     :completed
+                   )
+
+          assert {:ok, fetched} = Storage.fetch_run(store, "run-conformance-metadata-update")
+          assert fetched.status == :completed
+          assert fetched.metadata == metadata
+        end
       end
 
       # -- Adapter level: the optional per-run lock ----------------------

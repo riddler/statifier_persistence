@@ -5,7 +5,10 @@ optional per-test isolation callback, `isolate/1`, to the behaviour's
 contract surface, alongside the conformance suite decision 5 already names);
 amended 2026-08-22 (sp-4an.2.1 Phase 5: adds the optional per-run lock
 callback, `lock_run/3`, to the behaviour's contract surface, as the seam
-ADR-0004 decision 5's default serialization strategy delegates to)
+ADR-0004 decision 5's default serialization strategy delegates to); amended
+2026-08-29 (ADR-0006: decision 1's blobs-plus-identities clause also admits
+one optional opaque metadata map of host identities as a field on
+run_record)
 
 ## Context
 

@@ -206,6 +206,17 @@ Configure a persistence module on your own repo once, and migrate:
       def down, do: StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence)
     end
 
+One migration covers every version of the package DDL on a fresh
+database. If you already ran that migration when this package shipped
+only V01, pick the later versions up with a second ordinary migration
+rather than re-running the first:
+
+    defmodule MyApp.Repo.Migrations.AddStatifierPersistenceRunMetadata do
+      use Ecto.Migration
+      def up, do: StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, from: 2)
+      def down, do: StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence, version: 2)
+    end
+
 then build the guarded store the rest of the package works through:
 
     {:ok, store} =
@@ -221,6 +232,66 @@ identities verbatim, and implements the optional per-run `lock_run/3`
 as a transaction-scoped advisory-plus-row lock (ADR-0004 as amended).
 In your test suite, pass `sandbox: true` so each test runs in its own
 `Ecto.Adapters.SQL.Sandbox` checkout via the adapter's `isolate/1`.
+
+### Listing runs by host scope
+
+A run record carries engine identities and opaque blobs. Nothing on it
+answers the question a multi-tenant host asks first - "list the runs for
+scope X" - so ADR-0006 adds one optional, opaque `metadata` map to a run,
+stored beside it and handed back unchanged.
+
+Take a card-processing host running a `myapp:authorize` / `myapp:capture`
+chart, one run per payment attempt, and a support screen that lists every
+run for one processor account. Tag the run at create with the account ids
+the host already keys its own tables by:
+
+    {:ok, run, _machine_state} =
+      StatifierPersistence.Runs.create(store, payment_id, machine,
+        executor: MyApp.Executor,
+        metadata: %{
+          "tenant_id" => "acct_01H8X",
+          "processor_account_id" => "pacct_4471"
+        }
+      )
+
+and read them back with an equality match on every pair:
+
+    {:ok, runs} =
+      StatifierPersistence.Storage.Ecto.list_runs_by_metadata(store.opts, %{
+        "processor_account_id" => "pacct_4471"
+      })
+
+Equality on all given pairs is the whole query surface: no ranges, no
+partial matches, no ordering guarantee. Anything richer is a query you
+write against your own column - the table name is yours to configure, so
+that is a supported thing to do. The V02 migration adds the column as
+nullable `jsonb` with **no index**, because which pairs you query by is
+your call; add your own (a GIN index on the column serves the containment
+query the helper issues) when the volume asks for one.
+
+Two rules come with it.
+
+**Identities only, never personal data.** Keys and values are host
+identities - a tenant id, a subject-entity id, a correlation id - and
+never a name, an email address, a postal address, a card number, or any
+other personal or cardholder data. This is a rule of the contract, not
+advice: `:blob_type` encryption (below) covers the three blob columns and
+does not reach this one, so anything you file here is at rest in the clear
+no matter how the blobs are configured. The map is opaque to this package
+by design, so nothing here can inspect a value and reject it - the rule is
+kept by you.
+
+**An adapter may refuse it.** An adapter that cannot store the map refuses
+a non-empty one at the create with `{:error, :metadata_unsupported}`, so
+you learn on the first call rather than finding a silently dropped scope
+later. An empty or absent map is never refused. The shipped in-memory and
+Ecto adapters both support it; a third-party adapter that does not is
+still conformant, and the conformance suite tests both answers. The Ecto
+adapter refuses at the same point for a value `jsonb` cannot hold - a
+tuple, an atom, a pid, or a binary that is not valid UTF-8 - rather than
+storing something that is not what you handed it. The map is write-once:
+it is set at create and a later step or abandonment carries it forward
+untouched.
 
 ### Encrypting the blob columns
 

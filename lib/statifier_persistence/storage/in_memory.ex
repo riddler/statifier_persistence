@@ -100,10 +100,17 @@ defmodule StatifierPersistence.Storage.InMemory do
   The exists-check and the write run inside one `Agent.get_and_update/2`
   call, so they are a single atomic state transition: two concurrent
   inserts of the same `run_id` cannot both return `:ok`.
+
+  This adapter supports the optional `metadata` map (ADR-0006 decision 3):
+  the map is stored with the record and returned by `fetch_run/2` verbatim,
+  whatever Elixir terms it holds - an Agent has no type system to refuse
+  one.
   """
   @impl Adapter
   @spec insert_run(Adapter.opts(), Adapter.run_record()) :: :ok | {:error, Adapter.error()}
   def insert_run(opts, %{run_id: run_id} = run_record) do
+    run_record = Map.put_new(run_record, :metadata, %{})
+
     Agent.get_and_update(pid(opts), fn state ->
       if Map.has_key?(state.runs, run_id) do
         {{:error, :run_exists}, state}
@@ -129,18 +136,36 @@ defmodule StatifierPersistence.Storage.InMemory do
   @doc """
   Overwrites the run stored under `run_record`'s `run_id` with the full
   record, or refuses with `:run_not_found` when no run exists for the id.
+
+  `metadata` is the documented exception to the full overwrite: it is
+  write-once (ADR-0006 decision 1 grants no way to change it after create),
+  so the stored map is carried forward and the given record's `metadata`
+  is ignored.
   """
   @impl Adapter
   @spec update_run(Adapter.opts(), Adapter.run_record()) :: :ok | {:error, Adapter.error()}
   def update_run(opts, %{run_id: run_id} = run_record) do
     Agent.get_and_update(pid(opts), fn state ->
-      if Map.has_key?(state.runs, run_id) do
-        {:ok, put_in(state, [:runs, run_id], run_record)}
-      else
-        {{:error, :run_not_found}, state}
+      case state.runs do
+        %{^run_id => stored} ->
+          kept = Map.put(run_record, :metadata, Map.get(stored, :metadata, %{}))
+          {:ok, put_in(state, [:runs, run_id], kept)}
+
+        _absent ->
+          {{:error, :run_not_found}, state}
       end
     end)
   end
+
+  @doc """
+  Declares metadata support (the optional
+  `c:StatifierPersistence.Storage.Adapter.supports_metadata?/1`): this
+  adapter stores the map with the run record and returns it verbatim
+  (ADR-0006 decision 3).
+  """
+  @impl Adapter
+  @spec supports_metadata?(Adapter.opts()) :: boolean()
+  def supports_metadata?(_opts), do: true
 
   @doc """
   Runs `fun` under this adapter's per-run mutual exclusion for `run_id`

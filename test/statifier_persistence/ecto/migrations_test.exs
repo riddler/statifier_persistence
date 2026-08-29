@@ -214,6 +214,31 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     end
   end
 
+  describe "V02: the runs metadata column" do
+    # sabotage: removed V02's alter/add of the metadata column -> red, and
+    # red loudly: the generated runs schema declares the field, so every
+    # test in this module failed on the missing column, this one included.
+    # Verified red, reverted.
+    test "is a nullable jsonb column on runs, across every key configuration" do
+      for prefix <- @key_prefixes do
+        assert identity_columns(prefix <> "runs", ["metadata"]) ==
+                 [["metadata", "jsonb", "YES"]]
+      end
+    end
+
+    # sabotage: added a create(index(..., [:metadata])) to V02 whose down/1
+    # does not drop it -> red across the module, this assertion included:
+    # the index list was no longer empty and the leftover index broke the
+    # module's own up/down cycle. ADR-0006 decision 4 leaves the index to
+    # the host - which pairs it queries by is not something this package
+    # can guess. Verified red, reverted.
+    test "carries no index of its own" do
+      for prefix <- @key_prefixes do
+        assert metadata_indexes(prefix <> "runs") == []
+      end
+    end
+  end
+
   describe "unique indexes enforced" do
     # sabotage: removed V01's charts unique_index -> duplicate insert red
     test "a duplicate content_hash insert violates the charts unique index" do
@@ -283,11 +308,29 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     # sabotage: skipped parse!'s version validation -> red (KeyError, not ArgumentError)
     test "an unknown version raises before any DDL" do
       assert_raise ArgumentError, ~r/unknown migration version/, fn ->
-        Migrations.up(for: KxUxid, version: 2)
+        Migrations.up(for: KxUxid, version: 3)
       end
 
       assert_raise ArgumentError, ~r/unknown migration version/, fn ->
         Migrations.down(for: KxUxid, version: 0)
+      end
+    end
+
+    # sabotage: dropped up/1's validate_version!(from, "from") call -> red
+    # (KeyError from the @migrations fetch, not ArgumentError). Verified
+    # red, reverted.
+    test "an unknown from: raises before any DDL" do
+      assert_raise ArgumentError, ~r/unknown migration from/, fn ->
+        Migrations.up(for: KxUxid, from: 0)
+      end
+    end
+
+    # sabotage: dropped up/1's from > target guard -> red, nothing raised
+    # and the empty descending range ran no migration at all, which would
+    # silently skip DDL a host believes it applied. Verified red, reverted.
+    test "a from: above the target version raises rather than silently doing nothing" do
+      assert_raise ArgumentError, ~r/does not roll back/, fn ->
+        Migrations.up(for: KxUxid, from: 2, version: 1)
       end
     end
 
@@ -304,6 +347,23 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
         Migrations.up(for: Enum)
       end
     end
+  end
+
+  defp metadata_indexes(table) do
+    %{rows: rows} =
+      SQL.query!(
+        TestRepo,
+        """
+        SELECT indexname
+        FROM pg_indexes
+        WHERE schemaname = 'public' AND tablename = $1
+          AND indexdef LIKE '%metadata%'
+        ORDER BY indexname
+        """,
+        [table]
+      )
+
+    rows
   end
 
   defp identity_columns(table, columns) do
