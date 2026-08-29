@@ -2,8 +2,10 @@ defmodule StatifierPersistence.EctoHosts do
   @moduledoc """
   Fixture host modules for `use StatifierPersistence.Ecto` tests.
 
-  Three hosts spanning the option surface: the zero-config default, a
-  host overriding every knob, and a host on database-assigned keys.
+  Hosts spanning the option surface: the zero-config default, a host
+  overriding every knob, a host on database-assigned keys, and
+  `BlobTyped`, which puts the generic reversible transform
+  (`StatifierPersistence.Test.ReversibleBlobType`) on `:blob_type`.
   Test-only support code, not part of the package's public API.
 
   The `Kx*` hosts back the live migration tests: one per key scheme, each
@@ -31,6 +33,14 @@ defmodule StatifierPersistence.EctoHosts do
     use StatifierPersistence.Ecto,
       repo: StatifierPersistence.TestRepo,
       key: :bigserial
+  end
+
+  defmodule BlobTyped do
+    @moduledoc false
+    use StatifierPersistence.Ecto,
+      repo: StatifierPersistence.TestRepo,
+      table_prefix: "blobtype_",
+      blob_type: StatifierPersistence.Test.ReversibleBlobType
   end
 
   defmodule KxUxid do

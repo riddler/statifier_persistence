@@ -22,6 +22,18 @@ defmodule StatifierPersistence.Ecto.Config do
       prefix included
     * `:prefix` - the Postgres schema (Ecto's `@schema_prefix`), default
       `nil`
+    * `:blob_type` - the Ecto type applied to the three blob columns
+      (`identity_blob`, `chart_blob`, `position_blob`), default
+      `:binary` (the built-in `bytea` behaviour, unchanged). Pass a
+      module implementing `Ecto.Type` for `field(name, Mod)`, or a
+      `{module, opts}` tuple for an `Ecto.ParameterizedType` for
+      `field(name, Mod, opts)` - the shape Ecto itself uses to declare a
+      parameterized field. Keys and lookup columns (`content_hash`,
+      `session_id`, `run_id`, `status`, `failure`) are never affected;
+      only the three blob columns reach this option. Resolved and
+      stored on the struct as `:binary` (bare) or `{module, opts}`
+      (normalized, so a bare custom module becomes `{module, []}`) -
+      one shape for downstream code to read.
 
   Unknown options and unknown table keys raise `ArgumentError` - at the
   host's compile time when reached through `use`.
@@ -29,11 +41,11 @@ defmodule StatifierPersistence.Ecto.Config do
 
   alias StatifierPersistence.Ecto.KeyGenerator
 
-  @known_options [:repo, :key, :table_prefix, :tables, :prefix]
+  @known_options [:repo, :key, :table_prefix, :tables, :prefix, :blob_type]
   @table_keys [:charts, :positions, :runs]
 
-  @enforce_keys [:repo, :key, :table_prefix, :tables, :prefix]
-  defstruct [:repo, :key, :table_prefix, :tables, :prefix]
+  @enforce_keys [:repo, :key, :table_prefix, :tables, :prefix, :blob_type]
+  defstruct [:repo, :key, :table_prefix, :tables, :prefix, :blob_type]
 
   @typedoc "Resolved configuration for one host module."
   @type t :: %__MODULE__{
@@ -41,7 +53,8 @@ defmodule StatifierPersistence.Ecto.Config do
           key: {module(), keyword()},
           table_prefix: String.t(),
           tables: %{optional(KeyGenerator.table()) => String.t()},
-          prefix: String.t() | nil
+          prefix: String.t() | nil,
+          blob_type: :binary | {module(), keyword()}
         }
 
   @doc """
@@ -57,7 +70,8 @@ defmodule StatifierPersistence.Ecto.Config do
       key: KeyGenerator.resolve(Keyword.get(opts, :key, :uxid)),
       table_prefix: validate_table_prefix!(Keyword.get(opts, :table_prefix, "statifier_")),
       tables: validate_tables!(Keyword.get(opts, :tables, %{})),
-      prefix: validate_prefix!(Keyword.get(opts, :prefix))
+      prefix: validate_prefix!(Keyword.get(opts, :prefix)),
+      blob_type: validate_blob_type!(Keyword.get(opts, :blob_type, :binary))
     }
   end
 
@@ -138,4 +152,66 @@ defmodule StatifierPersistence.Ecto.Config do
           "the :prefix option (Postgres schema) must be a string or nil, " <>
             "got: #{inspect(other)}"
   end
+
+  defp validate_blob_type!(:binary), do: :binary
+
+  defp validate_blob_type!(module) when is_atom(module) and not is_nil(module) do
+    validate_blob_type!({module, []})
+  end
+
+  defp validate_blob_type!({module, opts}) when is_atom(module) and is_list(opts) do
+    ensure_blob_type_loaded!(module)
+
+    if Keyword.keyword?(opts) do
+      if ecto_type?(module) or ecto_parameterized_type?(module) do
+        {module, opts}
+      else
+        raise ArgumentError,
+              "the :blob_type option module #{inspect(module)} must implement " <>
+                "Ecto.Type or Ecto.ParameterizedType, got a module with neither " <>
+                "type/0 nor (type/1 and init/1)"
+      end
+    else
+      raise ArgumentError,
+            "the :blob_type option's second element must be a keyword list, " <>
+              "got: #{inspect(opts)}"
+    end
+  end
+
+  defp validate_blob_type!(other) do
+    raise ArgumentError,
+          "the :blob_type option must be :binary, a module implementing Ecto.Type " <>
+            "or Ecto.ParameterizedType, or a {module, opts} tuple, got: #{inspect(other)}"
+  end
+
+  defp ensure_blob_type_loaded!(module) do
+    case Code.ensure_compiled(module) do
+      {:module, ^module} ->
+        :ok
+
+      {:error, reason} ->
+        raise ArgumentError,
+              "the :blob_type option module #{inspect(module)} could not be loaded: " <>
+                inspect(reason)
+    end
+  end
+
+  defp ecto_type?(module), do: function_exported?(module, :type, 0)
+
+  defp ecto_parameterized_type?(module) do
+    function_exported?(module, :type, 1) and function_exported?(module, :init, 1)
+  end
+
+  @doc """
+  The resolved `field/3` arguments for a blob column under this
+  configuration: `[name, :binary]` for the default, or
+  `[name, module, opts]` for a custom `:blob_type` (`opts` is `[]` for
+  a bare custom module, since `field/3` treats an empty-opts
+  parameterized call and a plain `Ecto.Type` call identically).
+  """
+  @spec blob_field_args(t(), atom()) :: [term(), ...]
+  def blob_field_args(%__MODULE__{blob_type: :binary}, name), do: [name, :binary]
+
+  def blob_field_args(%__MODULE__{blob_type: {module, opts}}, name),
+    do: [name, module, opts]
 end
