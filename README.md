@@ -170,6 +170,7 @@ state
 | `StatifierPersistence.Storage` | The identity-guarded facade: charts, positions, run records. Every load is guarded; there is no unguarded path |
 | `StatifierPersistence.Storage.Adapter` | The behaviour a backing store implements. `Storage.InMemory` is the reference one, `Storage.Ecto` the Postgres one |
 | `StatifierPersistence.Runs` | The lifecycle: `create/4`, `step/5`, `fail/4`, in ADR-0004's fixed order |
+| `StatifierPersistence.Driver` | Run-to-quiescence over `Runs`: performs the chart's `<invoke>` calls and steps each answer back in |
 | `StatifierPersistence.Executor` | The seam every effect crosses on its way to your host |
 | `StatifierPersistence.Serialization` | The per-run ordering strategy the fetch-to-persist tail runs inside; defaults to the adapter's own `lock_run/3` |
 | `StatifierPersistence.Testing.StorageConformance` | The conformance suite - point it at your own adapter to hold it to the same bar |
@@ -182,6 +183,45 @@ restores position, not liveness: pending timers and in-flight
 invocations are re-established by the host, from its own durable rows.
 [Surviving a restart](docs/restart-demo.md) walks a demo embedder
 through both.
+
+## Driving a chart that calls out
+
+`Runs` steps a run once. A chart that invokes a service is not finished
+when that step returns - it is waiting for an answer it cannot fetch
+for itself, and every host that has embedded this package has written
+the same loop on top. `StatifierPersistence.Driver` is that loop:
+
+```elixir
+driver =
+  StatifierPersistence.Driver.new(store, machine,
+    dispatch: fn type, params, _context -> MyApp.perform(type, params) end,
+    effects: fn effect, _context -> MyApp.Timers.consume(effect) end,
+    invoke_types: Statifier.Invoke.Types.new(types: ["myapp:authorize"]),
+    serialization: {MyApp.RunLock, MyApp.RunLock}
+  )
+
+{:ok, run, state} = StatifierPersistence.Driver.create(driver, run_id)
+{:ok, run, state} = StatifierPersistence.Driver.send_event(driver, run_id, Statifier.Event.external("go"))
+```
+
+One call is one durable step, every effect through your `effects:`
+executor, every `<invoke>` through your `dispatch:` fun inside that same
+step, and then one further durable step per answer until the chart rests.
+`{:ok, donedata}` answers `done.invoke.<id>`; `{:error, failure}` answers
+`error.communication.invoke.<id>` with `Statifier.Session.failed_invocation/3`'s
+own `reason`/`attempts`/`detail` payload, and means permanently failed
+rather than "retry".
+
+Both events are built field for field from the two doors
+`Statifier.Session` gives a handler-backed invocation's host, `origin`
+and `origintype` included, so the same chart sees the same event whether
+it runs in a session or out of storage. That is asserted rather than
+claimed: `test/statifier_persistence/driver_session_conformance_test.exs`
+answers one document both ways and compares the `_event` each chart saw.
+
+An answer whose invocation the chart has since cancelled is dropped, per
+spec 6.4.3, and a chart whose answer re-arms its own call is bounded by
+`max_turns:` rather than driven forever.
 
 ## Status
 
