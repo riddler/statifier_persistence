@@ -10,6 +10,66 @@ fragment in [`changelog.d/`](changelog.d/README.md); the fragments are assembled
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
 
+## [0.2.0] 2026-08-31
+
+Feature release: a durable run-to-quiescence driver, opaque run metadata,
+and a custom blob type for encryption at rest.
+
+### Added
+
+- `StatifierPersistence.Driver` drives a durable run to quiescence over
+  `StatifierPersistence.Runs`: it performs each `<invoke>` through a
+  host-supplied dispatch fun inside the step that emitted it, then steps
+  every answer back in until the chart rests. Hosts that hand-rolled this
+  loop can delete it.
+- `StatifierPersistence.Driver` builds an invocation's answer events -
+  `done.invoke.<id>` and `error.communication.invoke.<id>`, `origin` and
+  `origintype` included - field for field from `Statifier.Session`'s own
+  `done_invocation/3` and `failed_invocation/3`, so a chart sees the same
+  event in a session and out of storage. A conformance test answers one
+  document both ways and compares what each chart saw.
+- `StatifierPersistence.Runs.create/4` and
+  `StatifierPersistence.Storage.insert_run/5` accept an optional
+  `metadata:` map of string keys, stored opaquely beside the run record
+  and returned by `fetch_run/2` unchanged (ADR-0006). Host identities
+  only, never personal data: blob encryption does not reach this column.
+- `StatifierPersistence.Storage.Adapter` gains the optional
+  `supports_metadata?/1` callback and a `metadata` field on `run_record`.
+  An adapter that does not export it refuses a non-empty map at create
+  with `{:error, :metadata_unsupported}`; an empty or absent map is never
+  refused, so every existing adapter stays conformant unchanged.
+- `StatifierPersistence.Storage.metadata_supported?/1` and
+  `check_metadata/2` report whether a store's adapter can hold metadata,
+  without writing anything.
+- `StatifierPersistence.Storage.Ecto.list_runs_by_metadata/2` lists the
+  runs whose metadata contains every given key/value pair.
+- Migration V02 adds a nullable `jsonb` `metadata` column to the runs
+  table, and `StatifierPersistence.Ecto.Migrations.up/1` accepts `from:`
+  so a host already on V01 applies later versions in its own second
+  migration.
+- `StatifierPersistence.Testing.StorageConformance` gains metadata cases:
+  a conformant adapter either round-trips the map or refuses it at open,
+  and never silently drops it.
+- `use StatifierPersistence.Ecto` accepts a `:blob_type` option to put a custom Ecto type on the three blob columns (`identity_blob`, `chart_blob`, `position_blob`), enabling encryption at rest with no wrapping adapter.
+
+### Changed
+
+- Requires `statifier` from its git `main` (ref `1f865f7`) rather than `~> 2.0`,
+  until a release carries the queue-discard-on-exit fix.
+
+### Fixed
+
+- A run whose top-level `<final>` is reached while sibling `done.state.*` events
+  are still queued now persists as `completed`, instead of raising
+  "loop bug: non-quiescent MachineState reached the persist tail". The same
+  holds for a top-level `<final>` whose `<donedata>` expression fails.
+- `StatifierPersistence.Runs.create/4` passes only its `metadata:` pair to
+  `StatifierPersistence.Storage.check_metadata/2`, whose contract is the
+  narrower `[Storage.run_write_opt()]`. Handing the whole option list over
+  made dialyzer derive a success typing for `create/4` that accepted no
+  `executor:` at all, so an embedder had to suppress "will never return" on
+  every correct call; that suppression can now be deleted.
+
 ## [0.1.3] 2026-08-27
 
 Docs release: README and guide refresh onto the family's canonical example
