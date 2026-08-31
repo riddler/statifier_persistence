@@ -37,10 +37,11 @@ retry on your own.
 
 ## The request is a record, not a review gate
 
-One contributor, no CI. Nothing runs when the request opens, so the full
-`mix quality` before the push is the only verification this branch ever gets
-- treat a skipped or scoped gate on a branch that touches gated paths as a
-hard stop, not a formality to catch up on later. (A branch touching no gated
+One contributor. The repo runs a "Full quality gate" CI workflow on each
+request, but the local full `mix quality` before the push remains the
+required verification - CI is a second check on the request, not a
+substitute - so treat a skipped or scoped local gate on a branch that
+touches gated paths as a hard stop, not a formality to catch up on later. (A branch touching no gated
 paths has no gate to run; say so in the request body.) What the request is
 for is the record: a diff with a written rationale, linked to its bead, that
 can be read later.
