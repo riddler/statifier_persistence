@@ -58,7 +58,6 @@
 
   "tmux": {
     "session": "statifier_persistence",
-    "permission_mode": "skip-permissions",
     "model": "opus"
   },
 
