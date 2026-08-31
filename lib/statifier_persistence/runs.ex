@@ -136,7 +136,17 @@ defmodule StatifierPersistence.Runs do
     # before initialize/2's effects reach the executor: a create the
     # adapter will refuse must not fire an effect on its way to the
     # refusal, for the same reason the identity refusal runs first below.
-    with :ok <- Storage.check_metadata(store, opts) do
+    #
+    # Only the `metadata:` pair crosses, never the whole list (sp-3kk).
+    # `check_metadata/2`'s contract is `[Storage.run_write_opt()]` -
+    # `:failure`/`:metadata`/`:position` - and this list is `[opt()]`,
+    # whose REQUIRED `executor:` is not a member of it. Handing the whole
+    # list over made dialyzer intersect the two: the success typing it
+    # derived for `create/4` accepted no `executor:` at all, so every
+    # correct call was reported as one that will never return, and the
+    # first production embedder had to suppress the finding on a wrapper
+    # function. `Keyword.take/2` passes exactly what the callee reads.
+    with :ok <- Storage.check_metadata(store, Keyword.take(opts, [:metadata])) do
       {machine_state, effects} =
         Interpreter.initialize(machine, Keyword.get(opts, :initialize, []))
 
