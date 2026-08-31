@@ -54,8 +54,10 @@ and a custom blob type for encryption at rest.
 
 ### Changed
 
-- Requires `statifier` from its git `main` (ref `1f865f7`) rather than `~> 2.0`,
-  until a release carries the queue-discard-on-exit fix.
+- Requires `statifier` `~> 2.2 and >= 2.2.1` rather than `~> 2.0`: 2.2.1 is
+  the first release carrying the queue-discard-on-exit fix the completion
+  conformance cases need. (An interim git-ref pin served between 2.2.0 and
+  that release.)
 
 ### Fixed
 
