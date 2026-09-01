@@ -41,11 +41,12 @@ defmodule StatifierPersistence.Storage.Adapter do
   @type run_id :: String.t()
 
   @typedoc """
-  A run's lifecycle status (ADR-0004 decision 2). `:completed` and `:failed`
-  are terminal. No callback here validates a transition between them - the
-  lifecycle above the facade owns that.
+  A run's lifecycle status (ADR-0004 decision 2, extended by ADR-0008
+  decision 5). `:completed`, `:failed` and `:cancelled` are terminal. No
+  callback here validates a transition between them - the lifecycle above
+  the facade owns that.
   """
-  @type run_status :: :active | :completed | :failed
+  @type run_status :: :active | :completed | :failed | :cancelled
 
   @typedoc """
   A run's optional opaque metadata (ADR-0006 decision 1): a map of string
@@ -314,5 +315,25 @@ defmodule StatifierPersistence.Storage.Adapter do
   """
   @callback supports_metadata?(opts()) :: boolean()
 
-  @optional_callbacks isolate: 1, lock_run: 3, supports_metadata?: 1
+  @doc """
+  Optional metadata-match listing (ADR-0006 decision 3's equality-match
+  helper, promoted to a callback by ADR-0008 decision 5).
+
+  Lists the runs whose stored `metadata` contains every key/value pair in
+  `metadata`, recursively for a nested map. Equality match on all pairs is
+  the whole query surface - no ranges, no partial matches, no ordering
+  guarantee - the same contract `StatifierPersistence.Storage.Ecto`'s
+  module-local function already documents. Exporting it is how an adapter
+  declares it can answer "which runs name me as their parent", which is
+  what a cascading cancel walks; an adapter that does not export it cannot
+  host a durable subchart, and `StatifierPersistence.Driver` refuses at
+  open rather than starting a child it could never cancel.
+  """
+  @callback list_runs_by_metadata(opts(), metadata()) ::
+              {:ok, [StatifierPersistence.Storage.Adapter.run_record()]} | {:error, error()}
+
+  @optional_callbacks isolate: 1,
+                      lock_run: 3,
+                      supports_metadata?: 1,
+                      list_runs_by_metadata: 2
 end

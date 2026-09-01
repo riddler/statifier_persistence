@@ -54,7 +54,7 @@ if Code.ensure_loaded?(Ecto) do
     # The runs.status column vocabulary (ADR-0004 decision 2), mapped
     # explicitly in both directions - never String.to_atom on database
     # bytes, and an unknown stored status fails loudly on a clause.
-    @statuses [active: "active", completed: "completed", failed: "failed"]
+    @statuses [active: "active", completed: "completed", failed: "failed", cancelled: "cancelled"]
 
     @doc """
     Resolves the `:persistence` host module into the handle every other
@@ -309,6 +309,7 @@ if Code.ensure_loaded?(Ecto) do
 
     Returns records in `fetch_run/2`'s shape.
     """
+    @impl Adapter
     @spec list_runs_by_metadata(Adapter.opts(), Adapter.metadata()) ::
             {:ok, [Adapter.run_record()]} | {:error, Adapter.error()}
     def list_runs_by_metadata(opts, metadata) do

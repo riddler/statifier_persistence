@@ -362,6 +362,95 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                  @conformance_adapter.fetch_run(store.opts, "run-conformance-overwrite")
       end
 
+      # sabotage: in StatifierPersistence.Storage.Ecto's @statuses list,
+      # drop the cancelled: "cancelled" entry -> red,
+      # encode_status(:cancelled) has no matching clause and this test's
+      # insert raises FunctionClauseError instead of storing the record.
+      # Verified red on the Ecto conformance suite, reverted.
+      test "adapter: a :cancelled run round-trips through insert_run/2 and update_run/2 with its position untouched",
+           %{store: store} do
+        inserted = %{
+          run_id: "run-conformance-cancelled",
+          status: :cancelled,
+          content_hash: "sha256:conformance-chart-a",
+          identity_blob: <<1, 2, 3>>,
+          position_blob: <<7, 8, 9>>,
+          failure: nil,
+          metadata: %{}
+        }
+
+        assert :ok = @conformance_adapter.insert_run(store.opts, inserted)
+
+        assert {:ok, ^inserted} =
+                 @conformance_adapter.fetch_run(store.opts, "run-conformance-cancelled")
+
+        updated = %{inserted | status: :cancelled}
+        assert :ok = @conformance_adapter.update_run(store.opts, updated)
+
+        assert {:ok, fetched} =
+                 @conformance_adapter.fetch_run(store.opts, "run-conformance-cancelled")
+
+        assert fetched.status == :cancelled
+        assert fetched.position_blob == inserted.position_blob
+      end
+
+      # -- Adapter level: the optional child enumeration (ADR-0008) -----
+      #
+      # Generated only when the adapter under test exports the optional
+      # list_runs_by_metadata/2 - the same opt-in-by-export shape lock_run/3
+      # gets above.
+
+      if Code.ensure_loaded?(conformance_adapter) and
+           function_exported?(conformance_adapter, :list_runs_by_metadata, 2) do
+        # sabotage: in StatifierPersistence.Storage.InMemory's private
+        # contains?/2, drop the is_map/is_map guarded clause that recurses
+        # into a nested map value, leaving only the plain == comparison ->
+        # red, the nested-match assertion below found no runs instead of
+        # the one whose nested map contains the given pair. Verified red on
+        # the InMemory conformance suite, reverted.
+        test "adapter: list_runs_by_metadata/2 matches a nested map by containment and excludes the rest",
+             %{store: store} do
+          linked = %{
+            run_id: "run-conformance-child-linked",
+            status: :active,
+            content_hash: "sha256:conformance-chart-a",
+            identity_blob: <<1, 2, 3>>,
+            position_blob: <<7, 8, 9>>,
+            failure: nil,
+            metadata: %{
+              "statifier_persistence" => %{
+                "parent_run_id" => "run-conformance-parent",
+                "invoke_id" => "call"
+              }
+            }
+          }
+
+          other_parent = %{
+            linked
+            | run_id: "run-conformance-child-other-parent",
+              metadata: %{
+                "statifier_persistence" => %{
+                  "parent_run_id" => "run-conformance-other-parent",
+                  "invoke_id" => "call"
+                }
+              }
+          }
+
+          unrelated = %{linked | run_id: "run-conformance-unrelated", metadata: %{}}
+
+          assert :ok = @conformance_adapter.insert_run(store.opts, linked)
+          assert :ok = @conformance_adapter.insert_run(store.opts, other_parent)
+          assert :ok = @conformance_adapter.insert_run(store.opts, unrelated)
+
+          assert {:ok, matches} =
+                   @conformance_adapter.list_runs_by_metadata(store.opts, %{
+                     "statifier_persistence" => %{"parent_run_id" => "run-conformance-parent"}
+                   })
+
+          assert Enum.map(matches, & &1.run_id) == ["run-conformance-child-linked"]
+        end
+      end
+
       # -- Adapter level: the optional run metadata (ADR-0006) -----------
       #
       # A conformant adapter either round-trips a non-empty metadata map or
