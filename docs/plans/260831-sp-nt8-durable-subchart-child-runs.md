@@ -1271,3 +1271,118 @@ blocking here.
 **Implementation Note**: as Phase 1.
 
 ---
+
+## Unattended verification pass (2026-09-01)
+
+**Machine-checked (unattended, 2026-09-01):** an agent pass under
+`/wurk:verify --unattended` ran every item above that is machine-checkable
+and recorded the evidence below. The checkboxes are deliberately left
+UNTICKED: a tick records a *human* walking the item, and nothing here
+substitutes for that. One real defect was found and fixed (Phase 1's
+changelog item); everything else held.
+
+### Phase 1
+
+- run_status typedoc: PASS. `Adapter.run_status`'s typedoc reads
+  "`:completed`, `:failed` and `:cancelled` are terminal. No callback here
+  validates a transition between them", which is exactly the two facts the
+  item asks a third-party adapter author to be able to read off it.
+- Two-arm terminal guards: PASS. `rg ':completed, :failed' lib/` returns
+  three hits, all three of them `[:completed, :failed, :cancelled]`
+  (`runs.ex:270`, `:308`, `:345`). No guard lists only two arms.
+- Changelog fragment: **FAILED, FIXED.** The fragment was ~60 lines of
+  deeply nested sub-bullets, which `changelog.d/README.md` explicitly
+  forbids ("One line per change ... No nested bullets"), and it read as a
+  description of the diff rather than an effect on a user. Rewritten flat,
+  one line per change. The rewrite also ADDED a user-facing consequence the
+  original omitted entirely: `Adapter.run_status/0` gaining `:cancelled` is
+  a breaking change for any third-party adapter that encodes statuses by an
+  exhaustive match, and the README requires such an entry to say what to do
+  about it.
+- Sabotage attestation: deferred to human (process attestation, not
+  re-checkable after the fact). See the Phase 6 entry for the one case this
+  pass re-verified independently.
+
+### Phase 2
+
+- One reader of the reserved namespace: PASS, with a nuance worth recording.
+  `Linkage.from_metadata/1` is the only code that PARSES the reserved key,
+  and its only callers are `driver.ex:463` and `:853`. `runs.ex:212` touches
+  `reserved_key/0` solely to refuse a host that writes into it - a guard on
+  caller input, not a read of stored metadata to make a decision.
+  `testing/storage_conformance.ex` uses the literal string three times, but
+  only to BUILD fixtures for the generic containment query, never to decide
+  anything. ADR-0006 decision 1's narrowing is therefore genuinely confined.
+  Left as-is rather than churned to `reserved_key/0`: the conformance case
+  is testing nested-map containment generally, not linkage.
+- Linkage moduledoc: PASS. It states the pin is mandatory and gives the
+  reason in this package's own words (a child is resumed by whatever node
+  picks it up; the pin is what separates "resumed the workflow you started"
+  from "resumed a different workflow that happens to share an id").
+- Sabotage attestation: deferred to human.
+
+### Phase 3
+
+- Driver moduledoc: PASS. The "durable subcharts are deliberately out of
+  scope" paragraph is gone, replaced by a `## Durable subcharts` section
+  that names who emits the instruction (`Handler.Scxml` and
+  `StatifierBlocks.Runtime.Subchart`) and who executes it (`Session`
+  in-memory, this module durably).
+- Refusal spelling: PASS. `driver.ex:723` carries
+  `reason: "child_run_creation_failed"`, byte-identical to statifier_blocks
+  ADR-0008 decision 5, and the tests assert that exact string.
+- No behavior change for a host that never returns the arm: PASS with one
+  nuance. The new dispatch arm is only reached if the host returns it, and
+  `auto_answer_parent/3` short-circuits on `chart_resolver: nil`. The one
+  genuine difference is that `{:cancel_invoke, _}` now issues a
+  child-enumeration query where it previously fell through to `:ok`. It is
+  outcome-identical (a host with no children matches none), but it is an
+  extra storage read per invoke cancellation, which a host watching query
+  logs would see. Recorded rather than treated as a defect.
+- Sabotage attestation: deferred to human.
+
+### Phase 4
+
+- `chart_resolver:` docstring: PASS. It states plainly that this package
+  cannot supply one because a stored `chart_blob` is opaque under ADR-0003
+  decision 1 and nothing here decodes one, so a host does not read the
+  option as an omission.
+- No bespoke parent-child transport: PASS. The only path from a child to
+  its parent is `done_invocation/5` / `failed_invocation/5`; `answer_parent/3`
+  and the automatic path both funnel into those same two doors, and no
+  direct message, shared process, or second channel exists.
+- Sabotage attestation: deferred to human.
+
+### Phase 5
+
+- `cascade_cancel/3` docstring: PASS on all three required rules - retain
+  ("nothing is deleted and every position is left byte-identical"),
+  idempotency ("a cascade interrupted halfway ... is completed correctly by
+  re-running it"), and the no-global-transaction consequence ("each run's
+  cancel is its own serialized write under its own run's exclusion ... this
+  package does not have it and does not want it").
+- Ecto nested locking: PASS, re-verified live in this pass rather than taken
+  on report. `mix test test/statifier_persistence/driver_subchart_ecto_test.exs`
+  runs green against live Postgres, and its query log shows the three-deep
+  cascade committing, with the derived ids `run_ecto_1/call/0` and
+  `run_ecto_1/call/0/nested/0` confirming the strictly-extending id shape the
+  acyclicity argument rests on. No deadlock.
+- Sabotage attestation: deferred to human.
+
+### Phase 6
+
+- Sabotage attestation: **INDEPENDENTLY RE-VERIFIED in this pass**, because
+  the implementing loop reported that it had reworded this note's marker
+  without re-running the mutation. This pass re-applied mutation (1) itself -
+  disabling the `Runs.cascade_cancel/3` call in `driver.ex`'s
+  `{:cancel_invoke, _}` clause - and both durable-subchart race tests went
+  red on `child_record.status == :cancelled` (got `:active`). Reverted; the
+  revert is byte-exact (`git status` clean) and the file is green again. The
+  attestation is sound.
+- Race 2 stability: PASS. `mix test ... --seed 0 --repeat-until-failure 20`
+  completed 20 consecutive green runs, so it blocks on the rendezvous rather
+  than passing by timing luck.
+- File readability: PASS. The moduledoc addition names which scenario is
+  ADR-0007's and which is ADR-0008's, and says why only the second needs a
+  serialization strategy (the liveness read has to fall under the *same*
+  exclusion as the step it gates, which needs a controlled pause to prove).
