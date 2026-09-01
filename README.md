@@ -24,7 +24,7 @@ crash semantics. This package is that loop, packaged.
 ```elixir
 def deps do
   [
-    {:statifier_persistence, "~> 0.3"},
+    {:statifier_persistence, "~> 0.4"},
     # Optional, for the Postgres adapter:
     {:ecto_sql, "~> 3.10"}
   ]
