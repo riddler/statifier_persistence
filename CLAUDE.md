@@ -116,7 +116,7 @@ days or survive deploys should not need long-lived Session processes at all -
 but every host currently hand-rolls the loop, the storage guard, and the crash
 semantics. This package is that loop, packaged.
 
-The package is released (0.1.x on Hex) and the whole loop exists: the
+The package is released (0.4.x on Hex) and the whole loop exists: the
 storage-adapter behaviour and its identity guard, the in-memory and Ecto
 adapters, the run lifecycle, the executor seam, and per-run serialization.
 The README's worked example drives them end to end.
