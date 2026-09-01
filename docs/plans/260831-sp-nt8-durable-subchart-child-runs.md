@@ -1071,12 +1071,12 @@ whole feature as a user sees it, not the six phases.
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] Full `mix quality` passes.
-- [ ] Both new cases are in
+- [x] Full `mix quality` passes.
+- [x] Both new cases are in
       `test/statifier_persistence/driver_restart_race_test.exs`, and the four
       pre-existing cases in that file are unchanged (`git diff` shows
       additions only within the existing cases' line range).
-- [ ] The suite still runs `async: true` - no new global state.
+- [x] The suite still runs `async: true` - no new global state.
 
 #### Manual Verification:
 - [ ] Both new cases confirmed red under a mutation (a process attestation,
@@ -1247,6 +1247,26 @@ blocking here.
       timeout and no `deadlock detected`.
 - [ ] The `cascade_cancel/3` docstring states the retain rule, the
       idempotency rule, and the no-global-transaction consequence, all three.
+
+**Implementation Note**: as Phase 1.
+
+---
+
+### Phase 6
+
+- [ ] Both new cases confirmed red under a mutation (a process attestation,
+      not a gate-checkable state): for race 1, drop `:cancelled` from the
+      cascade so the child stays `:active` *and* remove the `late_answer/3`
+      liveness read, so the answer is delivered to the abandoned parent and it
+      lands in "leaked"; for race 2, move the liveness read out of the builder
+      and into `reenter/5` before the call, so the cancel lands in the window
+      and the answer is delivered anyway.
+- [ ] Race 2 genuinely blocks rather than passing by timing luck: run it 20
+      times (`mix test <file> --seed 0 --repeat-until-failure 20` or an
+      equivalent loop) and confirm it is stable.
+- [ ] Reading the file top to bottom, a reviewer can tell which case is
+      ADR-0007's and which is ADR-0008's, and why the second needs a
+      serialization strategy where the first does not.
 
 **Implementation Note**: as Phase 1.
 
