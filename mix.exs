@@ -74,6 +74,11 @@ defmodule StatifierPersistence.MixProject do
   defp deps do
     [
       statifier_dep(),
+      # Direct, not transitive: this package calls :telemetry.execute/3
+      # itself (ADR-0009 decision 1), and a package that does declares it.
+      # It is already in every dependent's tree through statifier, so no
+      # host's lock file grows.
+      {:telemetry, "~> 1.3"},
       {:uxid, "~> 2.0"},
       {:ecto_sql, "~> 3.10", optional: true},
 

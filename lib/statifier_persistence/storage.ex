@@ -21,11 +21,20 @@ defmodule StatifierPersistence.Storage do
 
   Every function here returns an error tuple instead of throwing; nothing
   in this module ever downgrades a failure to a default value.
+
+  This module is also the storage seam's telemetry site (ADR-0009 decision
+  3): every adapter callback below is timed and reported as
+  `[:statifier_persistence, :adapter, :call]`, and every identity refusal
+  - the guard's own and every writer's - as
+  `[:statifier_persistence, :identity, :refused]`. Both are built by
+  `StatifierPersistence.Telemetry`; see `docs/telemetry.md` for the
+  contract.
   """
 
   alias Statifier.{Machine, MachineState, Position}
   alias Statifier.Machine.Identity
   alias StatifierPersistence.Storage.Adapter
+  alias StatifierPersistence.Telemetry
 
   @enforce_keys [:adapter, :opts]
   defstruct [:adapter, :opts]
@@ -72,7 +81,7 @@ defmodule StatifierPersistence.Storage do
   """
   @spec new(adapter :: module(), opts :: Adapter.opts()) :: {:ok, t()} | {:error, error()}
   def new(adapter, opts) when is_atom(adapter) do
-    case adapter.init(opts) do
+    case adapter_call(adapter, :init, [], fn -> adapter.init(opts) end) do
       {:ok, adapter_opts} -> {:ok, %__MODULE__{adapter: adapter, opts: adapter_opts}}
       {:error, _reason} = error -> error
     end
@@ -93,7 +102,7 @@ defmodule StatifierPersistence.Storage do
       when is_binary(chart_blob) do
     case Machine.identity(machine) do
       nil ->
-        {:error, :unidentified_chart}
+        refuse_unidentified(:chart, [])
 
       identity ->
         chart_record = %{
@@ -102,7 +111,9 @@ defmodule StatifierPersistence.Storage do
           chart_blob: chart_blob
         }
 
-        store.adapter.save_chart(store.opts, chart_record)
+        adapter_call(store.adapter, :save_chart, [content_hash: identity.content_hash], fn ->
+          store.adapter.save_chart(store.opts, chart_record)
+        end)
     end
   end
 
@@ -112,7 +123,9 @@ defmodule StatifierPersistence.Storage do
   @spec fetch_chart(store :: t(), content_hash :: Adapter.content_hash()) ::
           {:ok, Adapter.chart_record()} | {:error, error()}
   def fetch_chart(%__MODULE__{} = store, content_hash) do
-    store.adapter.fetch_chart(store.opts, content_hash)
+    adapter_call(store.adapter, :fetch_chart, [content_hash: content_hash], fn ->
+      store.adapter.fetch_chart(store.opts, content_hash)
+    end)
   end
 
   @doc """
@@ -134,7 +147,7 @@ defmodule StatifierPersistence.Storage do
   def save_position(%__MODULE__{} = store, session_id, %MachineState{} = machine_state) do
     case Machine.identity(machine_state.machine) do
       nil ->
-        {:error, :unidentified_chart}
+        refuse_unidentified(:position, session_id: session_id)
 
       identity ->
         with {:ok, position_blob} <- Position.to_binary(machine_state) do
@@ -145,7 +158,8 @@ defmodule StatifierPersistence.Storage do
             position_blob: position_blob
           }
 
-          store.adapter.save_position(store.opts, position_record)
+          keys = [session_id: session_id, content_hash: identity.content_hash]
+          write(store, :save_position, keys, position_record)
         end
     end
   end
@@ -194,8 +208,15 @@ defmodule StatifierPersistence.Storage do
           machine :: Machine.t()
         ) :: {:ok, MachineState.t()} | {:error, error()}
   def load_position(%__MODULE__{} = store, session_id, %Machine{} = machine) do
-    with {:ok, position_record} <- store.adapter.fetch_position(store.opts, session_id),
-         :ok <- precheck_identity(position_record.identity_blob, machine) do
+    fetch =
+      adapter_call(store.adapter, :fetch_position, [session_id: session_id], fn ->
+        store.adapter.fetch_position(store.opts, session_id)
+      end)
+
+    keys = [session_id: session_id]
+
+    with {:ok, position_record} <- fetch,
+         :ok <- precheck_identity(position_record.identity_blob, machine, :position, keys) do
       Position.from_binary(position_record.position_blob, machine)
     end
   end
@@ -247,15 +268,16 @@ defmodule StatifierPersistence.Storage do
       ) do
     case Machine.identity(machine_state.machine) do
       nil ->
-        {:error, :unidentified_chart}
+        refuse_unidentified(:run, run_id: run_id)
 
       identity ->
         metadata = metadata_opt!(opts)
+        keys = [run_id: run_id, content_hash: identity.content_hash]
 
         with :ok <- check_metadata_supported(store, metadata),
              {:ok, position_blob} <- insert_position_blob(machine_state, position_opt(opts)) do
-          run_record = run_record(run_id, status, identity, position_blob, metadata, opts)
-          store.adapter.insert_run(store.opts, run_record)
+          record = run_record(run_id, status, identity, position_blob, metadata, opts)
+          write(store, :insert_run, keys, record)
         end
     end
   end
@@ -296,13 +318,15 @@ defmodule StatifierPersistence.Storage do
       ) do
     case Machine.identity(machine_state.machine) do
       nil ->
-        {:error, :unidentified_chart}
+        refuse_unidentified(:run, run_id: run_id)
 
       identity ->
+        keys = [run_id: run_id, content_hash: identity.content_hash]
+
         with {:ok, position_blob} <-
                update_position_blob(store, run_id, machine_state, position_opt(opts)) do
-          run_record = run_record(run_id, status, identity, position_blob, %{}, opts)
-          store.adapter.update_run(store.opts, run_record)
+          record = run_record(run_id, status, identity, position_blob, %{}, opts)
+          write(store, :update_run, keys, record)
         end
     end
   end
@@ -327,9 +351,10 @@ defmodule StatifierPersistence.Storage do
           opts :: [run_write_opt()]
         ) :: :ok | {:error, error()}
   def update_run_status(%__MODULE__{} = store, run_id, status, opts \\ []) do
-    with {:ok, run_record} <- store.adapter.fetch_run(store.opts, run_id) do
+    with {:ok, run_record} <- fetch_run(store, run_id) do
       updated = %{run_record | status: status, failure: Keyword.get(opts, :failure)}
-      store.adapter.update_run(store.opts, updated)
+      keys = [run_id: run_id, content_hash: run_record.content_hash]
+      write(store, :update_run, keys, updated)
     end
   end
 
@@ -339,7 +364,9 @@ defmodule StatifierPersistence.Storage do
   @spec fetch_run(store :: t(), run_id :: Adapter.run_id()) ::
           {:ok, Adapter.run_record()} | {:error, error()}
   def fetch_run(%__MODULE__{} = store, run_id) do
-    store.adapter.fetch_run(store.opts, run_id)
+    adapter_call(store.adapter, :fetch_run, [run_id: run_id], fn ->
+      store.adapter.fetch_run(store.opts, run_id)
+    end)
   end
 
   @doc """
@@ -357,7 +384,9 @@ defmodule StatifierPersistence.Storage do
   def metadata_supported?(%__MODULE__{} = store) do
     Code.ensure_loaded?(store.adapter) and
       function_exported?(store.adapter, :supports_metadata?, 1) and
-      store.adapter.supports_metadata?(store.opts) == true
+      adapter_call(store.adapter, :supports_metadata?, [], fn ->
+        store.adapter.supports_metadata?(store.opts)
+      end) == true
   end
 
   @doc """
@@ -393,7 +422,9 @@ defmodule StatifierPersistence.Storage do
           {:ok, [Adapter.run_record()]} | {:error, error()}
   def list_runs_by_metadata(%__MODULE__{} = store, metadata) do
     if child_listing_supported?(store) do
-      store.adapter.list_runs_by_metadata(store.opts, metadata)
+      adapter_call(store.adapter, :list_runs_by_metadata, [], fn ->
+        store.adapter.list_runs_by_metadata(store.opts, metadata)
+      end)
     else
       {:error, :child_listing_unsupported}
     end
@@ -440,8 +471,10 @@ defmodule StatifierPersistence.Storage do
           machine :: Machine.t()
         ) :: {:ok, MachineState.t()} | {:error, error()}
   def load_run_position(%__MODULE__{} = store, run_id, %Machine{} = machine) do
-    with {:ok, run_record} <- store.adapter.fetch_run(store.opts, run_id),
-         :ok <- precheck_identity(run_record.identity_blob, machine) do
+    keys = [run_id: run_id]
+
+    with {:ok, run_record} <- fetch_run(store, run_id),
+         :ok <- precheck_identity(run_record.identity_blob, machine, :run, keys) do
       case run_record.position_blob do
         nil -> {:error, :run_position_missing}
         position_blob -> Position.from_binary(position_blob, machine)
@@ -515,27 +548,114 @@ defmodule StatifierPersistence.Storage do
     do: Position.to_binary(machine_state)
 
   defp update_position_blob(store, run_id, _machine_state, :skip) do
-    with {:ok, run_record} <- store.adapter.fetch_run(store.opts, run_id) do
+    with {:ok, run_record} <- fetch_run(store, run_id) do
       {:ok, run_record.position_blob}
     end
   end
 
-  @spec precheck_identity(identity_blob :: binary(), machine :: Machine.t()) ::
+  @spec precheck_identity(
+          identity_blob :: binary(),
+          machine :: Machine.t(),
+          stage :: :position | :run,
+          keys :: keyword()
+        ) ::
           :ok
           | {:error, :not_a_statifier_blob}
           | {:error, {:unsupported_format_version, term()}}
           | {:error, {:identity_mismatch, Identity.t(), Identity.t() | nil}}
           | {:error, :unidentified_chart}
-  defp precheck_identity(_identity_blob, %Machine{identity: nil}),
-    do: {:error, :unidentified_chart}
+  defp precheck_identity(_identity_blob, %Machine{identity: nil}, stage, keys),
+    do: refuse_unidentified(stage, keys)
 
-  defp precheck_identity(identity_blob, %Machine{identity: supplied_identity}) do
-    with {:ok, stored_identity} <- Identity.from_binary(identity_blob) do
-      if Identity.matches?(stored_identity, supplied_identity) do
+  defp precheck_identity(identity_blob, %Machine{identity: supplied}, stage, keys) do
+    with {:ok, stored} <- Identity.from_binary(identity_blob) do
+      if Identity.matches?(stored, supplied) do
         :ok
       else
-        {:error, {:identity_mismatch, stored_identity, supplied_identity}}
+        refuse_mismatch(stage, keys, stored, supplied)
       end
     end
   end
+
+  # The two identity refusals, each emitted at exactly the site that
+  # returns it (ADR-0009 decision 3). `stage` is `:chart`, `:position` or
+  # `:run`; `keys` carries whichever of `run_id` and `session_id` the
+  # refusing call is keyed by, and the rest ride as `nil`.
+  #
+  # Only the two content hashes travel, never the two `Identity` structs
+  # the mismatch term carries (ADR-0009 decision 7): a content hash is a
+  # digest of a chart document and is the key this package and its host
+  # already exchange; the envelope around it is not.
+  @spec refuse_unidentified(:chart | :position | :run, keyword()) ::
+          {:error, :unidentified_chart}
+  defp refuse_unidentified(stage, keys) do
+    Telemetry.identity_refused([stage: stage, reason: :unidentified_chart] ++ identity_keys(keys))
+
+    {:error, :unidentified_chart}
+  end
+
+  @spec refuse_mismatch(:position | :run, keyword(), Identity.t(), Identity.t()) ::
+          {:error, {:identity_mismatch, Identity.t(), Identity.t()}}
+  defp refuse_mismatch(stage, keys, stored, supplied) do
+    Telemetry.identity_refused(
+      [
+        stage: stage,
+        reason: :identity_mismatch,
+        stored_content_hash: stored.content_hash,
+        supplied_content_hash: supplied.content_hash
+      ] ++ identity_keys(keys)
+    )
+
+    {:error, {:identity_mismatch, stored, supplied}}
+  end
+
+  @spec identity_keys(keyword()) :: keyword()
+  defp identity_keys(keys),
+    do: [run_id: Keyword.get(keys, :run_id), session_id: Keyword.get(keys, :session_id)]
+
+  # One timed adapter callback, reported as
+  # `[:statifier_persistence, :adapter, :call]` (ADR-0009 decision 3).
+  # `keys` is whichever of `run_id`, `session_id` and `content_hash` this
+  # callback is keyed by; the rest ride as `nil`, which is what lets a
+  # handler read one shape for every callback.
+  #
+  # The result passes through untouched: this wrapper observes, it never
+  # translates. `outcome` is `:error` only for an `{:error, _}` return,
+  # which is every adapter callback's own refusal arm and also the shape
+  # `supports_metadata?/1` never returns.
+  @spec adapter_call(module(), atom(), keyword(), (-> result)) :: result when result: term()
+  defp adapter_call(adapter, callback, keys, fun) do
+    start = System.monotonic_time()
+    result = fun.()
+
+    Telemetry.adapter_call(
+      System.monotonic_time() - start,
+      adapter: adapter,
+      callback: callback,
+      outcome: call_outcome(result),
+      reason: call_reason(result),
+      run_id: Keyword.get(keys, :run_id),
+      session_id: Keyword.get(keys, :session_id),
+      content_hash: Keyword.get(keys, :content_hash)
+    )
+
+    result
+  end
+
+  # The four record writers, whose call shape is identical: one record
+  # argument, timed and reported by `adapter_call/4`.
+  @spec write(t(), atom(), keyword(), map()) :: :ok | {:error, error()}
+  defp write(store, callback, keys, record) do
+    adapter_call(store.adapter, callback, keys, fn ->
+      apply(store.adapter, callback, [store.opts, record])
+    end)
+  end
+
+  @spec call_outcome(term()) :: :ok | :error
+  defp call_outcome({:error, _reason}), do: :error
+  defp call_outcome(_result), do: :ok
+
+  @spec call_reason(term()) :: term() | nil
+  defp call_reason({:error, reason}), do: reason
+  defp call_reason(_result), do: nil
 end
