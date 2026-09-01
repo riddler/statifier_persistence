@@ -10,6 +10,25 @@ fragment in [`changelog.d/`](changelog.d/README.md); the fragments are assembled
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
 
+## [0.5.0] 2026-09-01
+
+Feature release: the durable step is observable, and a `:dispatch` fun can
+see the whole `<invoke>` it is being handed.
+
+### Added
+
+- `StatifierPersistence.Driver.dispatch_context/0` carries `:invoke`, the whole
+  `Statifier.Effect.Invoke` being dispatched, so a `:dispatch` fun can read the
+  element's `src` - the document id a subchart handler resolves its child chart
+  by - along with `content`, `autoforward`, and the step counters.
+- `StatifierPersistence.Telemetry` emits the fourteen `[:statifier_persistence,
+  ...]` events ADR-0009 specifies - the durable step as a `:start`/`:stop` pair,
+  the per-run lock wait, every storage-adapter call, identity refusals, the run
+  lifecycle, executor failures, and the durable-subchart seam - and `events/0`
+  returns every name for a bridge to attach to.
+- Adds a direct `:telemetry` dependency (already present transitively through
+  `statifier`, so no lock file grows).
+
 ## [0.4.0] 2026-09-01
 
 Feature release: durable subcharts (ADR-0008) - an `<invoke>` may start a
