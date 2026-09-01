@@ -555,8 +555,8 @@ with defaults instead of `:no_linkage` (the no-parent case).
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] Full `mix quality` passes.
-- [ ] `Storage.insert_run/5` accepts a linkage map through the Ecto adapter -
+- [x] Full `mix quality` passes.
+- [x] `Storage.insert_run/5` accepts a linkage map through the Ecto adapter -
       i.e. the reserved namespace is `jsonb`-representable, asserted by a real
       insert rather than by inspection.
 
@@ -1189,5 +1189,19 @@ next phase. In looped (`--loop`) execution, this phase's Automated
 Verification gates advancement automatically (via `/wurk:commit --auto`), and
 Manual Verification items are deferred and surfaced once at the end instead of
 blocking here.
+
+---
+
+### Phase 2
+
+- [ ] Every new test confirmed red under its noted mutation (a process
+      attestation, not a gate-checkable state).
+- [ ] Exactly one module in `lib/` reads a metadata key (grep for
+      `reserved_key` and for literal `"statifier_persistence"`), so ADR-0006
+      decision 1's narrowing is as narrow as the record says.
+- [ ] The moduledoc states the pin is mandatory and says why, in this
+      package's own vocabulary rather than by citing the ADR alone.
+
+**Implementation Note**: as Phase 1.
 
 ---

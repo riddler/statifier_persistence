@@ -55,6 +55,7 @@ defmodule StatifierPersistence.Runs do
 
   alias Statifier.Machine.Identity
   alias StatifierPersistence.{Executor, Run, Storage}
+  alias StatifierPersistence.Run.Linkage
   alias StatifierPersistence.Serialization.AdapterLock
   alias StatifierPersistence.Storage.Adapter
 
@@ -114,6 +115,13 @@ defmodule StatifierPersistence.Runs do
     strategy the fetch-to-persist tail runs inside (ADR-0004 decision 5;
     `fail/4` accepts it too). Defaults to
     `{StatifierPersistence.Serialization.AdapterLock, store}`.
+  - `linkage:` (`create/4` only) - this package's own, never a host's. Set
+    by the durable subchart `start_child` clause (Phase 3) to record a
+    child's parent under the reserved metadata namespace
+    (`StatifierPersistence.Run.Linkage`, ADR-0008 decision 2). A host
+    supplies `metadata:` for its own identities; supplying `linkage:` from
+    outside this package is a caller bug the same way a malformed
+    `metadata:` is.
   """
   @type opt ::
           {:executor, Executor.t()}
@@ -122,6 +130,7 @@ defmodule StatifierPersistence.Runs do
           | {:initialize, keyword()}
           | {:serialization, {module(), term()}}
           | {:metadata, Adapter.metadata()}
+          | {:linkage, Linkage.t()}
 
   @doc """
   Creates a run: `Statifier.Interpreter.initialize/2` (which cannot fail),
@@ -164,18 +173,57 @@ defmodule StatifierPersistence.Runs do
     # correct call was reported as one that will never return, and the
     # first production embedder had to suppress the finding on a wrapper
     # function. `Keyword.take/2` passes exactly what the callee reads.
-    with :ok <- Storage.check_metadata(store, Keyword.take(opts, [:metadata])) do
+    #
+    # The refusal-at-open check has to see the *merged* map (the host's
+    # `metadata:` plus a Phase 3 `linkage:`), not just the host's, so the
+    # merge happens first and `check_metadata/2` is handed the result as
+    # its own `:metadata` pair - a durable child on a metadata-less adapter
+    # is refused before any effect runs, the same ordering ADR-0006
+    # decision 3 set for a host's own metadata.
+    metadata = metadata(opts)
+
+    with :ok <- Storage.check_metadata(store, metadata: metadata) do
       {machine_state, effects} =
         Interpreter.initialize(machine, Keyword.get(opts, :initialize, []))
 
       serialized(store, run_id, opts, fn ->
-        persist_tail(store, run_id, machine_state, effects, executor, {:insert, metadata(opts)})
+        persist_tail(store, run_id, machine_state, effects, executor, {:insert, metadata})
       end)
     end
   end
 
+  # A host writing into the reserved namespace collides with the package
+  # (ADR-0008, Consequences). The shape of `metadata:` is the one thing
+  # ADR-0006 decision 1 validates and a malformed option is a caller bug,
+  # so this raises rather than joining the error vocabulary - same posture
+  # as `Storage.metadata_opt!/1`.
+  #
+  # A non-map `:metadata` is left untouched here rather than inspected:
+  # `Map.has_key?/2` on a non-map raises `BadMapError`, the wrong exception
+  # for the wrong reason, and `check_metadata/2`'s own `metadata_opt!/1`
+  # already raises the right `ArgumentError` for that shape downstream -
+  # this function's job is only the reserved-key guard and the `linkage:`
+  # merge, both of which need an actual map to mean anything.
   @spec metadata([opt()]) :: Adapter.metadata()
-  defp metadata(opts), do: Keyword.get(opts, :metadata, %{})
+  defp metadata(opts) do
+    case Keyword.get(opts, :metadata, %{}) do
+      supplied when is_map(supplied) ->
+        if Map.has_key?(supplied, Linkage.reserved_key()) do
+          raise ArgumentError,
+                "the #{inspect(Linkage.reserved_key())} metadata key is reserved by " <>
+                  "statifier_persistence for durable subchart linkage (ADR-0008 " <>
+                  "decision 2) and cannot be supplied by a host"
+        end
+
+        case Keyword.get(opts, :linkage) do
+          nil -> supplied
+          %Linkage{} = linkage -> Map.merge(supplied, Linkage.to_metadata(linkage))
+        end
+
+      malformed ->
+        malformed
+    end
+  end
 
   @doc """
   Delivers one external event to a run, in ADR-0004 decision 3's order (the

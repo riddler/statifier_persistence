@@ -18,6 +18,7 @@ defmodule StatifierPersistence.Storage.EctoMetadataTest do
   alias Statifier.MachineState
   alias StatifierPersistence.Ecto.Config
   alias StatifierPersistence.EctoHosts.Default
+  alias StatifierPersistence.Run.Linkage
   alias StatifierPersistence.Storage
   alias StatifierPersistence.Testing.Charts
   alias StatifierPersistence.TestRepo
@@ -193,6 +194,25 @@ defmodule StatifierPersistence.Storage.EctoMetadataTest do
       assert :ok = insert(store, machine_state, "run-ecto-md-nested-ok", metadata)
       assert {:ok, record} = Storage.fetch_run(store, "run-ecto-md-nested-ok")
       assert record.metadata == metadata
+    end
+  end
+
+  describe "StatifierPersistence.Run.Linkage's reserved namespace (sp-nt8, ADR-0008)" do
+    # sabotage: Linkage.to_metadata/1's child_index emitted as an atom
+    # (`child_index: 0` instead of `"child_index" => 0`) -> red, the insert
+    # returned {:error, :metadata_unsupported} because an atom key is not
+    # `jsonb`-representable. Verified red, reverted.
+    test "the reserved linkage namespace is jsonb-representable and round-trips", %{
+      store: store,
+      machine_state: machine_state
+    } do
+      linkage = Linkage.new("run_parent", "call", 0, "sha256:child")
+      metadata = Linkage.to_metadata(linkage)
+
+      assert :ok = insert(store, machine_state, "run-ecto-linkage", metadata)
+      assert {:ok, record} = Storage.fetch_run(store, "run-ecto-linkage")
+      assert record.metadata == metadata
+      assert {:ok, ^linkage} = Linkage.from_metadata(record.metadata)
     end
   end
 end
