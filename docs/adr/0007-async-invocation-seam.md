@@ -136,3 +136,41 @@ invocation is persisted by the same `Statifier.Position` encoding as any
 other, under the same content-hash guard (ADR-0003, st-ADR-0052), and a
 run answered on a node running a different chart revision is refused at
 load as it always was.
+
+## Amendment (2026-09-01, sp-2yx): decision 5's dispatch context also carries the effect
+
+Decision 5 put `invoke_id` on `Driver.dispatch_context/0` and stopped
+there, on the reasoning that `type` and `params` are already arguments and
+an asynchronous host needs nothing else to key its job by. That is true of
+the host decision 1 was written for. It is not true of a host that has to
+*resolve* what the invocation names: `Statifier.Effect.Invoke`'s `src` -
+spec 6.4's URI attribute, which the core never dereferences (st-ADR-0031)
+- is the only field carrying a document id, and no argument and no context
+key delivered it. A `statifier_blocks` durable subchart handler resolves
+its child chart by exactly that id (`sb-ADR-0008` decision 2), and could
+not.
+
+So the context gains one key, `invoke`, holding the whole
+`t:Statifier.Effect.Invoke.t/0` the dispatch is for. It is the same
+reasoning decision 5 already gave, applied to the rest of the element: a
+property of the one `<invoke>` rather than of the run or the step, so it
+belongs on the dispatch context and not on
+`StatifierPersistence.Executor.context/0`, which every effect shares.
+
+The widening is additive and nothing else moves. `type` and `params` stay
+their own arguments - they are what an ordinary host acts on, and making a
+host reach into a struct for them would be a worse seam for the common
+case. `invoke_id` stays too, rather than becoming `invoke.invoke_id`: it is
+the string the two doors take back, decision 5's own words, and every
+existing dispatch fun matching `%{invoke_id: id}` keeps matching. A fun
+that ignores the new key is unaffected, because a map pattern binds what it
+names.
+
+What the key deletes is a lie the durable path told. Before it, a subchart
+handler answering `{:start_child, invoke, {:invoke, invoke}}` had to
+*synthesise* that `%Invoke{}` from an id plus content it already knew,
+which works only for a host that hardcodes one chart per invoke type.
+`Driver.dispatch/0`'s claim that "a host never has to build this tuple
+itself: a subchart handler returns it unchanged from what it received" is
+now literally true, which is what ADR-0008 decision 3's portability
+argument assumed all along.
