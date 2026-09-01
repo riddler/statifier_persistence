@@ -53,7 +53,7 @@ irreversible step, and report.
 | `mix quality` in any profile | any time | never - running the gate costs nothing but time |
 | `git commit` on the bead's branch | a campaign carrying the operator's explicit consent **and** the bead's work complete **and** full `mix quality` green; a change touching no Elixir code has no gate to run and may commit on review of the diff alone | on `main`, on a red gate, on a `--profile loop` or otherwise scoped run, or with unrelated changes in the tree |
 | `git push`, `gh pr create` | the same consent, **and** the terminology scan in the umbrella's `docs/terminology-firewall.md` clean over the full outbound content | any scan hit - that is a hard stop, not something to rephrase past |
-| `git merge`, merging a request | never | always - merging is the operator's, in every campaign and outside every campaign |
+| merging a campaign PR | a campaign consent the operator adopted verbatim that names automatic merges, with every named condition met (full gate green, CI green, firewall scan clean with a positive control, any named review gate passed) | outside such a consent; any named condition unmet; any PR the consent's carve-outs hold for the operator |
 | `bd close <id>` | never for a mirrored bead; otherwise the operator's call | always for a bead whose description carries a `mirrors:` line, campaign consent included |
 | `bd dolt push` | the operator's call | inside a campaign that spans mirrored trackers - the conductor pushes those atomically |
 | a version bump on a release bead's branch | an operator-authorized release bead, inside a campaign carrying the operator's explicit consent | on any other bead, on main, or when the operator has not named this repo's release bead |
@@ -76,11 +76,19 @@ authority is the operator's and the subagent is only the hands, so it may act.
 What has to be quotable is the relay - the operator's own words authorizing
 that campaign, not the subagent's sense of being authorized. A subagent that
 cannot quote them reports and stops. A relay unlocks nothing the rows above
-forbid outright: merging, closing a mirrored bead, and a release stay
+forbid outright: closing a mirrored bead and a release stay
 forbidden however the consent arrives. A version bump is the recorded
 exception: on a release bead the operator has named (in the campaign plan or
 their own words), the bump commit is release prep, not a release. (Recorded
 2026-08-27 by the operator, campaign 008.)
+
+Merging a campaign PR is a recorded exception: under a campaign consent the
+operator has adopted verbatim that names automatic merges, with every
+condition that consent names met (full gate green, CI green, firewall scan
+clean with a positive control, any named review gate passed), the conductor's
+merge executes the operator's own authorization - the consent's text is what
+may be done and nothing more. (Recorded 2026-09-01 by the operator, campaign
+025 post-wrap queue walk.)
 
 Widening this section is a decision for the operator to make and record here.
 An agent may draft the change; it does not adopt it.
