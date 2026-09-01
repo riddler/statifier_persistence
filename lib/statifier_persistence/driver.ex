@@ -179,18 +179,32 @@ defmodule StatifierPersistence.Driver do
   @typedoc """
   What `t:dispatch/0` receives as its third argument: the executor's own
   context - the run id and the chart's content hash - plus `invoke_id`,
-  this invocation's id.
+  this invocation's id, and `invoke`, the effect payload being dispatched.
 
   `invoke_id` is here and not in `t:StatifierPersistence.Executor.context/0`
   because it is not a property of the run or the step: it names one
   `<invoke>`, and only the dispatch fun is called per invocation. It is
   what an asynchronous host keys its job by, and the same string
   `done_invocation/5` and `failed_invocation/5` take back.
+
+  `invoke` is the whole `t:Statifier.Effect.Invoke.t/0` this dispatch is
+  for, and it is here for the same reason: it is a property of the one
+  `<invoke>`, not of the run or the step. `type` and `params` are handed
+  over as their own arguments because they are what an ordinary host acts
+  on; the rest of the element - `src` above all, and `content`,
+  `autoforward`, and the counters with it - reaches a host that needs it
+  only through this key. `src` is spec 6.4's URI attribute, which the core
+  never dereferences (st-ADR-0031): a host that resolves a chart by
+  document id reads `context.invoke.src`, and a subchart handler that
+  answers `{:start_child, invoke, {:invoke, invoke}}` returns the payload
+  it was handed rather than synthesising one from what it happened to know
+  (ADR-0007 decision 5's amendment, ADR-0008 decision 3).
   """
   @type dispatch_context :: %{
           run_id: String.t(),
           content_hash: String.t(),
-          invoke_id: String.t()
+          invoke_id: String.t(),
+          invoke: Invoke.t()
         }
 
   @typedoc """
@@ -198,7 +212,10 @@ defmodule StatifierPersistence.Driver do
   step that emitted it, or later through this module's re-entry doors.
 
   Receives the element's own `type` and resolved `params`
-  (`t:Statifier.Effect.Invoke.t/0`'s fields) plus a `t:dispatch_context/0`.
+  (`t:Statifier.Effect.Invoke.t/0`'s fields) plus a `t:dispatch_context/0`,
+  whose `:invoke` key carries that whole payload for a host that needs a
+  field the two arguments do not name - `src` being the one a chart
+  resolver keys on.
   `{:ok, donedata}` answers `done.invoke.<invoke_id>` with `donedata`;
   `{:error, failure}` answers `error.communication.invoke.<invoke_id>` with
   st-ADR-0068's `failure` keyword list (`:reason`, `:attempts`, `:detail`),
@@ -217,7 +234,8 @@ defmodule StatifierPersistence.Driver do
   it where `Statifier.Session` executes it in-memory, which is what makes a
   chart portable between the two (ADR-0008 decision 3). It is never renamed
   or reshaped, and a host never has to build this tuple itself: a subchart
-  handler returns it unchanged from what it received.
+  handler returns it unchanged from what it received, which is what
+  `t:dispatch_context/0`'s `:invoke` key makes literally true.
   """
   @type dispatch ::
           (type :: String.t() | nil, params :: term(), context :: dispatch_context() ->
@@ -682,7 +700,10 @@ defmodule StatifierPersistence.Driver do
   @spec perform(t(), Statifier.Effect.t(), Executor.context(), pid(), reference()) ::
           :ok | {:error, term()}
   defp perform(driver, {:invoke, %Invoke{} = invoke}, context, reader, ref) do
-    context = Map.put(context, :invoke_id, invoke.invoke_id)
+    # The whole effect rides along beside its id: `type` and `params` are
+    # the two fields an ordinary host acts on, and every other one - `src`
+    # above all - has no other way to reach a dispatch fun.
+    context = Map.merge(context, %{invoke_id: invoke.invoke_id, invoke: invoke})
 
     case driver.dispatch.(invoke.type, invoke.params, context) do
       # Nothing is buffered: the call is running elsewhere and this drive

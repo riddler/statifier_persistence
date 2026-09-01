@@ -47,6 +47,25 @@ defmodule StatifierPersistence.DriverSubchartTest do
   </scxml>
   """
 
+  # The document id a resolving handler looks the child chart up by. It is
+  # an opaque string to this package: the core never dereferences `src`
+  # (st-ADR-0031).
+  @document_id "chart://approval/v3"
+
+  # `@parent_source` with the document id on the element, and a refusal
+  # transition to land on when it cannot be resolved.
+  @src_parent_source """
+  <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="calling">
+      <state id="calling">
+          <invoke id="call" type="myapp:subchart" src="chart://approval/v3"/>
+          <transition event="done.invoke.call" target="approved"/>
+          <transition event="error.communication.invoke.call" target="refused"/>
+      </state>
+      <state id="approved"/>
+      <state id="refused"/>
+  </scxml>
+  """
+
   # A child that itself starts a subchart under invoke id "nested" - the
   # fixture for decision 6's nesting case.
   @nesting_child_source """
@@ -76,6 +95,36 @@ defmodule StatifierPersistence.DriverSubchartTest do
   setup do
     {:ok, store} = Storage.new(InMemory, [])
     %{store: store}
+  end
+
+  describe "start_child from a document id" do
+    # The shape a `statifier_blocks` durable subchart handler has: the
+    # child chart is not known to the handler, it is looked up by the
+    # `<invoke>`'s own `src` (sb-ADR-0008 decision 2's resolver contract),
+    # which reaches the dispatch fun only through
+    # `t:Driver.dispatch_context/0`'s `:invoke` key (ADR-0007 decision 5's
+    # amendment, sp-2yx). Before that key this could not be written at all.
+    #
+    # Sabotage: dropped the `:invoke` key from `perform/5`'s `Map.merge`
+    # (driver.ex) - the dispatch fun's `%{invoke: ...}` clause no longer
+    # matched and the create raised FunctionClauseError, which is the
+    # honest failure: there is no other way to reach `src`.
+    test "a handler resolves the child by the invoke's src", %{store: store} do
+      driver =
+        driver(store, @src_parent_source, resolving_dispatch(%{@document_id => @child_source}))
+
+      assert {:ok, _run, machine_state} = Driver.create(driver, "run_1")
+
+      assert leaves(machine_state) == ["calling"]
+
+      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+      assert {:ok, run_record} = Storage.fetch_run(store, child_run_id)
+      assert run_record.status == :active
+
+      assert {:ok, linkage} = Linkage.from_metadata(run_record.metadata)
+      {:ok, child_machine} = Statifier.compile(@child_source)
+      assert linkage.content_hash == Machine.identity(child_machine).content_hash
+    end
   end
 
   describe "start_child" do
@@ -556,6 +605,19 @@ defmodule StatifierPersistence.DriverSubchartTest do
         }
 
         {:start_child, invoke, {:invoke, invoke}}
+    end
+  end
+
+  # A dispatch fun shaped like a real subchart handler: it knows no chart
+  # of its own, resolves the one this `<invoke>` names by `src` against
+  # `charts`, and answers with the effect it was handed - `:content`
+  # filled in, nothing else touched. Contrast `subchart_dispatch/1` above,
+  # which synthesises an `%Invoke{}` because the seam gave it no other
+  # option before sp-2yx.
+  defp resolving_dispatch(charts) do
+    fn "myapp:subchart", _params, %{invoke: %Statifier.Effect.Invoke{} = invoke} ->
+      resolved = %{invoke | content: Map.fetch!(charts, invoke.src)}
+      {:start_child, resolved, {:invoke, resolved}}
     end
   end
 

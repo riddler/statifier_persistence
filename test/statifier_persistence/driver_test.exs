@@ -1,6 +1,7 @@
 defmodule StatifierPersistence.DriverTest do
   use ExUnit.Case, async: true
 
+  alias Statifier.Effect.Invoke
   alias Statifier.Event
   alias Statifier.Invoke.Types, as: InvokeTypes
   alias StatifierPersistence.{Driver, Storage}
@@ -19,6 +20,20 @@ defmodule StatifierPersistence.DriverTest do
       </state>
       <state id="approved"/>
       <state id="refused"/>
+  </scxml>
+  """
+
+  # The same one call, with spec 6.4's `src` on it: a URI the core never
+  # dereferences (st-ADR-0031) and a document id the host resolves. It is
+  # the field `t:Driver.dispatch_context/0`'s `:invoke` key exists to
+  # deliver.
+  @src_call_source """
+  <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="calling">
+      <state id="calling">
+          <invoke id="call" type="myapp:authorize" src="chart://approval/v3"/>
+          <transition event="done.invoke.call" target="approved"/>
+      </state>
+      <state id="approved"/>
   </scxml>
   """
 
@@ -296,6 +311,56 @@ defmodule StatifierPersistence.DriverTest do
 
       assert {:discarded, run} = Driver.done_invocation(driver, "run_1", "call", %{})
       assert run.status == :failed
+    end
+  end
+
+  describe "dispatch_context" do
+    # Sabotage: dropped the `:invoke` key from `perform/5`'s `Map.merge`
+    # (driver.ex) - the assertion on `context.invoke` went red with a
+    # KeyError on a map with no such key.
+    test "carries the whole effect, so a host can read src", %{store: store} do
+      test_pid = self()
+
+      driver =
+        driver(store, @src_call_source,
+          dispatch: fn _type, _params, context ->
+            send(test_pid, {:dispatched, context})
+            {:ok, %{}}
+          end
+        )
+
+      assert {:ok, _run, _machine_state} = Driver.create(driver, "run_1")
+
+      assert_received {:dispatched, context}
+
+      assert %Invoke{
+               invoke_id: "call",
+               type: "myapp:authorize",
+               src: "chart://approval/v3"
+             } = context.invoke
+    end
+
+    # Sabotage: had `perform/5` put `invoke.invoke_id` under `:invoke` and
+    # the struct under `:invoke_id` - every `%{invoke_id: id}` dispatch fun
+    # in this suite broke, and this test named the swap directly.
+    test "keeps invoke_id beside the effect, unchanged", %{store: store} do
+      test_pid = self()
+
+      driver =
+        driver(store, @src_call_source,
+          dispatch: fn _type, _params, context ->
+            send(test_pid, {:dispatched, context})
+            {:ok, %{}}
+          end
+        )
+
+      assert {:ok, _run, _machine_state} = Driver.create(driver, "run_1")
+
+      assert_received {:dispatched, context}
+      assert context.invoke_id == "call"
+      assert context.invoke_id == context.invoke.invoke_id
+      assert context.run_id == "run_1"
+      assert is_binary(context.content_hash)
     end
   end
 

@@ -222,3 +222,27 @@ handler shape - what `statifier_blocks` offers a host in place of a pure
 refusals*. The two were drafted together from one set of rulings and either
 one read without the other will look like it is missing a side, because it
 is.
+
+## Amendment (2026-09-01, sp-2yx): decision 3's dispatch is handed the effect it is starting
+
+Decision 3 says the `{:start_child, invoke, {:invoke, invoke}}` tuple is
+"not renamed and not re-shaped", so that the in-memory and durable paths
+plan the same instruction and a chart is portable between them. That
+argument needs the durable dispatch fun to *have* the instruction's
+payload, and until now it did not: `Driver`'s dispatch context was
+`%{run_id, content_hash, invoke_id}`, so a handler had to build an
+`%Invoke{}` out of an id plus a chart it already knew. A handler that
+resolves its child by document id - `src`, per `sb-ADR-0008` decision 2 -
+had nothing to resolve from.
+
+ADR-0007 decision 5's amendment adds `invoke` to
+`Driver.dispatch_context/0`, carrying the whole effect. Read that record
+for the reasoning; recorded here because decision 3 is where the tuple's
+"returns it unchanged from what it received" promise is made, and it was
+not keepable before.
+
+Nothing in this record's decisions changes. The linkage is still built from
+the parent's run id, this invocation's id and index `0` (decision 7's
+seam), the refusal set is still closed at four (decision 4), and the child
+is still created inside the parent's serialization strategy and answered
+through ADR-0007's public doors.
