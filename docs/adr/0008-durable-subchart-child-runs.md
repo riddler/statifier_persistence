@@ -356,3 +356,80 @@ implementation; this amendment carries no `lib/` change and no test.
 `active_invocations` still holds one child per invocation in the shipped
 code, which is the N=1 case of what is described above and is why the
 widening can land as a record without a migration.
+
+## Note (2026-09-01, sp-21o): decision 5's cascade makes `list_runs_by_metadata/2` a capability requirement on a storage adapter
+
+Recording clarification only. Nothing in the decisions above changes; this
+states a consequence the record delegated and never spelled.
+
+Decision 5 says a cancelled parent cancels "that child's own children,
+recursively", and decision 2 refused a join table on the grounds that the
+queries it foresaw - *find my child*, *find my parent* - are single-key
+reads. The recursive walk is neither. It is a **reverse** query: given a
+parent's `run_id` and an invocation id, enumerate the runs whose reserved
+linkage metadata names them. `StatifierPersistence.Runs.cascade_cancel/3`
+issues exactly that, once per node of the subtree, through
+`StatifierPersistence.Storage.list_runs_by_metadata/2` over a match map
+built by `StatifierPersistence.Run.Linkage.invocation_match/2` or
+`parent_match/1`.
+
+So the cascade forces a capability the storage-adapter behaviour (ADR-0003)
+does not require of everyone, and the shape it took is the same one ADR-0006
+decision 3 used for metadata itself: `list_runs_by_metadata/2` is an
+**optional** callback, exporting it is how an adapter declares it can answer
+"which runs name me as their parent", and an adapter that does not export it
+is refused rather than degraded. `Storage.child_listing_supported?/1` is the
+predicate; `StatifierPersistence.Driver`'s `start_child/3` consults it first
+and returns `{:refused, :child_listing_unsupported}` **before any write**,
+which is why decision 4's refusal set counts an unsupported adapter among its
+four reasons. The `cancel_invoke` arm consults the same predicate and does
+nothing for such a store, so a host that never starts a child pays not even
+the cost of a query it could not satisfy.
+
+The consequence is real rather than theoretical, and already documented
+downstream. `statifier_examples`' SQLite-backed adapter omits the callback -
+`list_runs_by_metadata/2` issues a `jsonb` containment query and SQLite
+stores `metadata` as JSON text - so as of `statifier_persistence` 0.4.0 a
+store on that adapter refuses a durable subchart before any write. Its
+`StatifierExamples.Persistence` moduledoc says so in those terms and calls it
+the contract working as designed. A host that wants durable subcharts over
+SQLite wants an implementation of the callback in terms of the JSON-text
+column, not a looser guard here.
+
+The sp-3n2 amendment's decision 4 leaves this untouched: widening the
+parent's linkage to an ordered set changes what *find my children* returns,
+not whether an adapter must be able to answer the reverse query the recursive
+walk depends on. The join-table refusal stands where decision 2 left it.
+
+## Note (2026-09-01, sp-21o): decision 2's "`active_invocations` ... carries the child's `run_id`" is loose
+
+Recording clarification only. The decision is unchanged; its phrasing names
+the wrong container, and the sp-3n2 amendment above restated the phrase
+rather than fixing it, so it is worth pinning down once.
+
+`active_invocations` is core-owned. `Statifier.MachineState` types it as
+`%{{state_index, invoke_index} => invoke_id}` - compiled-index pairs to
+invocation id strings, hoisted off compiled data precisely so it holds no
+host identity - and `Statifier.Position` carries it forward verbatim across a
+persist and a resume. There is no room in it for a `run_id`, and this package
+never writes into it. Read decision 2's phrase as naming the *relationship* -
+the parent knows a live invocation, and that invocation has a child - not the
+data structure that stores it.
+
+The implementation honours the intent through the reserved, package-owned
+metadata namespace decision 2 established. The linkage is recorded
+**child-side**: a child run's `metadata` carries
+`%{"statifier_persistence" => %{"parent_run_id" => ..., "invoke_id" => ...,
+...}}` (plus the mandatory chart-identity pin, and the sp-3n2 item index).
+*Find my parent* is the single-key read decision 2 promised, of the child's
+own metadata; *find my children* is the reverse query the Note above
+describes. Nothing about that weakens decision 2 - the parent's `run_id` and
+the invocation id are still the linkage, still identities in ADR-0006
+decision 2's sense - it only puts them where they actually live.
+
+This is also why the sp-3n2 amendment could widen "the entry" to an ordered
+set without a migration: there is no shipped `active_invocations` entry to
+widen. The amendment's ordered set with per-child status is the logical
+parent-side view of the linkage, whose "concrete encoding is the
+implementation plan's, not this record's" - and today that view is derived
+from the children rather than stored on the parent.
