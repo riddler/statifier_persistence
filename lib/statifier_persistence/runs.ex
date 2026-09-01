@@ -218,7 +218,7 @@ defmodule StatifierPersistence.Runs do
         ) :: {:ok, Run.t(), MachineState.t()} | {:discarded, Run.t()} | {:error, error()}
   defp step_tail(store, run_id, machine, event, opts, executor) do
     case Storage.fetch_run(store, run_id) do
-      {:ok, %{status: status} = run_record} when status in [:completed, :failed] ->
+      {:ok, %{status: status} = run_record} when status in [:completed, :failed, :cancelled] ->
         {:discarded, Run.from_record(run_record)}
 
       {:ok, run_record} ->
@@ -256,12 +256,49 @@ defmodule StatifierPersistence.Runs do
           {:ok, Run.t()} | {:discarded, Run.t()} | {:error, error()}
   defp fail_tail(store, run_id, reason) do
     case Storage.fetch_run(store, run_id) do
-      {:ok, %{status: status} = run_record} when status in [:completed, :failed] ->
+      {:ok, %{status: status} = run_record} when status in [:completed, :failed, :cancelled] ->
         {:discarded, Run.from_record(run_record)}
 
       {:ok, run_record} ->
         with :ok <- Storage.update_run_status(store, run_id, :failed, failure: reason) do
           {:ok, Run.from_record(%{run_record | status: :failed, failure: reason})}
+        end
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  @doc """
+  Cancels a run: the second host-driven terminal transition (ADR-0004
+  decision 6 as extended by ADR-0008 decision 5), and the one a cascading
+  cancel writes through.
+
+  Cancellation **retains**: no record and no position is deleted, no
+  interpreter is involved, and the stored position is left untouched - only
+  the record's status changes, to `:cancelled`. A run that is already
+  terminal - cancelled by an earlier, interrupted cascade included - is
+  discarded with `{:discarded, run}`, which is what makes re-running a
+  cascade over an already-cancelled subtree a no-op.
+
+  `opts` accepts `serialization:` only, exactly as `fail/4` does.
+  """
+  @spec cancel(store :: Storage.t(), run_id :: run_id(), opts :: keyword()) ::
+          {:ok, Run.t()} | {:discarded, Run.t()} | {:error, error()}
+  def cancel(%Storage{} = store, run_id, opts \\ []) do
+    serialized(store, run_id, opts, fn -> cancel_tail(store, run_id) end)
+  end
+
+  @spec cancel_tail(Storage.t(), run_id()) ::
+          {:ok, Run.t()} | {:discarded, Run.t()} | {:error, error()}
+  defp cancel_tail(store, run_id) do
+    case Storage.fetch_run(store, run_id) do
+      {:ok, %{status: status} = run_record} when status in [:completed, :failed, :cancelled] ->
+        {:discarded, Run.from_record(run_record)}
+
+      {:ok, run_record} ->
+        with :ok <- Storage.update_run_status(store, run_id, :cancelled, failure: nil) do
+          {:ok, Run.from_record(%{run_record | status: :cancelled, failure: nil})}
         end
 
       {:error, _reason} = error ->

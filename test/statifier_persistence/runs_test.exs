@@ -651,6 +651,86 @@ defmodule StatifierPersistence.RunsTest do
     end
   end
 
+  describe "cancel/3" do
+    # sabotage: cancel_tail/2 rewritten to call Storage.update_run/5 with
+    # position: :persist and a freshly-initialized MachineState instead of
+    # Storage.update_run_status/4 -> red, the byte-identity assertion below
+    # failed because the persisted blob was re-encoded from a fresh state
+    # rather than carried forward untouched. Verified red, reverted.
+    test "moves an :active run to :cancelled and leaves the stored position byte-identical",
+         %{store: store} do
+      {_source, machine} = Charts.chart_a()
+      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+
+      assert {:ok, %{position_blob: before_blob}} = Storage.fetch_run(store, "run-1")
+
+      assert {:ok, %Run{run_id: "run-1", status: :cancelled, failure: nil}} =
+               Runs.cancel(store, "run-1")
+
+      assert {:ok, %{status: :cancelled, position_blob: after_blob}} =
+               Storage.fetch_run(store, "run-1")
+
+      assert after_blob == before_blob
+    end
+
+    # sabotage: runs.ex's terminal guard drops :cancelled from the list in
+    # cancel_tail/2's own case (or the shared clause it reads) -> red, this
+    # second cancel returned {:ok, _} and re-wrote the record instead of
+    # discarding. Verified red, reverted.
+    test "on an already-cancelled run returns {:discarded, _} and writes nothing", %{
+      store: store
+    } do
+      {_source, machine} = Charts.chart_a()
+      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+
+      assert {:ok, %Run{status: :cancelled}} = Runs.cancel(store, "run-1")
+      assert {:ok, %{status: :cancelled, position_blob: blob}} = Storage.fetch_run(store, "run-1")
+
+      assert {:discarded, %Run{status: :cancelled}} = Runs.cancel(store, "run-1")
+
+      assert {:ok, %{status: :cancelled, position_blob: ^blob}} =
+               Storage.fetch_run(store, "run-1")
+    end
+
+    # sabotage: fail_tail/3's terminal guard drops :cancelled from
+    # `status in [...]` (runs.ex:259) -> red, this call re-wrote the
+    # cancelled run's status to :failed instead of discarding it. Verified
+    # red, reverted.
+    test "fail/4 on a :cancelled run is discarded", %{store: store} do
+      {_source, machine} = Charts.chart_a()
+      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+      {:ok, %Run{status: :cancelled}} = Runs.cancel(store, "run-1")
+
+      assert {:discarded, %Run{status: :cancelled}} =
+               Runs.fail(store, "run-1", "operator: abandoned")
+
+      assert {:ok, %{status: :cancelled, failure: nil}} = Storage.fetch_run(store, "run-1")
+    end
+
+    # sabotage: step_tail/6's terminal guard drops :cancelled from
+    # `status in [...]` (runs.ex:221) -> red, this step decoded the
+    # position and advanced it instead of discarding before any decode.
+    # Verified red, reverted.
+    test "step/5 on a :cancelled run is discarded before any position decode", %{store: store} do
+      {_source, machine} = Charts.chart_a()
+      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+      {:ok, %Run{status: :cancelled}} = Runs.cancel(store, "run-1")
+      RecordingExecutor.reset()
+
+      assert {:discarded, %Run{status: :cancelled}} =
+               Runs.step(store, "run-1", machine, Event.external("go"),
+                 executor: RecordingExecutor
+               )
+
+      assert RecordingExecutor.calls() == []
+    end
+
+    # sabotage: cancel_tail/2's fetch error arm rewrites the reason -> red
+    test "on a missing run returns {:error, :run_not_found}", %{store: store} do
+      assert {:error, :run_not_found} = Runs.cancel(store, "absent")
+    end
+  end
+
   describe "per-run serialization (ADR-0004 decision 5)" do
     # sabotage: InMemory.lock_run/3 runs fun without the exclusion
     # ({:ok, fun.()} with no acquire) -> red (both steps load s0 and the

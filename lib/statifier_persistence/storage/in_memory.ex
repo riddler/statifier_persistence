@@ -168,6 +168,66 @@ defmodule StatifierPersistence.Storage.InMemory do
   def supports_metadata?(_opts), do: true
 
   @doc """
+  Lists the runs whose stored `metadata` contains **every** key/value pair
+  in `metadata`, recursively for a nested map (the optional
+  `c:StatifierPersistence.Storage.Adapter.list_runs_by_metadata/2`,
+  ADR-0008 decision 5) - the same subset semantics
+  `StatifierPersistence.Storage.Ecto`'s `jsonb @>` gives, and the same
+  `ArgumentError` on an empty or non-string-keyed map.
+  """
+  @impl Adapter
+  @spec list_runs_by_metadata(Adapter.opts(), Adapter.metadata()) ::
+          {:ok, [Adapter.run_record()]} | {:error, Adapter.error()}
+  def list_runs_by_metadata(opts, metadata) do
+    validate_match!(metadata)
+
+    runs =
+      pid(opts)
+      |> Agent.get(& &1.runs)
+      |> Map.values()
+      |> Enum.filter(&contains?(Map.get(&1, :metadata, %{}), metadata))
+
+    {:ok, runs}
+  end
+
+  # Recursive containment, matching the Ecto adapter's `jsonb @>`: every pair
+  # in `match` is present in `stored`, and a map value contains rather than
+  # equals.
+  @spec contains?(map(), map()) :: boolean()
+  defp contains?(stored, match) when is_map(stored) and is_map(match) do
+    Enum.all?(match, fn {key, value} ->
+      case Map.fetch(stored, key) do
+        {:ok, stored_value} when is_map(value) and is_map(stored_value) ->
+          contains?(stored_value, value)
+
+        {:ok, stored_value} ->
+          stored_value == value
+
+        :error ->
+          false
+      end
+    end)
+  end
+
+  @spec validate_match!(term()) :: :ok
+  defp validate_match!(metadata)
+       when is_map(metadata) and map_size(metadata) > 0 do
+    if Enum.all?(Map.keys(metadata), &is_binary/1) do
+      :ok
+    else
+      raise ArgumentError,
+            "list_runs_by_metadata/2 takes a map with string keys, got keys: " <>
+              inspect(Map.keys(metadata))
+    end
+  end
+
+  defp validate_match!(other) do
+    raise ArgumentError,
+          "list_runs_by_metadata/2 takes a non-empty map with string keys, " <>
+            "got: #{inspect(other)}"
+  end
+
+  @doc """
   Runs `fun` under this adapter's per-run mutual exclusion for `run_id`
   (the optional `c:StatifierPersistence.Storage.Adapter.lock_run/3`).
 

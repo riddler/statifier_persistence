@@ -43,6 +43,7 @@ defmodule StatifierPersistence.Storage do
           | :unidentified_chart
           | :run_position_missing
           | :metadata_unsupported
+          | :child_listing_unsupported
           | {:unsupported_format_version, term()}
           | {:identity_mismatch, Identity.t(), Identity.t() | nil}
 
@@ -357,6 +358,45 @@ defmodule StatifierPersistence.Storage do
     Code.ensure_loaded?(store.adapter) and
       function_exported?(store.adapter, :supports_metadata?, 1) and
       store.adapter.supports_metadata?(store.opts) == true
+  end
+
+  @doc """
+  Whether `store`'s adapter can list runs by a metadata match (ADR-0008
+  decision 5).
+
+  True when the adapter exports the optional
+  `c:StatifierPersistence.Storage.Adapter.list_runs_by_metadata/2`, the
+  same `function_exported?/3` shape `metadata_supported?/1` checks. This is
+  the predicate `list_runs_by_metadata/2` consults for its own
+  refusal-at-open, exposed because a caller with work to do before the
+  query - such as `StatifierPersistence.Driver` refusing to start a child
+  it could never enumerate for cancellation - wants the answer before it
+  acts.
+  """
+  @spec child_listing_supported?(store :: t()) :: boolean()
+  def child_listing_supported?(%__MODULE__{} = store) do
+    Code.ensure_loaded?(store.adapter) and
+      function_exported?(store.adapter, :list_runs_by_metadata, 2)
+  end
+
+  @doc """
+  Lists the runs whose stored `metadata` contains every key/value pair in
+  `metadata` (ADR-0008 decision 5).
+
+  Delegates to the adapter's optional
+  `c:StatifierPersistence.Storage.Adapter.list_runs_by_metadata/2` when
+  `child_listing_supported?/1` is true; returns
+  `{:error, :child_listing_unsupported}` for an adapter that does not
+  export it, without calling the adapter at all.
+  """
+  @spec list_runs_by_metadata(store :: t(), metadata :: Adapter.metadata()) ::
+          {:ok, [Adapter.run_record()]} | {:error, error()}
+  def list_runs_by_metadata(%__MODULE__{} = store, metadata) do
+    if child_listing_supported?(store) do
+      store.adapter.list_runs_by_metadata(store.opts, metadata)
+    else
+      {:error, :child_listing_unsupported}
+    end
   end
 
   @doc """

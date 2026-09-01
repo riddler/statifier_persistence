@@ -6,6 +6,7 @@ defmodule StatifierPersistence.StorageTest do
   alias Statifier.MachineState
   alias StatifierPersistence.Storage
   alias StatifierPersistence.Storage.InMemory
+  alias StatifierPersistence.Test.NoLockAdapter
   alias StatifierPersistence.Testing.Charts
 
   defmodule FailingAdapter do
@@ -239,6 +240,55 @@ defmodule StatifierPersistence.StorageTest do
                Storage.update_run(store, "run-skip-missing", machine_state, :failed,
                  position: :skip
                )
+    end
+  end
+
+  # -- Child listing: the facade arms Phase 1 adds (ADR-0008 decision 5) --
+
+  describe "list_runs_by_metadata/2 and child_listing_supported?/1" do
+    # sabotage: in Storage.child_listing_supported?/1, drop the
+    # function_exported?/3 check and always return true -> red, this
+    # assertion against NoLockAdapter (which exports no
+    # list_runs_by_metadata/2) saw true instead of false. Verified red,
+    # reverted.
+    test "child_listing_supported?/1 answers both ways" do
+      {:ok, supporting_store} = Storage.new(InMemory, [])
+      {:ok, unsupporting_store} = Storage.new(NoLockAdapter, [])
+
+      assert Storage.child_listing_supported?(supporting_store)
+      refute Storage.child_listing_supported?(unsupporting_store)
+    end
+
+    # sabotage: in Storage.list_runs_by_metadata/2, drop the
+    # child_listing_supported?/1 branch and always delegate to the adapter
+    # -> red, this call against NoLockAdapter raised UndefinedFunctionError
+    # instead of returning the refusal tuple. Verified red, reverted.
+    test "returns {:error, :child_listing_unsupported} for an adapter that does not export the callback" do
+      {:ok, store} = Storage.new(NoLockAdapter, [])
+
+      assert {:error, :child_listing_unsupported} =
+               Storage.list_runs_by_metadata(store, %{"tenant_id" => "acct_conformance"})
+    end
+
+    # sabotage: in Storage.list_runs_by_metadata/2, replace the delegation
+    # with a hardcoded {:ok, []} -> red, the returned list below would come
+    # back empty instead of naming the inserted run. Verified red, reverted.
+    test "delegates to the adapter for one that exports the callback" do
+      {:ok, store} = Storage.new(InMemory, [])
+      {_source, machine} = Charts.chart_a()
+
+      machine_state =
+        MachineState.new(machine, session_id: "sess_child_listing_delegate")
+
+      metadata = %{"statifier_persistence" => %{"parent_run_id" => "run-parent"}}
+
+      assert :ok =
+               Storage.insert_run(store, "run-child-delegate", machine_state, :active,
+                 metadata: metadata
+               )
+
+      assert {:ok, [record]} = Storage.list_runs_by_metadata(store, metadata)
+      assert record.run_id == "run-child-delegate"
     end
   end
 end
