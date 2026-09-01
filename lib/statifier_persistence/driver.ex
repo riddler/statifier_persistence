@@ -78,11 +78,27 @@ defmodule StatifierPersistence.Driver do
   therefore takes that invocation's answer with it, which is what a
   session does.
 
-  `<invoke type="scxml">` is handed to `:dispatch` like any other type,
-  and this module has no opinion about it. A durable driver holds no child
-  session between steps, so a subchart is the host's to answer or refuse;
-  durable subcharts are deliberately out of scope here (campaign-023
-  ruling R-e).
+  `<invoke type="scxml">` is handed to `:dispatch` like any other type.
+
+  ## Durable subcharts
+
+  A durable driver holds no child session between steps, so a subchart
+  cannot be answered the way `Statifier.Session` answers one - by starting
+  and holding a child session in memory. `:dispatch` answers a subchart
+  instead: `{:start_child, invoke, {:invoke, invoke}}`, the same
+  instruction `Statifier.Session.Effects` plans and that the built-in
+  `Statifier.Invoke.Handler.Scxml` and `StatifierBlocks.Runtime.Subchart`
+  both emit, unchanged, whichever session executes it. This module is the
+  durable executor for it (ADR-0008 decision 3): it resolves and creates
+  the child as an ordinary run, linked to this invocation under a
+  reserved-namespace pin of the child's own chart identity
+  (`StatifierPersistence.Run.Linkage`, ADR-0008 decision 2), drives that
+  run to its own quiescence through this same loop - so a child that
+  itself invokes a grandchild is handled with no extra code - and then
+  answers `:pending` under ADR-0007 decision 1, exactly as any other
+  asynchronous call does: the parent rests with the invocation live and no
+  process holding it. The instruction is never renamed or reshaped, which
+  is what makes a chart portable between the in-memory and durable paths.
 
   ## Invocations answered later
 
@@ -154,7 +170,11 @@ defmodule StatifierPersistence.Driver do
   alias Statifier.Effect.Invoke
   alias Statifier.Evaluator.SystemVariables
   alias Statifier.{Event, Machine, MachineState}
+  alias Statifier.Invoke.Source
+  alias Statifier.Machine.Identity
+  alias Statifier.Session.Invocations
   alias StatifierPersistence.{Executor, Run, Runs, Storage}
+  alias StatifierPersistence.Run.Linkage
 
   @typedoc """
   What `t:dispatch/0` receives as its third argument: the executor's own
@@ -189,10 +209,22 @@ defmodule StatifierPersistence.Driver do
   whatever process - or whatever node, after whatever restart - eventually
   has the result. Nothing is buffered for it and the drive rests, so the
   run reaches quiescence and persists with the invocation still live.
+
+  `{:start_child, invoke, {:invoke, invoke}}` means: start this chart as
+  the child of this invocation. It is `Statifier.Session.Effects`' own
+  instruction, emitted unchanged by `StatifierBlocks.Runtime.Subchart` and
+  by the built-in `Statifier.Invoke.Handler.Scxml` - this module executes
+  it where `Statifier.Session` executes it in-memory, which is what makes a
+  chart portable between the two (ADR-0008 decision 3). It is never renamed
+  or reshaped, and a host never has to build this tuple itself: a subchart
+  handler returns it unchanged from what it received.
   """
   @type dispatch ::
           (type :: String.t() | nil, params :: term(), context :: dispatch_context() ->
-             {:ok, term()} | {:error, keyword()} | :pending)
+             {:ok, term()}
+             | {:error, keyword()}
+             | :pending
+             | {:start_child, Invoke.t(), {:invoke, Invoke.t()}})
 
   @typedoc """
   What one drive returns: the last durable step's own result.
@@ -487,12 +519,10 @@ defmodule StatifierPersistence.Driver do
   @spec executor(t(), reference()) :: Executor.t()
   defp executor(driver, ref) do
     reader = self()
-    effects = driver.effects
-    dispatch = driver.dispatch
 
     fn effect, context ->
-      with :ok <- observe(effects, effect, context) do
-        perform(dispatch, effect, context, reader, ref)
+      with :ok <- observe(driver.effects, effect, context) do
+        perform(driver, effect, context, reader, ref)
       end
     end
   end
@@ -508,11 +538,11 @@ defmodule StatifierPersistence.Driver do
   # A message tagged with a reference minted for this one drive is an
   # ordered buffer that needs no second process and cannot outlive the
   # drive that filled it, or be read by another drive in this process.
-  @spec perform(dispatch(), Statifier.Effect.t(), Executor.context(), pid(), reference()) :: :ok
-  defp perform(dispatch, {:invoke, %Invoke{} = invoke}, context, reader, ref) do
+  @spec perform(t(), Statifier.Effect.t(), Executor.context(), pid(), reference()) :: :ok
+  defp perform(driver, {:invoke, %Invoke{} = invoke}, context, reader, ref) do
     context = Map.put(context, :invoke_id, invoke.invoke_id)
 
-    case dispatch.(invoke.type, invoke.params, context) do
+    case driver.dispatch.(invoke.type, invoke.params, context) do
       # Nothing is buffered: the call is running elsewhere and this drive
       # has no answer to feed back. The invocation stays live in
       # `active_invocations` and rides the persisted position out to
@@ -526,10 +556,126 @@ defmodule StatifierPersistence.Driver do
 
       {:error, failure} ->
         buffer(reader, ref, invoke, {:failed, failure})
+
+      # ADR-0008 decision 3. The child is created inside the parent's own
+      # serialization strategy - this runs in the executor, inside
+      # `Runs.persist_tail/6`, inside `with_run/3` - because a parent that
+      # believes it has a child and a child run that was never created is
+      # the window statifier_blocks ADR-0008 decision 4 names as the one
+      # that loses. The exclusion is per run id, and a child's id is not
+      # the parent's, so nothing nests on one key.
+      #
+      # The answer is `:pending` in every non-refusing case: nothing is
+      # buffered, the parent reaches quiescence, and the invocation rides
+      # the persisted position out to whatever answers it.
+      {:start_child, %Invoke{} = resolved, {:invoke, %Invoke{}}} ->
+        case start_child(driver, resolved, context) do
+          :ok ->
+            :ok
+
+          {:refused, detail} ->
+            buffer(
+              reader,
+              ref,
+              invoke,
+              {:failed, reason: "child_run_creation_failed", detail: detail}
+            )
+        end
     end
   end
 
-  defp perform(_dispatch, _effect, _context, _reader, _ref), do: :ok
+  defp perform(_driver, _effect, _context, _reader, _ref), do: :ok
+
+  # Refuses at open when the store cannot enumerate children: a child that
+  # could never be found is a child that could never be cancelled, and
+  # starting one would break ADR-0008 decision 5. Same posture as ADR-0006
+  # decision 3's refusal at open, and it happens before any write.
+  @spec start_child(t(), Invoke.t(), dispatch_context()) :: :ok | {:refused, term()}
+  defp start_child(driver, %Invoke{} = resolved, context) do
+    if Storage.child_listing_supported?(driver.store) do
+      resolve_child(driver, resolved, context)
+    else
+      {:refused, :child_listing_unsupported}
+    end
+  end
+
+  # `invoke.content` is SCXML markup, and `Source.resolve/2` compiles it
+  # (`Statifier.Invoke.Source`) - the durable path resolves a child exactly
+  # as `Statifier.Session` does, rather than compiling it itself.
+  @spec resolve_child(t(), Invoke.t(), dispatch_context()) :: :ok | {:refused, term()}
+  defp resolve_child(driver, resolved, context) do
+    case Source.resolve(resolved, []) do
+      {:ok, child_machine} -> identify_child(driver, resolved, context, child_machine)
+      {:error, reason} -> {:refused, reason}
+    end
+  end
+
+  # The pin is mandatory (ADR-0008 decision 2): a chart with no identity
+  # cannot be guarded on reload, so a child that resolves to one is refused
+  # rather than started unpinned.
+  @spec identify_child(t(), Invoke.t(), dispatch_context(), Machine.t()) ::
+          :ok | {:refused, term()}
+  defp identify_child(driver, resolved, context, child_machine) do
+    case Machine.identity(child_machine) do
+      nil ->
+        {:refused, :unidentified_chart}
+
+      %Identity{content_hash: content_hash} ->
+        create_child(driver, resolved, context, child_machine, content_hash)
+    end
+  end
+
+  # The linkage is built from the *parent's* `context.run_id`, this
+  # invocation's `invoke_id`, index `0` (ADR-0008 decision 7 - fan-out is
+  # not built, but the linkage does not assume one child per invocation),
+  # and the child's own `content_hash`. The child is driven by
+  # `%{driver | machine: child_machine}` - the same store, the same
+  # serialization strategy, the same `effects` executor, the same
+  # `dispatch` fun (which is what makes a grandchild work), a different
+  # machine - through this module's own `create/3`, so a child whose own
+  # initialization invokes gets the same treatment (decision 6's nesting,
+  # with no extra code).
+  @spec create_child(t(), Invoke.t(), dispatch_context(), Machine.t(), String.t()) ::
+          :ok | {:refused, term()}
+  defp create_child(driver, resolved, context, child_machine, content_hash) do
+    child_index = 0
+    linkage = Linkage.new(context.run_id, context.invoke_id, child_index, content_hash)
+    child_run_id = Linkage.child_run_id(context.run_id, context.invoke_id, child_index)
+    child_driver = %{driver | machine: child_machine}
+    datamodel = Invocations.seed_datamodel(resolved.params, child_machine)
+
+    case create(child_driver, child_run_id, linkage: linkage, initialize: [datamodel: datamodel]) do
+      {:ok, _run, _machine_state} -> :ok
+      {:error, :run_exists} -> adopt_child(driver.store, child_run_id, linkage)
+      {:error, reason} -> {:refused, reason}
+      {:discarded, _run} -> {:refused, :run_exists}
+    end
+  end
+
+  # `{:error, :run_exists}` is not a failure. ADR-0004 decision 3's
+  # at-least-once execution means a crash between the child create and the
+  # parent's own persist re-drives this exact step; the id is deterministic
+  # (`Linkage.child_run_id/3`), so the second create finds the first. A
+  # collision whose linkage names this same parent and invocation is that
+  # re-drive - answer `:ok` (pending) rather than refusing. A collision
+  # naming something else is a genuine id clash, and is refused.
+  @spec adopt_child(Storage.t(), Runs.run_id(), Linkage.t()) :: :ok | {:refused, term()}
+  defp adopt_child(store, child_run_id, linkage) do
+    case Storage.fetch_run(store, child_run_id) do
+      {:ok, run_record} ->
+        case Linkage.from_metadata(run_record.metadata) do
+          {:ok, %Linkage{parent_run_id: parent_run_id, invoke_id: invoke_id}}
+          when parent_run_id == linkage.parent_run_id and invoke_id == linkage.invoke_id ->
+            :ok
+
+          _other ->
+            {:refused, :run_exists}
+        end
+
+      {:error, reason} ->
+        {:refused, reason}
+    end
+  end
 
   @spec buffer(pid(), reference(), Invoke.t(), {:done, term()} | {:failed, keyword()}) :: :ok
   defp buffer(reader, ref, %Invoke{} = invoke, answer) do

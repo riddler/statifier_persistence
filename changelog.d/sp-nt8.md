@@ -17,3 +17,17 @@
   a mandatory pin of the child's own chart identity. `Runs.create/4` gains
   a `linkage:` option that stores it and raises `ArgumentError` if a host's
   own `metadata:` tries to write into the reserved key.
+- `StatifierPersistence.Driver`'s `:dispatch` fun can now answer
+  `{:start_child, invoke, {:invoke, invoke}}` - the same instruction
+  `Statifier.Session.Effects` plans in-memory - to start a durable
+  subchart (ADR-0008 decision 3). The child is created as an ordinary run
+  under the parent's own exclusion, linked and pinned through
+  `StatifierPersistence.Run.Linkage`, driven to its own quiescence through
+  the same loop (so a child that itself invokes a grandchild is handled
+  with no extra code), and answered `:pending` so the parent rests with
+  the invocation live. A store whose adapter cannot enumerate its children
+  refuses before any write, and a crash between the child's creation and
+  the parent's own persist is a safe re-drive rather than a duplicate
+  child. Every refusal here answers `error.communication.invoke.<id>` with
+  reason `"child_run_creation_failed"`. A host that never returns this arm
+  sees no behavior change.

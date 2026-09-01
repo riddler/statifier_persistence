@@ -60,6 +60,8 @@ defmodule StatifierPersistence.RunLinkageTest do
       refute Linkage.child_run_id("run_parent", "call", 1) == id
     end
 
+    # sabotage: child_run_id/3 returns "child" regardless of its arguments
+    # -> red, both assertions below failed. Verified red, reverted.
     test "strictly starts with the parent id (the cascade's acyclicity property)" do
       id = Linkage.child_run_id("run_parent", "call", 0)
 
