@@ -217,3 +217,27 @@ session id, the one input `Runs.create/4` otherwise generates fresh
 surface needed - but a host that wants replayable runs must record that
 id alongside its input tape, which `docs/restart-demo.md` now says out
 loud.
+
+## Amendment (2026-09-01, sp-x8c): decision 3's event argument gains a builder arm
+
+ADR-0007 decision 4 widens `Runs.step/5`'s `event` parameter from
+`Event.t()` to `Event.t() | event_builder()`, where a builder is a fun over
+the loaded, re-stamped `MachineState` returning `{:ok, event}` or
+`:discard`. This record's decision 3 named the argument an event and fixed
+the loop's order around it, so the widening belongs here as well as there;
+until now the cross-reference lived only in 0007, which is the wrong
+direction for a reader who arrives at the lifecycle record first.
+
+The amendment is to the argument's type, **not** to decision 3's step
+order. ADR-0007 is explicit that the arm is additive: the named steps still
+run liveness check -> load -> re-stamp -> step -> effects -> status ->
+persist, and the builder only late-binds the event argument to the step
+that was already going to happen. A builder that declines writes nothing
+and executes nothing, so it lands on decision 3's own `{:discarded, run}`
+result rather than inventing a fourth outcome. Every caller passing an
+`%Event{}` is unaffected.
+
+Read ADR-0007 for why the arm exists - the liveness read against
+`active_invocations` has to be taken inside `with_run/3` (decision 5) under
+the same exclusion as the step it gates, which is only expressible if the
+event is built after the load.
