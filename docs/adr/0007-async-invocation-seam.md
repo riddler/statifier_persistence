@@ -1,6 +1,6 @@
 # ADR-0007: A durable run can rest mid-invocation: the pending dispatch arm, the two re-entry doors, and `active_invocations` as the race mechanism
 
-Status: proposed (2026-09-01, campaign-024 ruling R-c)
+Status: accepted (2026-09-01, campaign-024 ruling R-c; unqualified direction-agent verdict)
 
 ## Context
 
