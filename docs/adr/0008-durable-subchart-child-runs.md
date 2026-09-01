@@ -246,3 +246,113 @@ the parent's run id, this invocation's id and index `0` (decision 7's
 seam), the refusal set is still closed at four (decision 4), and the child
 is still created inside the parent's serialization strategy and answered
 through ADR-0007's public doors.
+
+## Amendment (2026-09-01, sp-3n2): decision 2's linkage widens to an ordered set, and one child is the N=1 case
+
+Decision 7 named the fan-out seam and refused to build it, and it was
+explicit about what the linkage had to survive: "the linkage of decision 2
+is per-child and does not assume one child per invocation". That walk has
+now happened, in the three records that had to be walked together. This
+amendment states the half of its outcome that is this package's, per the
+operator's campaign-026 ruling `R26-5`.
+
+Two accepted records depend on what follows and are cited rather than
+restated:
+
+- `statifier_blocks` **ADR-0009**, *durable fan-out is a new block type,
+  `core.map`* (accepted 2026-09-01, campaign-026). Its decision 10 cites
+  this amendment for the linkage widening, and it depends on exactly one
+  thing from it: that the item index reaches the child's own metadata, so
+  that its decision 5's index-ordered accumulation is recoverable when
+  completions arrive out of order, after a restart, on a process that did
+  not exist when the child started.
+- `statifier_oban` **ADR-0007**, *fan-out child starts are batched*
+  (accepted 2026-09-01, campaign-026). Its decision 5 derives a fan-out's
+  resumable unit from the difference between the item indices and the
+  indices already in this ordered set, holding no cursor of its own; its
+  decision 4 makes the same index a component of the per-child job key.
+
+**1. An invocation's linkage is an ordered set of child run ids with a
+per-child status.** Decision 2 put the parent side in
+`active_invocations`, whose entry for an invocation carried *the* child's
+`run_id`. That entry is widened: it carries an ordered collection of
+entries, one per child, each holding the child's `run_id` and that child's
+status. Ordered means ordered **by item index**, which is the order the
+entries are read back in and never the order they were written in; the
+concrete encoding is the implementation plan's, not this record's.
+
+The per-child status is here because the parent's own record is the only
+place a reader can see the shape of a live fan-out without loading N child
+runs. It is the same terminal vocabulary a run already has - ADR-0004
+decision 2's arms plus this record's decision 5 cancelled arm - and it is a
+denormalization of the child's own status, not a second authority over it:
+the child run's record remains the truth, and a disagreement is resolved in
+the child's favour.
+
+**2. Child metadata gains the item index.** Decision 2 gave a child run's
+metadata three values - the parent's `run_id`, the invocation id, and the
+mandatory chart-identity pin. A fourth joins them: the child's **item
+index**, its position in the list the fan-out ran over. It lives in the
+same reserved, package-owned namespace decision 2 established, is read by
+this package only, and is an identity in ADR-0006 decision 2's sense -
+an integer position, never personal data.
+
+The index is durably on the child rather than held by whatever started it,
+and that is the whole reason it is worth an amendment. A completion
+arriving through ADR-0007's doors can be placed at its index by a node that
+has never seen the parent live, which is what makes `sb-ADR-0009` decision
+5's ordering a function of the input rather than of the day it ran.
+
+**3. One child is the N=1 degenerate case, not a separate shape.** The
+single-child durable subchart of decisions 1 through 6 is an invocation
+whose ordered set has one entry, whose child carries item index `0`. The
+sp-2yx amendment above already describes it in exactly those words
+("the parent's run id, this invocation's id and index `0`"), and this
+amendment is what makes that phrasing load-bearing rather than
+anticipatory. There is no single-child linkage shape and no multi-child
+one; there is one shape, read at N=1 or at N=1000, and the step loop
+(decision 1) still learns nothing about parents from either.
+
+The cascade of decision 5 follows without special-casing: a cancelled
+parent cancels every child in the set, recursively, retaining each record
+under the distinct terminal status, and a late completion for any of them
+is dropped by ADR-0007 decision 3's reverse look-up finding no live
+invocation. `sb-ADR-0009` decision 6's `first_error` policy is that same
+cascade addressed at siblings rather than at descendants, and it needs
+nothing new here.
+
+**4. Still no join table.** Decision 2 admitted one "only if the plan's
+queries force it", and the queries this widening adds do not. *Find my
+children* is the parent's own single-key read, now returning N ids instead
+of one; *find my parent* and *find my index* are single-key reads of the
+child's metadata, unchanged in kind. A `child_runs` table would buy
+set-oriented queries - every live child across every fan-out - that no
+accepted record asks for, and would cost every adapter a second required
+schema, including adapters serving hosts that will never start a child.
+The refusal stands where decision 2 left it, on the same condition.
+
+**5. Multi-child linkage stays idempotent and resumable, not
+transactional.** This amendment lands **no** atomicity guarantee over
+creating N children, and the omission is deliberate rather than deferred.
+This record's consequences already rule the shape for the multi-run
+operation it built - cascade cancel is "idempotent and resumable rather
+than atomic ... the only shape available without cross-run locking, which
+this package does not have and does not want" - and creating children is
+the same shape as cancelling them: N run records, each written under its
+own run's exclusion (ADR-0004 decision 5), through an adapter behaviour
+that cannot be assumed to share a transaction with anything.
+
+So a fan-out is observably partial while it starts, and after a crash mid
+start. What makes that harmless is the same thing that makes a partial
+cascade harmless: the set is authoritative about which children exist, an
+index missing from it has no child, and re-running the start creates only
+what is absent. `sob-ADR-0007` decision 3 grounds its own non-atomic batch
+on this record's ruling and names a transactional child-creation guarantee
+here as its single reopen trigger. This amendment does not pull it, and a
+later record that wants to must expect to reopen that one.
+
+**Nothing here is implemented.** Campaign 026's `R26-1` defers the
+implementation; this amendment carries no `lib/` change and no test.
+`active_invocations` still holds one child per invocation in the shipped
+code, which is the N=1 case of what is described above and is why the
+widening can land as a record without a migration.
