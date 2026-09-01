@@ -23,6 +23,7 @@ defmodule StatifierPersistence.RunsTest do
   alias Statifier.MachineState
   alias Statifier.Send.Routes
   alias StatifierPersistence.{Run, Runs, Storage}
+  alias StatifierPersistence.Run.Linkage
   alias StatifierPersistence.Storage.InMemory
   alias StatifierPersistence.Test.{FlakyAdapter, NoLockAdapter, RecordingExecutor}
   alias StatifierPersistence.Testing.Charts
@@ -284,6 +285,63 @@ defmodule StatifierPersistence.RunsTest do
 
       assert {:error, :run_exists} =
                Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+    end
+
+    # sabotage: runs.ex's metadata/1 drops the Map.has_key?/2 guard clause
+    # (falls straight through to the Keyword.get(:linkage) case) -> red, a
+    # host-supplied reserved key was accepted silently instead of raising.
+    # Verified red, reverted.
+    test "raises ArgumentError when a host supplies the reserved metadata key",
+         %{store: store} do
+      {_source, machine} = Charts.chart_a()
+
+      assert_raise ArgumentError, ~r/statifier_persistence.*reserved/, fn ->
+        Runs.create(store, "run-1", machine,
+          executor: RecordingExecutor,
+          metadata: %{"statifier_persistence" => %{"anything" => "at all"}}
+        )
+      end
+
+      assert {:error, :run_not_found} = Storage.fetch_run(store, "run-1")
+    end
+
+    # sabotage: runs.ex's metadata/1 merge arm changed to `%Linkage{} =
+    # _linkage -> supplied` (drops the Map.merge/2 of Linkage.to_metadata/1)
+    # -> red, the reserved namespace never reached the stored record and
+    # from_metadata/1 answered :no_linkage instead of {:ok, ^linkage}.
+    # Verified red, reverted.
+    test "with linkage: stores the reserved namespace and it reads back through fetch_run/2",
+         %{store: store} do
+      {_source, machine} = Charts.chart_a()
+      linkage = Linkage.new("run_parent", "call", 0, "sha256:child")
+
+      assert {:ok, %Run{run_id: "run-1"}, _ms} =
+               Runs.create(store, "run-1", machine, executor: RecordingExecutor, linkage: linkage)
+
+      assert {:ok, %{metadata: metadata}} = Storage.fetch_run(store, "run-1")
+      assert {:ok, ^linkage} = Linkage.from_metadata(metadata)
+    end
+
+    # sabotage: same mutation as above -> red for the same reason: the
+    # linkage half of the merge never landed, so from_metadata/1 answered
+    # :no_linkage while the host's own "tenant_id" key still round-tripped
+    # fine, showing the merge itself (not the host map) was the break.
+    # Verified red, reverted.
+    test "merges a host's metadata: with linkage: rather than dropping either",
+         %{store: store} do
+      {_source, machine} = Charts.chart_a()
+      linkage = Linkage.new("run_parent", "call", 0, "sha256:child")
+
+      assert {:ok, _run, _ms} =
+               Runs.create(store, "run-1", machine,
+                 executor: RecordingExecutor,
+                 metadata: %{"tenant_id" => "acct_1"},
+                 linkage: linkage
+               )
+
+      assert {:ok, %{metadata: metadata}} = Storage.fetch_run(store, "run-1")
+      assert metadata["tenant_id"] == "acct_1"
+      assert {:ok, ^linkage} = Linkage.from_metadata(metadata)
     end
   end
 
