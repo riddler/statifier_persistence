@@ -68,7 +68,13 @@ Position` already persists `active_invocations` across a restart, and
 `Statifier.Interpreter.ExitEntry` removes an entry when the invoking state
 is exited - which is what a cancel is. A door therefore reverse-looks-up
 the invocation id in that map and discards when it is absent, returning
-ADR-0004 decision 3's own `{:discarded, run}`.
+ADR-0004 decision 3's own `{:discarded, run}`. The criterion under which
+that outcome was allowed is campaign-024 ruling R-c's rider, which made a
+cancel-versus-completion-across-restart conformance test a hard acceptance
+criterion and permitted an in-flight-invocation record only if that test
+forced one: the test is
+`test/statifier_persistence/driver_restart_race_test.exs`, and it passes
+against the persisted map alone, so no record proved necessary.
 
 The read is taken *inside* `with_run/3` (ADR-0004 decision 5), not before
 the call. A door that loaded the position, checked liveness and then called
