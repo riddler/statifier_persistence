@@ -167,7 +167,7 @@ defmodule StatifierPersistence.Driver do
         StatifierPersistence.Driver.send_event(driver, run_id, Statifier.Event.external("go"))
   """
 
-  alias Statifier.Effect.Invoke
+  alias Statifier.Effect.{CancelInvoke, Invoke}
   alias Statifier.Evaluator.SystemVariables
   alias Statifier.{Event, Machine, MachineState}
   alias Statifier.Invoke.Source
@@ -679,7 +679,8 @@ defmodule StatifierPersistence.Driver do
   # A message tagged with a reference minted for this one drive is an
   # ordered buffer that needs no second process and cannot outlive the
   # drive that filled it, or be read by another drive in this process.
-  @spec perform(t(), Statifier.Effect.t(), Executor.context(), pid(), reference()) :: :ok
+  @spec perform(t(), Statifier.Effect.t(), Executor.context(), pid(), reference()) ::
+          :ok | {:error, term()}
   defp perform(driver, {:invoke, %Invoke{} = invoke}, context, reader, ref) do
     context = Map.put(context, :invoke_id, invoke.invoke_id)
 
@@ -725,7 +726,52 @@ defmodule StatifierPersistence.Driver do
     end
   end
 
+  # ADR-0008 decision 5. The core's own reaction to a state exiting while
+  # one of its <invoke>s is still live - not routed through `dispatch`,
+  # because cancelling a durable child is this package's own storage
+  # operation and statifier_blocks ADR-0008 decision 4 says the handler
+  # offers no durable counterpart to `cancel/2`. `context.run_id` is this
+  # invocation's own run (the parent, from the cascade's point of view);
+  # only this one invocation's subtree is walked, so a sibling invocation's
+  # own children are untouched.
+  #
+  # Guarded by `child_listing_supported?/1` first, the same posture as
+  # `start_child/3`'s own refusal at open: an adapter that cannot host a
+  # durable subchart at all could never have a linked child to cascade
+  # into, and every other invoke type fires this same effect on exit, so a
+  # host that never starts one must see no behavior change - not even the
+  # cost of a query it has no way to satisfy.
+  #
+  # A cascade failure is returned rather than swallowed: it reaches
+  # `Runs`'s own re-entry wave through `reentry_origin/1`'s existing
+  # `:cancel_invoke` arm and re-enters the chart as `error.communication`,
+  # exactly as any other executor failure on this effect does.
+  defp perform(
+         driver,
+         {:cancel_invoke, %CancelInvoke{invoke_id: invoke_id}},
+         context,
+         _reader,
+         _ref
+       ) do
+    if Storage.child_listing_supported?(driver.store) do
+      case Runs.cascade_cancel(
+             driver.store,
+             Linkage.invocation_match(context.run_id, invoke_id),
+             cascade_opts(driver)
+           ) do
+        {:ok, _newly_cancelled} -> :ok
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      :ok
+    end
+  end
+
   defp perform(_driver, _effect, _context, _reader, _ref), do: :ok
+
+  @spec cascade_opts(t()) :: keyword()
+  defp cascade_opts(%__MODULE__{serialization: nil}), do: []
+  defp cascade_opts(%__MODULE__{serialization: serialization}), do: [serialization: serialization]
 
   # Refuses at open when the store cannot enumerate children: a child that
   # could never be found is a child that could never be cancelled, and
