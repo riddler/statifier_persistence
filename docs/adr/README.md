@@ -9,7 +9,7 @@
 | [0005](0005-ecto-in-package-and-postgres-test-harness.md) | The Ecto layer ships in this package behind optional `ecto_sql`; the test harness is a real Postgres server with the SQL sandbox, no skip tag | accepted |
 | [0006](0006-optional-opaque-run-metadata.md) | Runs carry an optional opaque `metadata` map of host identities (never personal data); an adapter that cannot store it refuses at open with `{:error, :metadata_unsupported}`, and the Ecto adapter stores jsonb with an equality-match list helper | accepted |
 | [0007](0007-async-invocation-seam.md) | A durable run can rest mid-invocation: a `:pending` dispatch arm, two public completion doors, and persisted `active_invocations` as the cancel-versus-completion race mechanism | accepted |
-| [0008](0008-durable-subchart-child-runs.md) | A durable subchart's child is an ordinary run, linked by reserved metadata carrying a mandatory chart-identity pin, started as a `:pending` dispatch and answered through ADR-0007's doors, and ended by a cascading cancel that retains; nesting is bounded by the resolver's cycle refusal and fan-out is designed for, not built | proposed |
+| [0008](0008-durable-subchart-child-runs.md) | A durable subchart's child is an ordinary run, linked by reserved metadata carrying a mandatory chart-identity pin, started as a `:pending` dispatch and answered through ADR-0007's doors, and ended by a cascading cancel that retains; nesting is bounded by the resolver's cycle refusal and fan-out is designed for, not built | accepted |
 
 New ADRs: next number, same three-section format (Context, Decision,
 Consequences). Pick the number against a freshly fetched remote. A bare
