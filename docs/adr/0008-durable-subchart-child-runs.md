@@ -1,7 +1,8 @@
 # ADR-0008: A durable subchart's child is an ordinary run, linked by pinned metadata, started and answered across the async seam, and ended by a cascading cancel that retains
 
-Status: proposed (2026-09-01; drafts the durable-subchart rulings recorded on
-sp-nt8 and its mirror sb-2i04, 2026-08-31)
+Status: accepted (2026-09-01, campaign-025; unqualified direction-agent
+verdict; drafts the durable-subchart rulings recorded on sp-nt8 and its
+mirror sb-2i04, 2026-08-31)
 
 ## Context
 
