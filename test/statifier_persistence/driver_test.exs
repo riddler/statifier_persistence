@@ -209,6 +209,96 @@ defmodule StatifierPersistence.DriverTest do
     end
   end
 
+  describe "done_invocation/5 and failed_invocation/5" do
+    # Sabotage: had `perform/5`'s `:pending` arm fall through to
+    # `buffer/4` with `{:done, :pending}` - the drive answered a call
+    # nobody had made and the run left "calling".
+    test "a pending call rests the run with the invocation live", %{store: store} do
+      driver = driver(store, @one_call_source, dispatch: fn _t, _p, _c -> :pending end)
+
+      assert {:ok, run, machine_state} = Driver.create(driver, "run_1")
+
+      assert run.status == :active
+      assert leaves(machine_state) == ["calling"]
+      assert Map.values(machine_state.active_invocations) == ["call"]
+    end
+
+    # Sabotage: dropped the `Map.put(context, :invoke_id, ...)` from
+    # `perform/5` - the dispatch context had no id to key a job by and the
+    # assertion went red on a missing key.
+    test "hands the invocation's id to the dispatch fun", %{store: store} do
+      test_pid = self()
+
+      driver =
+        driver(store, @one_call_source,
+          dispatch: fn _type, _params, context ->
+            send(test_pid, {:context, context})
+            :pending
+          end
+        )
+
+      assert {:ok, _run, _machine_state} = Driver.create(driver, "run_1")
+
+      assert_received {:context, context}
+      assert context.invoke_id == "call"
+      assert context.run_id == "run_1"
+    end
+
+    # Sabotage: made `late_answer/3` return `:discard` unconditionally -
+    # the answer never reached the chart and the run stayed in "calling".
+    test "steps a late done answer back into the chart", %{store: store} do
+      driver = driver(store, @one_call_source, dispatch: fn _t, _p, _c -> :pending end)
+
+      assert {:ok, _run, _machine_state} =
+               Driver.create(driver, "run_1", initialize: [session_id: "sess_first"])
+
+      # A driver built after the fact, as the answering job's node builds one.
+      answering = driver(store, @one_call_source, dispatch: fn _t, _p, _c -> :pending end)
+
+      assert {:ok, run, machine_state} =
+               Driver.done_invocation(answering, "run_1", "call", %{"authorization" => "auth_1"})
+
+      assert run.status == :active
+      assert leaves(machine_state) == ["approved"]
+      assert machine_state.datamodel["_event"]["name"] == "done.invoke.call"
+      assert machine_state.datamodel["_event"]["origin"] == "#_scxml_sess_first"
+      assert machine_state.datamodel["_event"]["data"] == %{"authorization" => "auth_1"}
+    end
+
+    # Sabotage: had `failed_invocation/5` build a `{:done, failure}` answer
+    # - the chart took the approved transition and this went red on
+    # "refused".
+    test "steps a late permanent failure back in as error.communication", %{store: store} do
+      driver = driver(store, @one_call_source, dispatch: fn _t, _p, _c -> :pending end)
+
+      assert {:ok, _run, _machine_state} = Driver.create(driver, "run_1")
+
+      assert {:ok, _run, machine_state} =
+               Driver.failed_invocation(driver, "run_1", "call", reason: "declined", attempts: 3)
+
+      assert leaves(machine_state) == ["refused"]
+
+      assert machine_state.datamodel["_event"]["data"] == %{
+               "reason" => "declined",
+               "attempts" => 3,
+               "detail" => :undefined
+             }
+    end
+
+    # Sabotage: narrowed `step_tail/6`'s terminal guard to `[:completed]` -
+    # the abandoned run was loaded and stepped, and the answer reached a
+    # run the host had already ended.
+    test "discards a late answer to a run the host abandoned", %{store: store} do
+      driver = driver(store, @one_call_source, dispatch: fn _t, _p, _c -> :pending end)
+
+      assert {:ok, _run, _machine_state} = Driver.create(driver, "run_1")
+      {:ok, _run} = StatifierPersistence.Runs.fail(store, "run_1", "host:stopped")
+
+      assert {:discarded, run} = Driver.done_invocation(driver, "run_1", "call", %{})
+      assert run.status == :failed
+    end
+  end
+
   defp driver(store, source, opts) do
     {:ok, machine} = Statifier.compile(source)
 
