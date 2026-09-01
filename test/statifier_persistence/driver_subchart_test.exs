@@ -370,6 +370,170 @@ defmodule StatifierPersistence.DriverSubchartTest do
     end
   end
 
+  describe "cascading cancel" do
+    # Sabotage: had the `{:cancel_invoke, _}` clause in `perform/5` return
+    # `:ok` unconditionally, never calling `Runs.cascade_cancel/3` - the
+    # child's status stayed `:active` after the parent's timeout and this
+    # assertion went red.
+    test "a parent that times out leaves the child cancelled with its position unchanged", %{
+      store: store
+    } do
+      driver = driver(store, @parent_source, subchart_dispatch(@child_source))
+      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+
+      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+      assert {:ok, before_cancel} = Storage.fetch_run(store, child_run_id)
+      assert before_cancel.status == :active
+
+      assert {:ok, _run, machine_state} =
+               Driver.send_event(driver, "run_1", Event.external("timeout"))
+
+      assert leaves(machine_state) == ["abandoned"]
+
+      assert {:ok, after_cancel} = Storage.fetch_run(store, child_run_id)
+      assert after_cancel.status == :cancelled
+      assert after_cancel.position_blob == before_cancel.position_blob
+    end
+
+    # Sabotage: in `cancel_and_descend/3`, dropped the recursive
+    # `cascade_cancel(store, Linkage.parent_match(run_id), opts)` call (only
+    # the top-level record was ever cancelled) - the grandchild's status
+    # stayed `:active` and this assertion went red.
+    test "a three-deep tree is fully cancelled from one parent timeout", %{store: store} do
+      driver = driver(store, @parent_source, nesting_dispatch())
+      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+
+      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+      grandchild_run_id = Linkage.child_run_id(child_run_id, "nested", 0)
+
+      assert {:ok, _run, machine_state} =
+               Driver.send_event(driver, "run_1", Event.external("timeout"))
+
+      assert leaves(machine_state) == ["abandoned"]
+
+      assert {:ok, child_record} = Storage.fetch_run(store, child_run_id)
+      assert {:ok, grandchild_record} = Storage.fetch_run(store, grandchild_run_id)
+      assert child_record.status == :cancelled
+      assert grandchild_record.status == :cancelled
+    end
+
+    # Sabotage: in `cancel_counted/3`, called `Storage.update_run_status/4`
+    # with `:cancelled` unconditionally instead of `cancel/3` - a re-run
+    # over an already-cancelled subtree then counted every run again
+    # instead of discarding, and the `{:ok, 0}` assertion went red (got
+    # `{:ok, 2}`).
+    test "re-running the cascade over an already-cancelled subtree writes nothing", %{
+      store: store
+    } do
+      driver = driver(store, @parent_source, nesting_dispatch())
+      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+
+      assert {:ok, _run, _ms} = Driver.send_event(driver, "run_1", Event.external("timeout"))
+
+      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+      grandchild_run_id = Linkage.child_run_id(child_run_id, "nested", 0)
+
+      assert {:ok, before_child} = Storage.fetch_run(store, child_run_id)
+      assert {:ok, before_grandchild} = Storage.fetch_run(store, grandchild_run_id)
+
+      assert {:ok, 0} = Runs.cascade_cancel(store, Linkage.invocation_match("run_1", "call"))
+
+      assert {:ok, after_child} = Storage.fetch_run(store, child_run_id)
+      assert {:ok, after_grandchild} = Storage.fetch_run(store, grandchild_run_id)
+      assert after_child == before_child
+      assert after_grandchild == before_grandchild
+    end
+
+    # Sabotage: in `cancel_and_descend/3`, descended only when `cancel/3`
+    # returned `{:ok, _}` (skipping the recursion on a `{:discarded, _}`) -
+    # the hand-cancelled child's own children were never walked, the
+    # grandchild stayed `:active`, and the `{:ok, 1}` assertion went red
+    # (got `{:ok, 0}`).
+    test "a cascade interrupted after the first level completes the rest when re-run", %{
+      store: store
+    } do
+      driver = driver(store, @parent_source, nesting_dispatch())
+      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+
+      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+      grandchild_run_id = Linkage.child_run_id(child_run_id, "nested", 0)
+
+      # Simulates a cascade interrupted right after the first level: the
+      # child is cancelled by hand, the grandchild is not.
+      assert {:ok, _run} = Runs.cancel(store, child_run_id)
+      assert {:ok, grandchild_before} = Storage.fetch_run(store, grandchild_run_id)
+      assert grandchild_before.status == :active
+
+      assert {:ok, 1} = Runs.cascade_cancel(store, Linkage.invocation_match("run_1", "call"))
+
+      assert {:ok, child_after} = Storage.fetch_run(store, child_run_id)
+      assert {:ok, grandchild_after} = Storage.fetch_run(store, grandchild_run_id)
+      assert child_after.status == :cancelled
+      assert grandchild_after.status == :cancelled
+    end
+
+    # Sabotage: same mutation as the "writes nothing" case above
+    # (`cancel_counted/3` forcing `:cancelled` unconditionally) - the
+    # already-completed child was overwritten to `:cancelled` and this
+    # assertion went red.
+    test "a child that is already completed is left completed, not overwritten", %{
+      store: store
+    } do
+      driver = driver(store, @parent_source, subchart_dispatch(@child_done_source))
+      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+
+      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+      {:ok, child_machine} = Statifier.compile(@child_done_source)
+      child_driver = %{driver | machine: child_machine}
+
+      # Completes the child directly (this driver has no `chart_resolver:`,
+      # so the parent is never told), so the parent still believes "call"
+      # is live when it times out.
+      assert {:ok, child_run, _ms} =
+               Driver.send_event(child_driver, child_run_id, Event.external("go"))
+
+      assert child_run.status == :completed
+
+      assert {:ok, _run, machine_state} =
+               Driver.send_event(driver, "run_1", Event.external("timeout"))
+
+      assert leaves(machine_state) == ["abandoned"]
+
+      assert {:ok, child_record} = Storage.fetch_run(store, child_run_id)
+      assert child_record.status == :completed
+    end
+
+    # No sabotage note: this asserts ADR-0007 decision 3's pre-existing
+    # discard mechanism (`late_answer/3`, `driver.ex`), not new Phase 5
+    # code - the core empties `active_invocations` on exit regardless of
+    # whether the cascade itself runs, so the discard holds either way.
+    # Recorded here because the plan states it as this phase's acceptance
+    # criterion.
+    # sabotage: flipped late_answer/3's liveness check (driver.ex) so a
+    # cancelled invocation's late completion was answered instead of
+    # discarded -> red, both assertions below failed. Verified red, reverted.
+    test "a completion for the cancelled invocation is discarded and the parent is unchanged", %{
+      store: store
+    } do
+      driver = driver(store, @parent_source, subchart_dispatch(@child_source))
+      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+
+      assert {:ok, _run, machine_state} =
+               Driver.send_event(driver, "run_1", Event.external("timeout"))
+
+      assert leaves(machine_state) == ["abandoned"]
+
+      {:ok, parent_machine} = Statifier.compile(@parent_source)
+      assert {:ok, before} = Storage.load_run_position(store, "run_1", parent_machine)
+
+      assert {:discarded, run} = Driver.done_invocation(driver, "run_1", "call", "late")
+      assert run.status == :active
+
+      assert {:ok, after_completion} = Storage.load_run_position(store, "run_1", parent_machine)
+      assert after_completion == before
+    end
+  end
+
   # A dispatch fun that answers every `<invoke type="myapp:subchart">` with
   # `{:start_child, ...}`, the child's content swapped in for whatever the
   # element itself carried - exactly the shape `StatifierBlocks.Runtime.Subchart`

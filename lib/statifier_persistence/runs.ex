@@ -355,6 +355,85 @@ defmodule StatifierPersistence.Runs do
     end
   end
 
+  @doc """
+  Cancels every run linked to `parent_run_id` - for one invocation, or for
+  all of them - and every run linked to those, recursively (ADR-0008
+  decision 5).
+
+  Retains: nothing is deleted and every position is left byte-identical;
+  each run simply takes the `:cancelled` terminal status through `cancel/3`.
+
+  Idempotent, and idempotent in the strong sense a crash needs. The walk
+  descends into every child it finds, whatever that child's own status, and
+  `cancel/3` discards a run that is already terminal - so a cascade
+  interrupted halfway through a deep tree is completed correctly by
+  re-running it, and a cascade over a subtree that is already fully
+  cancelled writes nothing at all.
+
+  There is no global transaction and there deliberately is none: each
+  run's cancel is its own serialized write under its own run's exclusion
+  (ADR-0004 decision 5), so a deep tree is O(subtree) writes. Cross-run
+  locking is the only way to make it atomic, and this package does not have
+  it and does not want it.
+
+  Termination rests on the run tree being acyclic, which it is by
+  construction: a child's run id strictly extends its parent's
+  (`StatifierPersistence.Run.Linkage.child_run_id/3`), so no run can be its
+  own descendant. This is why no depth ceiling is needed (ADR-0008
+  decision 6).
+
+  `metadata_match` is a `StatifierPersistence.Run.Linkage` containment map -
+  `Linkage.invocation_match/2` to cancel one invocation's subtree,
+  `Linkage.parent_match/1` for every child a parent has ever started. `opts`
+  accepts `serialization:` only, threaded to every `cancel/3` call the walk
+  makes, exactly as `cancel/3` itself accepts it.
+  """
+  @spec cascade_cancel(
+          store :: Storage.t(),
+          metadata_match :: Adapter.metadata(),
+          opts :: keyword()
+        ) ::
+          {:ok, non_neg_integer()} | {:error, error()}
+  def cascade_cancel(%Storage{} = store, metadata_match, opts \\ []) do
+    with {:ok, records} <- Storage.list_runs_by_metadata(store, metadata_match) do
+      Enum.reduce_while(records, {:ok, 0}, &cascade_step(store, &1, opts, &2))
+    end
+  end
+
+  @spec cascade_step(Storage.t(), Adapter.run_record(), keyword(), {:ok, non_neg_integer()}) ::
+          {:cont, {:ok, non_neg_integer()}} | {:halt, {:error, error()}}
+  defp cascade_step(store, record, opts, {:ok, total}) do
+    case cancel_and_descend(store, record.run_id, opts) do
+      {:ok, count} -> {:cont, {:ok, total + count}}
+      {:error, _reason} = error -> {:halt, error}
+    end
+  end
+
+  # The child is cancelled *before* the walk into its own children (the
+  # moduledoc's ordering note): an interrupted cascade always leaves the
+  # deepest still-active runs reachable from a run that is already
+  # cancelled, which a re-run finds because the walk descends through
+  # cancelled runs too - `cancel/3`'s own discard for an already-terminal
+  # run stops nothing here, it only stops that one run's own count.
+  @spec cancel_and_descend(Storage.t(), run_id(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, error()}
+  defp cancel_and_descend(store, run_id, opts) do
+    with {:ok, newly_cancelled} <- cancel_counted(store, run_id, opts),
+         {:ok, descendants} <- cascade_cancel(store, Linkage.parent_match(run_id), opts) do
+      {:ok, newly_cancelled + descendants}
+    end
+  end
+
+  @spec cancel_counted(Storage.t(), run_id(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, error()}
+  defp cancel_counted(store, run_id, opts) do
+    case cancel(store, run_id, opts) do
+      {:ok, _run} -> {:ok, 1}
+      {:discarded, _run} -> {:ok, 0}
+      {:error, _reason} = error -> error
+    end
+  end
+
   # Runs `fun` - one entry point's whole fetch-to-persist tail - inside the
   # selected serialization strategy's `with_run/3` (ADR-0004 decision 5),
   # unwrapping the strategy's `{:ok, result}` envelope back to the tail's

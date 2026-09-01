@@ -971,10 +971,10 @@ interrupted case).
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] Full `mix quality` passes.
-- [ ] A cancelled run's `position_blob` is byte-identical before and after,
+- [x] Full `mix quality` passes.
+- [x] A cancelled run's `position_blob` is byte-identical before and after,
       asserted directly on the fetched record.
-- [ ] Nothing in `lib/` deletes a run: grep finds no delete callback and none
+- [x] Nothing in `lib/` deletes a run: grep finds no delete callback and none
       is added.
 
 #### Manual Verification:
@@ -1231,6 +1231,22 @@ blocking here.
 - [ ] No parent-child transport exists anywhere: grep confirms the only path
       from child to parent is `done_invocation/5` / `failed_invocation/5`
       (ADR-0008 decision 3, "no bespoke parent-child channel").
+
+**Implementation Note**: as Phase 1.
+
+---
+
+### Phase 5
+
+- [ ] Every new test confirmed red under its noted mutation (a process
+      attestation, not a gate-checkable state).
+- [ ] Against the Ecto adapter, a cascade inside the parent's `lock_run/3`
+      transaction acquires the children's advisory locks parent-first and
+      commits - i.e. the nested exclusion works in Postgres, not only against
+      the in-memory Agent. Run the Ecto subchart test and confirm no lock
+      timeout and no `deadlock detected`.
+- [ ] The `cascade_cancel/3` docstring states the retain rule, the
+      idempotency rule, and the no-global-transaction consequence, all three.
 
 **Implementation Note**: as Phase 1.
 

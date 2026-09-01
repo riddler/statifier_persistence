@@ -50,3 +50,17 @@
   parent's chart. A parent that has already cancelled the invocation
   answers `{:discarded, _}`, which is the existing late-answer discard
   doing its job, not a new failure mode.
+- A durable subchart is now cancelled, along with its own children
+  recursively, when its parent leaves the invoking state (ADR-0008
+  decision 5) - a chart's own `timeout` transition out of an invoking
+  state being the ordinary case. `StatifierPersistence.Runs.cascade_cancel/3`
+  walks the linked subtree and `cancel/3`s every run in it; nothing is
+  deleted and every position is left byte-identical, so a cancelled
+  subtree is retained as the evidence of what a timed-out workflow was
+  doing when the deadline hit. The walk is idempotent - re-running it over
+  an already-cancelled subtree writes nothing, and one interrupted partway
+  by a crash is completed correctly by re-running it - and it needs no
+  depth ceiling, because a child's run id strictly extends its parent's, so
+  the run tree is acyclic by construction. A completion that arrives for a
+  cancelled invocation is dropped by the existing late-answer discard, with
+  no new mechanism.
