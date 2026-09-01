@@ -84,6 +84,48 @@ defmodule StatifierPersistence.Driver do
   durable subcharts are deliberately out of scope here (campaign-023
   ruling R-e).
 
+  ## Invocations answered later
+
+  A host whose service does not answer inside the drive - an enqueued job,
+  a webhook, anything that outlives the process that started it - answers
+  `:pending` from `:dispatch` instead. The call has been started; nothing
+  is buffered for it; the drive rests and the position persists with the
+  invocation still live in `machine_state.active_invocations`. There is no
+  process holding the run in the meantime, which is the point: the run can
+  wait days and survive a deploy.
+
+  The answer arrives later through `done_invocation/5` or
+  `failed_invocation/5` - the two doors `Statifier.Session` gives a live
+  session's host, on the durable path and keyed by the same
+  `invoke_id`. They build the same two events the in-drive path builds and
+  drive the run from them, so a chart cannot tell which way its answer
+  came.
+
+  ### The cancel-versus-completion race
+
+  An invocation the chart cancels while its call is still running has an
+  answer coming for something that is no longer live - across a restart,
+  on a node that has never seen the run. The liveness read that settles it
+  is `active_invocations`, which `Statifier.Position` persists and
+  `Statifier.Interpreter.ExitEntry` empties when the invoking state is
+  exited, and it is taken *inside* the run's serialization strategy: the
+  door hands `StatifierPersistence.Runs.step/5` an event builder rather
+  than an event, and the builder reads the loaded position under the same
+  exclusion the step itself holds. A check taken before the call would
+  leave a window for a cancel to land between the read and the step.
+
+  A cancelled invocation's answer is `{:discarded, run}` - spec 6.4.3's
+  discard again, the same rule the in-drive loop applies at drain time -
+  and the chart never sees it.
+
+  This makes re-entry idempotent for the ordinary chart, which transitions
+  out of the invoking state on its answer: the second delivery finds the
+  invocation gone. It does *not* make it idempotent for a chart that stays
+  in the invoking state after answering, because the core removes an entry
+  from `active_invocations` on exit and on nothing else. That is the
+  in-drive path's behavior too, not something the doors introduce, and it
+  is where a host's own delivery-once discipline belongs (ADR-0007).
+
   ## Bounding the loop
 
   A chart whose answer re-arms the call it answered would drive forever.
@@ -115,20 +157,42 @@ defmodule StatifierPersistence.Driver do
   alias StatifierPersistence.{Executor, Run, Runs, Storage}
 
   @typedoc """
-  Performs one `<invoke>` and answers it, synchronously, inside the durable
-  step that emitted it.
+  What `t:dispatch/0` receives as its third argument: the executor's own
+  context - the run id and the chart's content hash - plus `invoke_id`,
+  this invocation's id.
+
+  `invoke_id` is here and not in `t:StatifierPersistence.Executor.context/0`
+  because it is not a property of the run or the step: it names one
+  `<invoke>`, and only the dispatch fun is called per invocation. It is
+  what an asynchronous host keys its job by, and the same string
+  `done_invocation/5` and `failed_invocation/5` take back.
+  """
+  @type dispatch_context :: %{
+          run_id: String.t(),
+          content_hash: String.t(),
+          invoke_id: String.t()
+        }
+
+  @typedoc """
+  Performs one `<invoke>` and answers it - synchronously inside the durable
+  step that emitted it, or later through this module's re-entry doors.
 
   Receives the element's own `type` and resolved `params`
-  (`t:Statifier.Effect.Invoke.t/0`'s fields) plus the executor's context -
-  the run id and the chart's content hash. `{:ok, donedata}` answers
-  `done.invoke.<invoke_id>` with `donedata`; `{:error, failure}` answers
-  `error.communication.invoke.<invoke_id>` with st-ADR-0068's `failure`
-  keyword list (`:reason`, `:attempts`, `:detail`), and means permanently
-  failed, not "try again".
+  (`t:Statifier.Effect.Invoke.t/0`'s fields) plus a `t:dispatch_context/0`.
+  `{:ok, donedata}` answers `done.invoke.<invoke_id>` with `donedata`;
+  `{:error, failure}` answers `error.communication.invoke.<invoke_id>` with
+  st-ADR-0068's `failure` keyword list (`:reason`, `:attempts`, `:detail`),
+  and means permanently failed, not "try again".
+
+  `:pending` is the asynchronous arm: the call has been *started* and will
+  be answered later, by `done_invocation/5` or `failed_invocation/5`, from
+  whatever process - or whatever node, after whatever restart - eventually
+  has the result. Nothing is buffered for it and the drive rests, so the
+  run reaches quiescence and persists with the invocation still live.
   """
   @type dispatch ::
-          (type :: String.t() | nil, params :: term(), context :: Executor.context() ->
-             {:ok, term()} | {:error, keyword()})
+          (type :: String.t() | nil, params :: term(), context :: dispatch_context() ->
+             {:ok, term()} | {:error, keyword()} | :pending)
 
   @typedoc """
   What one drive returns: the last durable step's own result.
@@ -270,6 +334,97 @@ defmodule StatifierPersistence.Driver do
     advance(driver, run_id, opts, result, drain(ref, []), 0)
   end
 
+  @doc """
+  Answers a `:pending` invocation with `donedata` and drives the run to
+  quiescence.
+
+  `Statifier.Session.done_invocation/3`'s door on the durable path: it
+  builds the same `done.invoke.<invoke_id>` event, from the run's own
+  persisted `_sessionid`, and steps it. `invoke_id` is the `<invoke>`
+  element's id - the `invoke_id` `:dispatch` was handed in its
+  `t:dispatch_context/0`.
+
+  Answering an invocation the chart has since cancelled is
+  `{:discarded, run}`, spec 6.4.3's discard, decided from the loaded
+  position inside the run's serialization strategy (the moduledoc's
+  cancel-versus-completion section). So is answering a terminal run.
+
+  The answer can re-arm calls of its own; they are dispatched and driven
+  exactly as `send_event/4` drives them, `:pending` included.
+
+  `opts` takes what `send_event/4` takes.
+  """
+  @spec done_invocation(
+          driver :: t(),
+          run_id :: Runs.run_id(),
+          invoke_id :: String.t(),
+          donedata :: term(),
+          opts :: keyword()
+        ) :: result()
+  def done_invocation(%__MODULE__{} = driver, run_id, invoke_id, donedata \\ nil, opts \\ [])
+      when is_binary(invoke_id) do
+    reenter(driver, run_id, opts, invoke_id, {:done, donedata})
+  end
+
+  @doc """
+  `done_invocation/5`'s failing counterpart: answers a `:pending`
+  invocation with a *permanent* failure and drives the run to quiescence.
+
+  `Statifier.Session.failed_invocation/3`'s door on the durable path,
+  building the same `error.communication.invoke.<invoke_id>` event from
+  st-ADR-0068's `failure` keyword list (`:reason`, `:attempts`,
+  `:detail`). Permanent in that record's sense: the host's retry policy is
+  exhausted and no `done.invoke` will follow. A transient failure is the
+  host's to retry before answering, not something to report to the chart.
+
+  Discards, re-armed calls and `opts` are `done_invocation/5`'s.
+  """
+  @spec failed_invocation(
+          driver :: t(),
+          run_id :: Runs.run_id(),
+          invoke_id :: String.t(),
+          failure :: keyword(),
+          opts :: keyword()
+        ) :: result()
+  def failed_invocation(%__MODULE__{} = driver, run_id, invoke_id, failure \\ [], opts \\ [])
+      when is_binary(invoke_id) and is_list(failure) do
+    reenter(driver, run_id, opts, invoke_id, {:failed, failure})
+  end
+
+  # Both doors, which differ only in the answer they carry. The event is
+  # built by a `t:StatifierPersistence.Runs.event_builder/0` rather than
+  # here, so the liveness read and the step see one position under one
+  # exclusion: a cancel cannot land between them.
+  @spec reenter(
+          t(),
+          Runs.run_id(),
+          keyword(),
+          String.t(),
+          {:done, term()} | {:failed, keyword()}
+        ) :: result()
+  defp reenter(driver, run_id, opts, invoke_id, answer) do
+    ref = make_ref()
+    builder = fn machine_state -> late_answer(machine_state, invoke_id, answer) end
+
+    advance(driver, run_id, opts, step(driver, run_id, opts, builder, ref), drain(ref, []), 0)
+  end
+
+  # The public door's own 6.4.3 read. `live?/2` keys on the invocation's
+  # `{state_index, invoke_index}` because the in-drive path knows it; a
+  # host that has been away for a week knows only the id, so the lookup
+  # runs the other way over the same map. An id with no entry is an
+  # invocation that was cancelled, or that already answered and left its
+  # state - either way there is nothing live for this answer to reach.
+  @spec late_answer(MachineState.t(), String.t(), {:done, term()} | {:failed, keyword()}) ::
+          {:ok, Event.t()} | :discard
+  defp late_answer(%MachineState{} = machine_state, invoke_id, answer) do
+    if invoke_id in Map.values(machine_state.active_invocations) do
+      {:ok, answer_event(machine_state, invoke_id, answer)}
+    else
+      :discard
+    end
+  end
+
   # The loop of the moduledoc's steps 4 and 5. `result` is carried rather
   # than rebuilt because it is what the drive returns: a discarded answer
   # leaves the previous step's result standing, unchanged.
@@ -287,8 +442,9 @@ defmodule StatifierPersistence.Driver do
 
   defp advance(driver, run_id, opts, {:ok, _run, machine_state} = result, [answer | rest], turns) do
     if live?(machine_state, answer) do
+      {_key, invoke_id, payload} = answer
       ref = make_ref()
-      next = step(driver, run_id, opts, answer_event(machine_state, answer), ref)
+      next = step(driver, run_id, opts, answer_event(machine_state, invoke_id, payload), ref)
 
       advance(driver, run_id, opts, next, rest ++ drain(ref, []), turns + 1)
     else
@@ -298,7 +454,8 @@ defmodule StatifierPersistence.Driver do
     end
   end
 
-  @spec step(t(), Runs.run_id(), keyword(), Event.t(), reference()) :: result()
+  @spec step(t(), Runs.run_id(), keyword(), Event.t() | Runs.event_builder(), reference()) ::
+          result()
   defp step(driver, run_id, opts, event, ref) do
     Runs.step(driver.store, run_id, driver.machine, event, run_opts(driver, opts, ref))
   end
@@ -353,18 +510,33 @@ defmodule StatifierPersistence.Driver do
   # drive that filled it, or be read by another drive in this process.
   @spec perform(dispatch(), Statifier.Effect.t(), Executor.context(), pid(), reference()) :: :ok
   defp perform(dispatch, {:invoke, %Invoke{} = invoke}, context, reader, ref) do
-    answer =
-      case dispatch.(invoke.type, invoke.params, context) do
-        {:ok, donedata} -> {:done, donedata}
-        {:error, failure} -> {:failed, failure}
-      end
+    context = Map.put(context, :invoke_id, invoke.invoke_id)
 
+    case dispatch.(invoke.type, invoke.params, context) do
+      # Nothing is buffered: the call is running elsewhere and this drive
+      # has no answer to feed back. The invocation stays live in
+      # `active_invocations` and rides the persisted position out to
+      # whatever process answers it through `done_invocation/5` or
+      # `failed_invocation/5`.
+      :pending ->
+        :ok
+
+      {:ok, donedata} ->
+        buffer(reader, ref, invoke, {:done, donedata})
+
+      {:error, failure} ->
+        buffer(reader, ref, invoke, {:failed, failure})
+    end
+  end
+
+  defp perform(_dispatch, _effect, _context, _reader, _ref), do: :ok
+
+  @spec buffer(pid(), reference(), Invoke.t(), {:done, term()} | {:failed, keyword()}) :: :ok
+  defp buffer(reader, ref, %Invoke{} = invoke, answer) do
     send(reader, {ref, {invoke.state_index, invoke.invoke_index}, invoke.invoke_id, answer})
 
     :ok
   end
-
-  defp perform(_dispatch, _effect, _context, _reader, _ref), do: :ok
 
   @spec drain(reference(), [answer()]) :: [answer()]
   defp drain(ref, acc) do
@@ -387,12 +559,13 @@ defmodule StatifierPersistence.Driver do
   # field for field. Two events in one lifecycle, differing only in name
   # and payload, and both external: a host reports on a service's behalf,
   # the processor detected nothing (st-ADR-0068 decision 5).
-  @spec answer_event(MachineState.t(), answer()) :: Event.t()
-  defp answer_event(machine_state, {_key, invoke_id, {:done, donedata}}) do
+  @spec answer_event(MachineState.t(), String.t(), {:done, term()} | {:failed, keyword()}) ::
+          Event.t()
+  defp answer_event(machine_state, invoke_id, {:done, donedata}) do
     invoked_event(machine_state, "done.invoke." <> invoke_id, invoke_id, donedata)
   end
 
-  defp answer_event(machine_state, {_key, invoke_id, {:failed, failure}}) when is_list(failure) do
+  defp answer_event(machine_state, invoke_id, {:failed, failure}) when is_list(failure) do
     data = %{
       "reason" => Keyword.get(failure, :reason, "unknown"),
       "attempts" => Keyword.get(failure, :attempts, :undefined),

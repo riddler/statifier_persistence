@@ -83,6 +83,44 @@ defmodule StatifierPersistence.DriverSessionConformanceTest do
            }
   end
 
+  # Sabotage: had `late_answer/3` build the event from a hard-coded
+  # session id instead of the loaded position's `_sessionid` - the
+  # durable `_event`'s origin stopped matching the session's and the
+  # comparison went red.
+  test "a done answer through the re-entry door is the session's own event", context do
+    donedata = %{"authorization" => "auth_1", "amount" => 100}
+
+    session_event =
+      via_session(context.machine, fn session ->
+        Session.done_invocation(session, "call", donedata)
+      end)
+
+    durable_event =
+      via_reentry(context, fn driver ->
+        Driver.done_invocation(driver, "run_1", "call", donedata)
+      end)
+
+    assert durable_event == session_event
+  end
+
+  # Sabotage: same mutation as above, reached through the failing door -
+  # the failure event's origin diverged the same way.
+  test "a refusal through the re-entry door is the session's own event", context do
+    failure = [reason: "declined", attempts: 3]
+
+    session_event =
+      via_session(context.machine, fn session ->
+        Session.failed_invocation(session, "call", failure)
+      end)
+
+    durable_event =
+      via_reentry(context, fn driver ->
+        Driver.failed_invocation(driver, "run_1", "call", failure)
+      end)
+
+    assert durable_event == session_event
+  end
+
   # Starts a live session over the same document, lets `answer` report the
   # invocation through whichever ADR-0051/ADR-0068 door it names, and
   # returns the `_event` the chart then saw.
@@ -114,6 +152,25 @@ defmodule StatifierPersistence.DriverSessionConformanceTest do
 
     {:ok, _run, machine_state} =
       Driver.create(driver, "run_1", initialize: [session_id: @session_id])
+
+    machine_state.datamodel["_event"]
+  end
+
+  # The same document again, but the call is dispatched `:pending` and left
+  # unanswered by the drive - so the `_event` compared here is one a
+  # re-entry door built from the reloaded position, not one the drive
+  # buffered.
+  defp via_reentry(%{machine: machine, store: store}, answer) do
+    driver =
+      Driver.new(store, machine,
+        dispatch: fn _type, _params, _context -> :pending end,
+        invoke_types: InvokeTypes.new(types: [@invoke_type])
+      )
+
+    {:ok, _run, _machine_state} =
+      Driver.create(driver, "run_1", initialize: [session_id: @session_id])
+
+    {:ok, _run, machine_state} = answer.(driver)
 
     machine_state.datamodel["_event"]
   end

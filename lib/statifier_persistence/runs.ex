@@ -62,6 +62,24 @@ defmodule StatifierPersistence.Runs do
   @type run_id :: Adapter.run_id()
 
   @typedoc """
+  An event `step/5` can only build once the run's position is loaded.
+
+  Called with the loaded, re-stamped `t:Statifier.MachineState.t/0`, inside
+  the serialization strategy's `with_run/3` and before
+  `Statifier.Interpreter.handle_event/2` - so what it reads and what the
+  step acts on are the same position under the same exclusion. `{:ok,
+  event}` steps that event; `:discard` steps nothing and returns
+  `{:discarded, run}`.
+
+  It exists for events whose *right to be delivered at all* is a property
+  of the position: an invocation's late answer, which spec 6.4.3 discards
+  when the invocation is no longer live (`StatifierPersistence.Driver`'s
+  `done_invocation/5`). This adds no step to ADR-0004 decision 3's order -
+  the event argument is late-bound, the loop is not re-ordered.
+  """
+  @type event_builder :: (MachineState.t() -> {:ok, Event.t()} | :discard)
+
+  @typedoc """
   This module's error vocabulary: the facade's arms, unflattened, plus the
   `{:budget_exhausted, payload}` arm returned after a budget-exhausted step
   or create has persisted its `:failed` run record, plus the serialization
@@ -168,15 +186,21 @@ defmodule StatifierPersistence.Runs do
   `{:error, :not_running}` arm is the structural backstop for a run record
   whose `:active` status lies about a terminal stored position: it discards
   too, and repairs the record's status to `:completed` on the way out.
+
+  `event` may also be a `t:event_builder/0` - a fun the loaded position is
+  handed, for an event only the position can build or decline. A builder
+  that declines discards the delivery through the same `{:discarded, run}`
+  arm.
   """
   @spec step(
           store :: Storage.t(),
           run_id :: run_id(),
           machine :: Machine.t(),
-          event :: Event.t(),
+          event :: Event.t() | event_builder(),
           opts :: [opt()]
         ) :: {:ok, Run.t(), MachineState.t()} | {:discarded, Run.t()} | {:error, error()}
-  def step(%Storage{} = store, run_id, %Machine{} = machine, %Event{} = event, opts) do
+  def step(%Storage{} = store, run_id, %Machine{} = machine, event, opts)
+      when is_struct(event, Event) or is_function(event, 1) do
     executor = Keyword.fetch!(opts, :executor)
 
     serialized(store, run_id, opts, fn ->
@@ -184,16 +208,22 @@ defmodule StatifierPersistence.Runs do
     end)
   end
 
-  @spec step_tail(Storage.t(), run_id(), Machine.t(), Event.t(), [opt()], Executor.t()) ::
-          {:ok, Run.t(), MachineState.t()} | {:discarded, Run.t()} | {:error, error()}
+  @spec step_tail(
+          Storage.t(),
+          run_id(),
+          Machine.t(),
+          Event.t() | event_builder(),
+          [opt()],
+          Executor.t()
+        ) :: {:ok, Run.t(), MachineState.t()} | {:discarded, Run.t()} | {:error, error()}
   defp step_tail(store, run_id, machine, event, opts, executor) do
     case Storage.fetch_run(store, run_id) do
       {:ok, %{status: status} = run_record} when status in [:completed, :failed] ->
         {:discarded, Run.from_record(run_record)}
 
-      {:ok, _run_record} ->
+      {:ok, run_record} ->
         with {:ok, machine_state} <- Storage.load_run_position(store, run_id, machine) do
-          step_loaded(store, run_id, machine_state, event, opts, executor)
+          step_loaded(store, run_id, run_record, machine_state, event, opts, executor)
         end
 
       {:error, _reason} = error ->
@@ -261,12 +291,13 @@ defmodule StatifierPersistence.Runs do
   @spec step_loaded(
           Storage.t(),
           run_id(),
+          Adapter.run_record(),
           MachineState.t(),
-          Event.t(),
+          Event.t() | event_builder(),
           [opt()],
           Executor.t()
         ) :: {:ok, Run.t(), MachineState.t()} | {:discarded, Run.t()} | {:error, error()}
-  defp step_loaded(store, run_id, machine_state, event, opts, executor) do
+  defp step_loaded(store, run_id, run_record, machine_state, event, opts, executor) do
     # The bare match IS the st-ADR-0064 tripwire: `from_binary/2` blanks
     # both fields unconditionally on decode, so if upstream ever stops,
     # this fails loudly here rather than silently resuming a stale
@@ -278,6 +309,27 @@ defmodule StatifierPersistence.Runs do
       |> MachineState.put_routes(opts[:routes])
       |> MachineState.put_invoke_types(opts[:invoke_types])
 
+    # Resolved here rather than at the entry point deliberately: a builder
+    # reads the position this step is about to act on, under the exclusion
+    # this step already holds, so nothing can move between the read and
+    # the step. Nothing has been executed or written yet, so a decline is
+    # a discard in the full sense - the position is untouched.
+    case resolve_event(event, machine_state) do
+      {:ok, event} -> stepped(store, run_id, machine_state, event, executor)
+      :discard -> {:discarded, Run.from_record(run_record)}
+    end
+  end
+
+  @spec resolve_event(Event.t() | event_builder(), MachineState.t()) ::
+          {:ok, Event.t()} | :discard
+  defp resolve_event(%Event{} = event, _machine_state), do: {:ok, event}
+
+  defp resolve_event(builder, machine_state) when is_function(builder, 1),
+    do: builder.(machine_state)
+
+  @spec stepped(Storage.t(), run_id(), MachineState.t(), Event.t(), Executor.t()) ::
+          {:ok, Run.t(), MachineState.t()} | {:discarded, Run.t()} | {:error, error()}
+  defp stepped(store, run_id, machine_state, event, executor) do
     case Interpreter.handle_event(machine_state, event) do
       {:ok, machine_state, effects} ->
         persist_tail(store, run_id, machine_state, effects, executor, :update)
