@@ -31,3 +31,22 @@
   child. Every refusal here answers `error.communication.invoke.<id>` with
   reason `"child_run_creation_failed"`. A host that never returns this arm
   sees no behavior change.
+- `StatifierPersistence.Run` gains `donedata`, set from a completing run's
+  `:done` effect and `nil` on every other step or stored record - a
+  position that has reached a final state has no configuration left to
+  carry it, so this is the only moment it exists.
+- A durable subchart child now answers its parent (ADR-0008 decision 3).
+  `StatifierPersistence.Driver.new/3` gains a `chart_resolver:` option -
+  `(content_hash -> {:ok, Statifier.Machine.t()} | :error)` - and, once
+  set, `create/3`, `send_event/4`, `done_invocation/5` and
+  `failed_invocation/5` automatically answer a completed or permanently
+  failed child's parent through `done_invocation/5` or `failed_invocation/5`
+  under the parent's own exclusion, carrying the child's donedata or
+  failure reason. `StatifierPersistence.Driver.parent_link/2` reads a run's
+  own linkage back (`:no_parent` for an ordinary run), and
+  `StatifierPersistence.Driver.answer_parent/3` is the public door a host
+  with no `chart_resolver:` calls explicitly - the same function the
+  automatic path uses once the resolver has produced a driver over the
+  parent's chart. A parent that has already cancelled the invocation
+  answers `{:discarded, _}`, which is the existing late-answer discard
+  doing its job, not a new failure mode.

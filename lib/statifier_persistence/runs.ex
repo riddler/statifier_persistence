@@ -48,6 +48,7 @@ defmodule StatifierPersistence.Runs do
     BudgetExhausted,
     Cancel,
     CancelInvoke,
+    Done,
     Invoke,
     Send,
     SendDelayed
@@ -487,8 +488,24 @@ defmodule StatifierPersistence.Runs do
         ) :: {:ok, Run.t(), MachineState.t()} | {:error, error()}
   defp tail_result(run_id, status, identity, lifecycle, machine_state) do
     case budget_effect(lifecycle) do
-      nil -> {:ok, run(run_id, status, identity), machine_state}
+      nil -> {:ok, run(run_id, status, identity, done_effect(lifecycle)), machine_state}
       %BudgetExhausted{} = payload -> {:error, {:budget_exhausted, payload}}
+    end
+  end
+
+  # `{:done, %Done{donedata: donedata}}` is consumed into `:completed` status
+  # (ADR-0004 decision 6) and, from ADR-0008 decision 3, also surfaced: a
+  # durable subchart's parent is answered with its child's donedata, and this
+  # is the only moment it exists. It is deliberately not persisted - a
+  # position that has reached a final state has no configuration left to
+  # carry it, and inventing a column for it would make a run record a
+  # result store. `nil` on every step that did not just complete the run -
+  # at most one `:done` effect is ever produced per step.
+  @spec done_effect([Statifier.Effect.t()]) :: term() | nil
+  defp done_effect(lifecycle_effects) do
+    case Enum.find(lifecycle_effects, &match?({:done, _payload}, &1)) do
+      {:done, %Done{donedata: donedata}} -> donedata
+      nil -> nil
     end
   end
 
@@ -695,13 +712,14 @@ defmodule StatifierPersistence.Runs do
     end
   end
 
-  @spec run(run_id(), Adapter.run_status(), Identity.t()) :: Run.t()
-  defp run(run_id, status, identity) do
+  @spec run(run_id(), Adapter.run_status(), Identity.t(), term()) :: Run.t()
+  defp run(run_id, status, identity, donedata \\ nil) do
     %Run{
       run_id: run_id,
       status: status,
       content_hash: identity.content_hash,
-      failure: nil
+      failure: nil,
+      donedata: donedata
     }
   end
 end

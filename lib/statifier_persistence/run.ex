@@ -10,13 +10,14 @@ defmodule StatifierPersistence.Run do
   alias StatifierPersistence.Storage.Adapter
 
   @enforce_keys [:run_id, :status, :content_hash]
-  defstruct [:run_id, :status, :content_hash, :failure]
+  defstruct [:run_id, :status, :content_hash, :failure, :donedata]
 
   @type t :: %__MODULE__{
           run_id: Adapter.run_id(),
           status: Adapter.run_status(),
           content_hash: Adapter.content_hash(),
-          failure: String.t() | nil
+          failure: String.t() | nil,
+          donedata: term() | nil
         }
 
   @doc """
@@ -24,6 +25,12 @@ defmodule StatifierPersistence.Run do
   `t:StatifierPersistence.Storage.Adapter.run_record/0`, dropping the two
   blob fields (`identity_blob`, `position_blob`) and carrying everything
   else verbatim.
+
+  `donedata` is always `nil` here: a stored record carries no donedata
+  (ADR-0008 decision 3) - a position that has reached a final state has no
+  configuration left to carry it, so it exists only on the step that
+  produced it, via `StatifierPersistence.Runs`' own construction of this
+  struct.
   """
   @spec from_record(Adapter.run_record()) :: t()
   def from_record(%{
@@ -36,7 +43,8 @@ defmodule StatifierPersistence.Run do
       run_id: run_id,
       status: status,
       content_hash: content_hash,
-      failure: failure
+      failure: failure,
+      donedata: nil
     }
   end
 end
