@@ -10,9 +10,10 @@ defmodule StatifierPersistence.DriverSubchartTest do
 
   use ExUnit.Case, async: true
 
+  alias Statifier.Event
   alias Statifier.Invoke.Types, as: InvokeTypes
   alias Statifier.Machine
-  alias StatifierPersistence.{Driver, Storage}
+  alias StatifierPersistence.{Driver, Runs, Storage}
   alias StatifierPersistence.Run.Linkage
   alias StatifierPersistence.Storage.InMemory
   alias StatifierPersistence.Test.NoChildListingAdapter
@@ -55,6 +56,20 @@ defmodule StatifierPersistence.DriverSubchartTest do
           <transition event="timeout" target="abandoned"/>
       </state>
       <state id="abandoned"/>
+  </scxml>
+  """
+
+  # A child that completes with donedata on "go" - Phase 4's completion
+  # fixture: `@child_source` never reaches a final at all, and a completion
+  # test needs one that does.
+  @child_done_source """
+  <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="idle">
+      <state id="idle">
+          <transition event="go" target="done"/>
+      </state>
+      <final id="done">
+          <donedata><content expr="'child-result'"/></donedata>
+      </final>
   </scxml>
   """
 
@@ -211,6 +226,150 @@ defmodule StatifierPersistence.DriverSubchartTest do
     end
   end
 
+  describe "completion" do
+    # Sabotage: had `done_effect/1` return `nil` unconditionally - the
+    # assertion `run.donedata == "child-result"` went red (got `nil`).
+    test "a run that reaches a top-level final with donedata carries it on run.donedata", %{
+      store: store
+    } do
+      {:ok, machine} = Statifier.compile(@child_done_source)
+      driver = Driver.new(store, machine, dispatch: fn _type, _params, _ctx -> :pending end)
+
+      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+      assert {:ok, run, _ms} = Driver.send_event(driver, "run_1", Event.external("go"))
+
+      assert run.status == :completed
+      assert run.donedata == "child-result"
+    end
+
+    # Sabotage: in `respond_to_parent/3`'s `{:done, donedata}` clause,
+    # called `done_invocation(driver, run_id, ...)` (the *child's* own run
+    # id) instead of `linkage.parent_run_id` - `Storage.load_run_position/3`
+    # on "run_1" still showed "calling" and the assertion on `leaves/1` went
+    # red.
+    test "with a chart_resolver, completing the child moves the parent and carries donedata", %{
+      store: store
+    } do
+      {:ok, parent_machine} = Statifier.compile(@parent_source)
+      {:ok, child_machine} = Statifier.compile(@child_done_source)
+      resolver = parent_resolver(parent_machine)
+
+      driver =
+        driver(store, @parent_source, subchart_dispatch(@child_done_source),
+          chart_resolver: resolver
+        )
+
+      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+
+      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+      child_driver = %{driver | machine: child_machine}
+
+      assert {:ok, child_run, _child_ms} =
+               Driver.send_event(child_driver, child_run_id, Event.external("go"))
+
+      assert child_run.status == :completed
+      assert child_run.donedata == "child-result"
+
+      assert {:ok, parent_reloaded} = Storage.load_run_position(store, "run_1", parent_machine)
+      assert leaves(parent_reloaded) == ["approved"]
+      assert parent_reloaded.datamodel["_event"]["data"] == "child-result"
+    end
+
+    # Sabotage: dropped the `chart_resolver: nil` guard clause from
+    # `auto_answer_parent/3`, so it always tried `driver.chart_resolver.(...)`
+    # - this test's driver has none, and the child's own `send_event/4` call
+    # raised `BadFunctionError` instead of completing quietly.
+    test "without a chart_resolver, the parent is untouched and parent_link/2 works", %{
+      store: store
+    } do
+      driver = driver(store, @parent_source, subchart_dispatch(@child_done_source))
+
+      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+
+      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+      {:ok, child_machine} = Statifier.compile(@child_done_source)
+      child_driver = %{driver | machine: child_machine}
+
+      assert {:ok, child_run, _child_ms} =
+               Driver.send_event(child_driver, child_run_id, Event.external("go"))
+
+      assert child_run.status == :completed
+
+      {:ok, parent_machine} = Statifier.compile(@parent_source)
+      assert {:ok, parent_reloaded} = Storage.load_run_position(store, "run_1", parent_machine)
+      assert leaves(parent_reloaded) == ["calling"]
+      assert Map.values(parent_reloaded.active_invocations) == ["call"]
+
+      assert {:ok, linkage} = Driver.parent_link(store, child_run_id)
+      assert linkage.parent_run_id == "run_1"
+      assert linkage.invoke_id == "call"
+    end
+
+    # Sabotage: in `respond_to_parent/3`'s `{:failed, failure}` clause,
+    # called `done_invocation/4` instead of `failed_invocation/4` - the
+    # parent took `done.invoke.call` and rested in "approved" instead of
+    # "refused", and the assertion on `leaves/1` went red.
+    test "answer_parent/3 answers a failed child through the failing door with reason set", %{
+      store: store
+    } do
+      {:ok, parent_machine} = Statifier.compile(@parent_source)
+      driver = driver(store, @parent_source, subchart_dispatch(@child_source))
+
+      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+
+      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+      assert {:ok, _run} = Runs.fail(store, child_run_id, "boom")
+
+      parent_driver = %{driver | machine: parent_machine}
+
+      assert {:ok, _run, machine_state} =
+               Driver.answer_parent(parent_driver, child_run_id, {:failed, reason: "boom"})
+
+      assert leaves(machine_state) == ["refused"]
+      assert machine_state.datamodel["_event"]["data"]["reason"] == "boom"
+    end
+
+    # Sabotage: in `auto_answer_parent/3`'s live clause, replaced the
+    # `resolve_and_answer/4` call with a bare `:ok` (skipping
+    # `answer_parent/3` entirely) - the parent stayed in "calling" and the
+    # assertion on `leaves/1` == `["approved"]` went red.
+    test "the completion path works across a restart, with a driver that has seen neither run", %{
+      store: store
+    } do
+      {:ok, parent_machine} = Statifier.compile(@parent_source)
+      {:ok, child_machine} = Statifier.compile(@child_done_source)
+      resolver = parent_resolver(parent_machine)
+
+      driver =
+        driver(store, @parent_source, subchart_dispatch(@child_done_source),
+          chart_resolver: resolver
+        )
+
+      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+
+      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+
+      # A cold node: a fresh driver over only the child's own chart, built
+      # with no knowledge of the parent's run or the drive that started it -
+      # only the store and the chart_resolver.
+      cold_driver =
+        Driver.new(store, child_machine,
+          dispatch: fn _type, _params, _ctx -> :pending end,
+          chart_resolver: resolver
+        )
+
+      assert {:ok, child_run, _ms} =
+               Driver.send_event(cold_driver, child_run_id, Event.external("go"))
+
+      assert child_run.status == :completed
+      assert child_run.donedata == "child-result"
+
+      assert {:ok, parent_reloaded} = Storage.load_run_position(store, "run_1", parent_machine)
+      assert leaves(parent_reloaded) == ["approved"]
+      assert parent_reloaded.datamodel["_event"]["data"] == "child-result"
+    end
+  end
+
   # A dispatch fun that answers every `<invoke type="myapp:subchart">` with
   # `{:start_child, ...}`, the child's content swapped in for whatever the
   # element itself carried - exactly the shape `StatifierBlocks.Runtime.Subchart`
@@ -261,13 +420,29 @@ defmodule StatifierPersistence.DriverSubchartTest do
     end
   end
 
-  defp driver(store, source, dispatch) do
+  defp driver(store, source, dispatch, opts \\ []) do
     {:ok, machine} = Statifier.compile(source)
 
-    Driver.new(store, machine,
-      dispatch: dispatch,
-      invoke_types: InvokeTypes.new(types: ["myapp:subchart"])
+    Driver.new(
+      store,
+      machine,
+      Keyword.merge(
+        [dispatch: dispatch, invoke_types: InvokeTypes.new(types: ["myapp:subchart"])],
+        opts
+      )
     )
+  end
+
+  # A `chart_resolver:` that answers `parent_machine`'s own content hash and
+  # refuses every other - the fixture for a driver that can find *its own*
+  # parent's chart and nothing else.
+  defp parent_resolver(parent_machine) do
+    parent_hash = Machine.identity(parent_machine).content_hash
+
+    fn
+      ^parent_hash -> {:ok, parent_machine}
+      _other_hash -> :error
+    end
   end
 
   defp leaves(machine_state) do

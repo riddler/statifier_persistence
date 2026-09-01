@@ -843,8 +843,8 @@ Mutations: return `nil` from `done_effect/1` (the donedata cases); call
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] Full `mix quality` passes.
-- [ ] `Run.donedata` is `nil` on every existing test's returned run - i.e. no
+- [x] Full `mix quality` passes.
+- [x] `Run.donedata` is `nil` on every existing test's returned run - i.e. no
       existing assertion changes meaning.
 
 #### Manual Verification:
@@ -1216,6 +1216,21 @@ blocking here.
 - [ ] The refusal string is byte-identical to statifier_blocks ADR-0008
       decision 5's `child_run_creation_failed`.
 - [ ] A host that never returns the new arm sees no behavior change anywhere.
+
+**Implementation Note**: as Phase 1.
+
+---
+
+### Phase 4
+
+- [ ] Every new test confirmed red under its noted mutation (a process
+      attestation, not a gate-checkable state).
+- [ ] The `chart_resolver:` docstring says plainly why the package cannot
+      supply it (ADR-0003 decision 1), so a host does not read it as an
+      omission.
+- [ ] No parent-child transport exists anywhere: grep confirms the only path
+      from child to parent is `done_invocation/5` / `failed_invocation/5`
+      (ADR-0008 decision 3, "no bespoke parent-child channel").
 
 **Implementation Note**: as Phase 1.
 

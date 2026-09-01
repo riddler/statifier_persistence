@@ -239,6 +239,14 @@ defmodule StatifierPersistence.Driver do
           | {:discarded, Run.t()}
           | {:error, Runs.error() | {:turns_exhausted, pos_integer()}}
 
+  @typedoc """
+  How this driver reaches a chart it does not hold: answering a durable
+  subchart's parent, whose chart is not this driver's own `machine`
+  (ADR-0008 decision 3). `content_hash` is the parent run's own, read off
+  its stored record.
+  """
+  @type chart_resolver :: (content_hash :: String.t() -> {:ok, Machine.t()} | :error)
+
   @enforce_keys [:store, :machine, :dispatch]
   defstruct [
     :store,
@@ -247,6 +255,7 @@ defmodule StatifierPersistence.Driver do
     :effects,
     :invoke_types,
     :serialization,
+    :chart_resolver,
     max_turns: 1_000
   ]
 
@@ -257,6 +266,7 @@ defmodule StatifierPersistence.Driver do
           effects: Executor.t() | nil,
           invoke_types: MachineState.invoke_types(),
           serialization: {module(), term()} | nil,
+          chart_resolver: chart_resolver() | nil,
           max_turns: pos_integer()
         }
 
@@ -289,6 +299,17 @@ defmodule StatifierPersistence.Driver do
     point runs inside (ADR-0004 decision 5). Defaults to whatever
     `StatifierPersistence.Runs` defaults to, the adapter's own
     `lock_run/3`.
+  - `chart_resolver:` - `t:chart_resolver/0`, how this driver reaches a
+    chart it does not hold: `(content_hash -> {:ok, Statifier.Machine.t()}
+    | :error)`. It exists for exactly one purpose - answering a durable
+    subchart's parent, whose chart is not this driver's `machine`
+    (ADR-0008 decision 3). This package cannot supply it: a stored
+    `chart_blob` is opaque by ADR-0003 decision 1 and nothing here decodes
+    one, so the host that saved the chart is the only party that can
+    compile it. Defaults to `nil`, "this driver answers no parents" - a
+    host without one calls `done_invocation/5` or `failed_invocation/5`
+    itself, from `parent_link/2` and the drive's own `run.donedata` or
+    `run.failure`.
   - `max_turns:` - the answer-fed steps one drive will take before
     refusing to take another. Defaults to 1000.
 
@@ -304,6 +325,7 @@ defmodule StatifierPersistence.Driver do
       effects: Keyword.get(opts, :effects),
       invoke_types: Keyword.get(opts, :invoke_types),
       serialization: Keyword.get(opts, :serialization),
+      chart_resolver: Keyword.get(opts, :chart_resolver),
       max_turns: Keyword.get(opts, :max_turns, 1_000)
     }
   end
@@ -322,8 +344,9 @@ defmodule StatifierPersistence.Driver do
     ref = make_ref()
     opts = create_opts(driver, opts)
     result = Runs.create(driver.store, run_id, driver.machine, run_opts(driver, opts, ref))
+    result = advance(driver, run_id, opts, result, drain(ref, []), 0)
 
-    advance(driver, run_id, opts, result, drain(ref, []), 0)
+    maybe_answer_parent(driver, run_id, result)
   end
 
   # `create/4`'s `invoke_types:` has to travel inside `initialize:`, not
@@ -362,8 +385,9 @@ defmodule StatifierPersistence.Driver do
   def send_event(%__MODULE__{} = driver, run_id, %Event{} = event, opts \\ []) do
     ref = make_ref()
     result = step(driver, run_id, opts, event, ref)
+    result = advance(driver, run_id, opts, result, drain(ref, []), 0)
 
-    advance(driver, run_id, opts, result, drain(ref, []), 0)
+    maybe_answer_parent(driver, run_id, result)
   end
 
   @doc """
@@ -423,6 +447,120 @@ defmodule StatifierPersistence.Driver do
     reenter(driver, run_id, opts, invoke_id, {:failed, failure})
   end
 
+  @doc """
+  The "find my parent" query: reads `run_id`'s own stored linkage, one key
+  read off its fetched record (`StatifierPersistence.Run.Linkage`, ADR-0008
+  decision 2).
+
+  `:no_parent` for a run with no linkage - an ordinary run, or a durable
+  subchart child that has none for whatever reason - not a failure: having
+  no parent is an ordinary property of a run.
+  """
+  @spec parent_link(store :: Storage.t(), run_id :: Runs.run_id()) ::
+          {:ok, Linkage.t()} | :no_parent | {:error, Storage.error()}
+  def parent_link(%Storage{} = store, run_id) do
+    with {:ok, run_record} <- Storage.fetch_run(store, run_id) do
+      case Linkage.from_metadata(run_record.metadata) do
+        {:ok, %Linkage{} = linkage} -> {:ok, linkage}
+        :no_linkage -> :no_parent
+      end
+    end
+  end
+
+  @doc """
+  Answers `child_run_id`'s parent with its completion or permanent failure
+  (ADR-0008 decision 3) - a separate drive under the *parent's* own
+  exclusion, `driver.machine` must be the parent's chart.
+
+  `donedata_or_failure` is `{:done, donedata}` or `{:failed, failure}`.
+  Reads `child_run_id`'s own linkage through `parent_link/2` first:
+  `:no_parent` is a no-op answering `:no_parent`, so this is safe to call
+  on any run id, linked or not.
+
+  Public so a host with no `chart_resolver:` can call it explicitly with a
+  driver built over the parent's own chart - the same construction the
+  automatic path (wired into `create/3`, `send_event/4`, `done_invocation/5`
+  and `failed_invocation/5`) uses once its `chart_resolver:` has resolved
+  one. The parent's answer is `done_invocation/5` or `failed_invocation/5`
+  under the parent's own exclusion: a parent that has already cancelled the
+  invocation answers `{:discarded, _}` here, which is ADR-0007 decision 3's
+  mechanism doing its job, not an error.
+  """
+  @spec answer_parent(
+          driver :: t(),
+          child_run_id :: Runs.run_id(),
+          donedata_or_failure :: {:done, term()} | {:failed, keyword()}
+        ) :: result() | :no_parent | {:error, Storage.error()}
+  def answer_parent(%__MODULE__{} = driver, child_run_id, donedata_or_failure)
+      when is_binary(child_run_id) do
+    case parent_link(driver.store, child_run_id) do
+      {:ok, %Linkage{} = linkage} -> respond_to_parent(driver, linkage, donedata_or_failure)
+      :no_parent -> :no_parent
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @spec respond_to_parent(t(), Linkage.t(), {:done, term()} | {:failed, keyword()}) :: result()
+  defp respond_to_parent(driver, %Linkage{} = linkage, {:done, donedata}) do
+    done_invocation(driver, linkage.parent_run_id, linkage.invoke_id, donedata)
+  end
+
+  defp respond_to_parent(driver, %Linkage{} = linkage, {:failed, failure}) do
+    failed_invocation(driver, linkage.parent_run_id, linkage.invoke_id, failure)
+  end
+
+  # The automatic re-entry `create/3`, `send_event/4` and `reenter/5` all
+  # call after their own drive returns: a completed or permanently-failed
+  # run with a `chart_resolver:` and linkage answers its parent; anything
+  # else - active, no linkage, no resolver - leaves the drive's own result
+  # unchanged, which is always what this function returns regardless of
+  # what the answer attempt does.
+  @spec maybe_answer_parent(t(), Runs.run_id(), result()) :: result()
+  defp maybe_answer_parent(driver, run_id, {:ok, %Run{status: :completed} = run, _ms} = result) do
+    auto_answer_parent(driver, run_id, {:done, run.donedata})
+    result
+  end
+
+  defp maybe_answer_parent(driver, run_id, {:ok, %Run{status: :failed} = run, _ms} = result) do
+    auto_answer_parent(driver, run_id, {:failed, reason: run.failure})
+    result
+  end
+
+  defp maybe_answer_parent(_driver, _run_id, result), do: result
+
+  @spec auto_answer_parent(t(), Runs.run_id(), {:done, term()} | {:failed, keyword()}) :: :ok
+  defp auto_answer_parent(%__MODULE__{chart_resolver: nil}, _run_id, _payload), do: :ok
+
+  defp auto_answer_parent(driver, run_id, payload) do
+    case parent_link(driver.store, run_id) do
+      {:ok, %Linkage{} = linkage} -> resolve_and_answer(driver, linkage, run_id, payload)
+      _no_parent_or_error -> :ok
+    end
+  end
+
+  # `parent_driver` is built exactly as a child's is (`create_child/5`): the
+  # same store, the same `serialization:`, the same `effects` executor, the
+  # same `dispatch` fun, the same `chart_resolver:` - only `machine` ever
+  # differs, in both directions, so a grandparent is reached by this same
+  # construction recursing. Any failure resolving the parent's own record or
+  # its chart is silently a no-op: the child's own result is unaffected
+  # either way (`maybe_answer_parent/3`'s doc).
+  @spec resolve_and_answer(
+          t(),
+          Linkage.t(),
+          Runs.run_id(),
+          {:done, term()} | {:failed, keyword()}
+        ) ::
+          :ok
+  defp resolve_and_answer(driver, %Linkage{} = linkage, run_id, payload) do
+    with {:ok, parent_record} <- Storage.fetch_run(driver.store, linkage.parent_run_id),
+         {:ok, parent_machine} <- driver.chart_resolver.(parent_record.content_hash) do
+      answer_parent(%{driver | machine: parent_machine}, run_id, payload)
+    end
+
+    :ok
+  end
+
   # Both doors, which differ only in the answer they carry. The event is
   # built by a `t:StatifierPersistence.Runs.event_builder/0` rather than
   # here, so the liveness read and the step see one position under one
@@ -438,7 +576,10 @@ defmodule StatifierPersistence.Driver do
     ref = make_ref()
     builder = fn machine_state -> late_answer(machine_state, invoke_id, answer) end
 
-    advance(driver, run_id, opts, step(driver, run_id, opts, builder, ref), drain(ref, []), 0)
+    result =
+      advance(driver, run_id, opts, step(driver, run_id, opts, builder, ref), drain(ref, []), 0)
+
+    maybe_answer_parent(driver, run_id, result)
   end
 
   # The public door's own 6.4.3 read. `live?/2` keys on the invocation's
