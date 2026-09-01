@@ -1,6 +1,6 @@
 # ADR-0009: Telemetry for the durable stepper: `:persistence` on the family contract, plus a storage-phase family of this package's own
 
-Status: proposed (2026-09-01, sp-i21)
+Status: accepted (2026-09-01, sp-i21; unqualified direction-agent verdict, campaign-025)
 
 ## Context
 
