@@ -87,5 +87,7 @@ Too much:
 
 Assemble the fragments into a new version section in `CHANGELOG.md`, grouped by
 heading and ordered `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`,
-`Security`. Delete the fragments in the same commit that cuts the release, and
-tag it.
+`Security`. Move the README's install-snippet requirement to the new release
+line - it is the one user-facing version string outside `mix.exs` (operator
+ruling, 2026-09-01). Delete the fragments in the same commit that cuts the
+release, and tag it.
