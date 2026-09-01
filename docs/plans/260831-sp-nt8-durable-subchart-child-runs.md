@@ -717,8 +717,8 @@ pre-check (the refuse-at-open case).
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] Full `mix quality` passes.
-- [ ] Dialyzer accepts the widened `dispatch` type with no new warning and no
+- [x] Full `mix quality` passes.
+- [x] Dialyzer accepts the widened `dispatch` type with no new warning and no
       suppression.
 
 #### Manual Verification:
@@ -1201,6 +1201,21 @@ blocking here.
       decision 1's narrowing is as narrow as the record says.
 - [ ] The moduledoc states the pin is mandatory and says why, in this
       package's own vocabulary rather than by citing the ADR alone.
+
+**Implementation Note**: as Phase 1.
+
+---
+
+### Phase 3
+
+- [ ] Every new test confirmed red under its noted mutation (a process
+      attestation, not a gate-checkable state).
+- [ ] The `Driver` moduledoc no longer says durable subcharts are out of
+      scope, and the replacement section says who emits the instruction and
+      who executes it.
+- [ ] The refusal string is byte-identical to statifier_blocks ADR-0008
+      decision 5's `child_run_creation_failed`.
+- [ ] A host that never returns the new arm sees no behavior change anywhere.
 
 **Implementation Note**: as Phase 1.
 
