@@ -1,11 +1,17 @@
 # Telemetry and the OpenTelemetry bridge half
 
 This note is the design record for what `statifier_persistence` emits and
-what it deliberately leaves to others. It is a specification, not a
-description: at the time of writing this package emits no `:telemetry`
-events at all and has no `:telemetry` dependency. This note and
-`docs/adr/0009-telemetry-events-for-the-durable-stepper.md` are what the
-implementing work builds against.
+what it deliberately leaves to others. It was written as a specification
+ahead of the code; the family-two emit sites landed in sp-m0i, so the
+tables below now describe what `StatifierPersistence.Telemetry` emits as
+well as what it promises. Nothing in the contract changed on the way in -
+`docs/adr/0009-telemetry-events-for-the-durable-stepper.md` froze it, and
+decision 8's amendment discipline is how it moves.
+
+Family one - the `[:statifier, :session, ...]` events this package emits
+as a stepping driver, through `Statifier.Telemetry` with
+`driver: :persistence` - is still specification: the table below is its
+contract, and wiring those calls into the stepper seam is separate work.
 
 Four records govern and are not restated here:
 

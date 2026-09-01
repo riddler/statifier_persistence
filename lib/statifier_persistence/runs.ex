@@ -55,13 +55,28 @@ defmodule StatifierPersistence.Runs do
   }
 
   alias Statifier.Machine.Identity
-  alias StatifierPersistence.{Executor, Run, Storage}
+  alias StatifierPersistence.{Executor, Run, Storage, Telemetry}
   alias StatifierPersistence.Run.Linkage
   alias StatifierPersistence.Serialization.AdapterLock
   alias StatifierPersistence.Storage.Adapter
 
   @typedoc "A run's caller-supplied opaque key (ADR-0004 decision 2)."
   @type run_id :: Adapter.run_id()
+
+  # The persist tail's executor seam, carried as one term so the
+  # effect-execution functions take a `context` and its telemetry
+  # companion together rather than four positional arguments.
+  #
+  # `context` is the host-facing `t:StatifierPersistence.Executor.context/0`
+  # and is passed to the executor unchanged; `session_id` never reaches the
+  # executor - it rides `[:statifier_persistence, :effect, :failed]` alone,
+  # because adding a key to the executor's context would be a change to
+  # ADR-0004 decision 4's contract rather than to this package's telemetry.
+  @typep seam :: %{
+           context: Executor.context(),
+           executor: Executor.t(),
+           session_id: String.t() | nil
+         }
 
   @typedoc """
   An event `step/5` can only build once the run's position is loaded.
@@ -116,6 +131,15 @@ defmodule StatifierPersistence.Runs do
     strategy the fetch-to-persist tail runs inside (ADR-0004 decision 5;
     `fail/4` accepts it too). Defaults to
     `{StatifierPersistence.Serialization.AdapterLock, store}`.
+  - `entry:` - this package's own, never a host's, and telemetry-only: the
+    public door this drive came through, carried on
+    `[:statifier_persistence, :run, :step, :start | :stop]` and
+    `[:statifier_persistence, :run, :discarded]` as `entry` (ADR-0009,
+    `docs/telemetry.md`). `StatifierPersistence.Driver` sets it to
+    `:done_invocation`, `:failed_invocation` or `:answer_parent` on the
+    doors that reach `step/5` rather than being one of its own; every
+    other entry point derives its own (`:create`, `:step`, `:fail`,
+    `:cancel`) and this option changes nothing but the reported value.
   - `linkage:` (`create/4` only) - this package's own, never a host's. Set
     by the durable subchart `start_child` clause (Phase 3) to record a
     child's parent under the reserved metadata namespace
@@ -132,6 +156,22 @@ defmodule StatifierPersistence.Runs do
           | {:serialization, {module(), term()}}
           | {:metadata, Adapter.metadata()}
           | {:linkage, Linkage.t()}
+          | {:entry, entry()}
+
+  @typedoc """
+  The fixed vocabulary of public doors `entry` names on this package's own
+  telemetry (`docs/telemetry.md`). It is the dimension an operator slices
+  step latency by first, because a `:done_invocation` step and a `:step`
+  step have different expected shapes.
+  """
+  @type entry ::
+          :create
+          | :step
+          | :done_invocation
+          | :failed_invocation
+          | :answer_parent
+          | :fail
+          | :cancel
 
   @doc """
   Creates a run: `Statifier.Interpreter.initialize/2` (which cannot fail),
@@ -187,7 +227,7 @@ defmodule StatifierPersistence.Runs do
       {machine_state, effects} =
         Interpreter.initialize(machine, Keyword.get(opts, :initialize, []))
 
-      serialized(store, run_id, opts, fn ->
+      serialized(store, run_id, :create, opts, fn ->
         persist_tail(store, run_id, machine_state, effects, executor, {:insert, metadata})
       end)
     end
@@ -251,9 +291,10 @@ defmodule StatifierPersistence.Runs do
   def step(%Storage{} = store, run_id, %Machine{} = machine, event, opts)
       when is_struct(event, Event) or is_function(event, 1) do
     executor = Keyword.fetch!(opts, :executor)
+    entry = entry(opts, :step)
 
-    serialized(store, run_id, opts, fn ->
-      step_tail(store, run_id, machine, event, opts, executor)
+    serialized(store, run_id, entry, opts, fn ->
+      step_tail(store, run_id, machine, event, opts, executor, entry)
     end)
   end
 
@@ -263,16 +304,17 @@ defmodule StatifierPersistence.Runs do
           Machine.t(),
           Event.t() | event_builder(),
           [opt()],
-          Executor.t()
+          Executor.t(),
+          entry()
         ) :: {:ok, Run.t(), MachineState.t()} | {:discarded, Run.t()} | {:error, error()}
-  defp step_tail(store, run_id, machine, event, opts, executor) do
+  defp step_tail(store, run_id, machine, event, opts, executor, entry) do
     case Storage.fetch_run(store, run_id) do
       {:ok, %{status: status} = run_record} when status in [:completed, :failed, :cancelled] ->
-        {:discarded, Run.from_record(run_record)}
+        discarded(run_record, run_id, entry, :terminal_run)
 
       {:ok, run_record} ->
         with {:ok, machine_state} <- Storage.load_run_position(store, run_id, machine) do
-          step_loaded(store, run_id, run_record, machine_state, event, opts, executor)
+          step_loaded(store, run_id, run_record, machine_state, event, opts, executor, entry)
         end
 
       {:error, _reason} = error ->
@@ -296,7 +338,7 @@ defmodule StatifierPersistence.Runs do
   @spec fail(store :: Storage.t(), run_id :: run_id(), reason :: String.t(), opts :: keyword()) ::
           {:ok, Run.t()} | {:discarded, Run.t()} | {:error, error()}
   def fail(%Storage{} = store, run_id, reason, opts \\ []) when is_binary(reason) do
-    serialized(store, run_id, opts, fn ->
+    serialized(store, run_id, :fail, opts, fn ->
       fail_tail(store, run_id, reason)
     end)
   end
@@ -306,10 +348,11 @@ defmodule StatifierPersistence.Runs do
   defp fail_tail(store, run_id, reason) do
     case Storage.fetch_run(store, run_id) do
       {:ok, %{status: status} = run_record} when status in [:completed, :failed, :cancelled] ->
-        {:discarded, Run.from_record(run_record)}
+        discarded(run_record, run_id, :fail, :terminal_run)
 
       {:ok, run_record} ->
         with :ok <- Storage.update_run_status(store, run_id, :failed, failure: reason) do
+          terminated(run_id, run_record.content_hash, :failed, reason)
           {:ok, Run.from_record(%{run_record | status: :failed, failure: reason})}
         end
 
@@ -335,7 +378,7 @@ defmodule StatifierPersistence.Runs do
   @spec cancel(store :: Storage.t(), run_id :: run_id(), opts :: keyword()) ::
           {:ok, Run.t()} | {:discarded, Run.t()} | {:error, error()}
   def cancel(%Storage{} = store, run_id, opts \\ []) do
-    serialized(store, run_id, opts, fn -> cancel_tail(store, run_id) end)
+    serialized(store, run_id, :cancel, opts, fn -> cancel_tail(store, run_id) end)
   end
 
   @spec cancel_tail(Storage.t(), run_id()) ::
@@ -343,10 +386,11 @@ defmodule StatifierPersistence.Runs do
   defp cancel_tail(store, run_id) do
     case Storage.fetch_run(store, run_id) do
       {:ok, %{status: status} = run_record} when status in [:completed, :failed, :cancelled] ->
-        {:discarded, Run.from_record(run_record)}
+        discarded(run_record, run_id, :cancel, :terminal_run)
 
       {:ok, run_record} ->
         with :ok <- Storage.update_run_status(store, run_id, :cancelled, failure: nil) do
+          terminated(run_id, run_record.content_hash, :cancelled, nil)
           {:ok, Run.from_record(%{run_record | status: :cancelled, failure: nil})}
         end
 
@@ -395,17 +439,59 @@ defmodule StatifierPersistence.Runs do
         ) ::
           {:ok, non_neg_integer()} | {:error, error()}
   def cascade_cancel(%Storage{} = store, metadata_match, opts \\ []) do
-    with {:ok, records} <- Storage.list_runs_by_metadata(store, metadata_match) do
-      Enum.reduce_while(records, {:ok, 0}, &cascade_step(store, &1, opts, &2))
+    case sweep(store, metadata_match, opts) do
+      {:ok, {cancelled, retained}} ->
+        emit_cascade(metadata_match, cancelled, retained)
+        {:ok, cancelled}
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
-  @spec cascade_step(Storage.t(), Adapter.run_record(), keyword(), {:ok, non_neg_integer()}) ::
-          {:cont, {:ok, non_neg_integer()}} | {:halt, {:error, error()}}
-  defp cascade_step(store, record, opts, {:ok, total}) do
+  # The recursive half. It is separate from the public function for one
+  # reason: `[:statifier_persistence, :child, :cascade_cancelled]` reports
+  # the whole sweep once (ADR-0009 decision 3's fourth bullet), and a
+  # recursion through the public door would emit one event per node of the
+  # tree instead. The `retained` half of the tally is ADR-0008 decision
+  # 5's retain semantics as a number: the runs the walk found already
+  # terminal and left alone.
+  @spec sweep(Storage.t(), Adapter.metadata(), keyword()) ::
+          {:ok, {non_neg_integer(), non_neg_integer()}} | {:error, error()}
+  defp sweep(store, metadata_match, opts) do
+    with {:ok, records} <- Storage.list_runs_by_metadata(store, metadata_match) do
+      Enum.reduce_while(records, {:ok, {0, 0}}, &cascade_step(store, &1, opts, &2))
+    end
+  end
+
+  # The match map is this package's own (`Run.Linkage.parent_match/1` or
+  # `invocation_match/2`), so reading the two ids back out of it is
+  # reading what this package just wrote. `invoke_id` is `nil` for the
+  # whole-parent sweep, which is the contract's own value for it.
+  @spec emit_cascade(Adapter.metadata(), non_neg_integer(), non_neg_integer()) :: :ok
+  defp emit_cascade(metadata_match, cancelled, retained) do
+    linkage = Map.get(metadata_match, Linkage.reserved_key(), %{})
+
+    Telemetry.child_cascade_cancelled(cancelled, retained,
+      parent_run_id: Map.get(linkage, "parent_run_id"),
+      invoke_id: Map.get(linkage, "invoke_id")
+    )
+  end
+
+  @spec cascade_step(
+          Storage.t(),
+          Adapter.run_record(),
+          keyword(),
+          {:ok, {non_neg_integer(), non_neg_integer()}}
+        ) ::
+          {:cont, {:ok, {non_neg_integer(), non_neg_integer()}}} | {:halt, {:error, error()}}
+  defp cascade_step(store, record, opts, {:ok, {cancelled, retained}}) do
     case cancel_and_descend(store, record.run_id, opts) do
-      {:ok, count} -> {:cont, {:ok, total + count}}
-      {:error, _reason} = error -> {:halt, error}
+      {:ok, {node_cancelled, node_retained}} ->
+        {:cont, {:ok, {cancelled + node_cancelled, retained + node_retained}}}
+
+      {:error, _reason} = error ->
+        {:halt, error}
     end
   end
 
@@ -416,20 +502,21 @@ defmodule StatifierPersistence.Runs do
   # cancelled runs too - `cancel/3`'s own discard for an already-terminal
   # run stops nothing here, it only stops that one run's own count.
   @spec cancel_and_descend(Storage.t(), run_id(), keyword()) ::
-          {:ok, non_neg_integer()} | {:error, error()}
+          {:ok, {non_neg_integer(), non_neg_integer()}} | {:error, error()}
   defp cancel_and_descend(store, run_id, opts) do
-    with {:ok, newly_cancelled} <- cancel_counted(store, run_id, opts),
-         {:ok, descendants} <- cascade_cancel(store, Linkage.parent_match(run_id), opts) do
-      {:ok, newly_cancelled + descendants}
+    with {:ok, {cancelled, retained}} <- cancel_counted(store, run_id, opts),
+         {:ok, {sub_cancelled, sub_retained}} <-
+           sweep(store, Linkage.parent_match(run_id), opts) do
+      {:ok, {cancelled + sub_cancelled, retained + sub_retained}}
     end
   end
 
   @spec cancel_counted(Storage.t(), run_id(), keyword()) ::
-          {:ok, non_neg_integer()} | {:error, error()}
+          {:ok, {non_neg_integer(), non_neg_integer()}} | {:error, error()}
   defp cancel_counted(store, run_id, opts) do
     case cancel(store, run_id, opts) do
-      {:ok, _run} -> {:ok, 1}
-      {:discarded, _run} -> {:ok, 0}
+      {:ok, _run} -> {:ok, {1, 0}}
+      {:discarded, _run} -> {:ok, {0, 1}}
       {:error, _reason} = error -> error
     end
   end
@@ -441,16 +528,128 @@ defmodule StatifierPersistence.Runs do
   # the default over an adapter with no `lock_run/3`) surfaces unchanged.
   # Nothing inside any tail calls back into this function, so `with_run/3`
   # never nests on one run id.
-  @spec serialized(Storage.t(), run_id(), keyword(), (-> result)) ::
+  #
+  # This is also the step seam (ADR-0009 decision 5): the one `:start` /
+  # `:stop` pair this package emits brackets exactly this function, so the
+  # upstream macrostep span - opened inside `fun` - nests inside it by
+  # ordinary ambient context, and `st-ADR-0067` decision 5's "a span never
+  # crosses a persist boundary" holds structurally rather than by
+  # discipline. `[:statifier_persistence, :run, :lock]`'s `duration` is
+  # the *wait*, which is why it is measured from before `with_run/3` to
+  # the first line inside the body it runs rather than around the call:
+  # the held time is the step, and the step already has a span.
+  @spec serialized(Storage.t(), run_id(), entry(), keyword(), (-> result)) ::
           result | {:error, error()}
         when result: term()
-  defp serialized(store, run_id, opts, fun) do
+  defp serialized(store, run_id, entry, opts, fun) do
     {strategy, config} = Keyword.get(opts, :serialization, {AdapterLock, store})
+    span_ref = make_ref()
+    started_at = Telemetry.run_step_start(run_id, entry, span_ref)
+    lock_start = System.monotonic_time()
 
-    case strategy.with_run(config, run_id, fun) do
-      {:ok, result} -> result
-      {:error, _reason} = error -> error
-    end
+    locked =
+      strategy.with_run(config, run_id, fn ->
+        emit_lock(lock_start, run_id, strategy, :acquired, nil)
+        fun.()
+      end)
+
+    result = unlocked(locked, lock_start, run_id, strategy)
+    Telemetry.run_step_stop(started_at, step_stop_fields(run_id, entry, span_ref, result))
+
+    result
+  end
+
+  @spec unlocked({:ok, result} | {:error, term()}, integer(), run_id(), module()) ::
+          result | {:error, error()}
+        when result: term()
+  defp unlocked({:ok, result}, _lock_start, _run_id, _strategy), do: result
+
+  defp unlocked({:error, reason} = error, lock_start, run_id, strategy) do
+    emit_lock(lock_start, run_id, strategy, :unavailable, reason)
+    error
+  end
+
+  @spec emit_lock(integer(), run_id(), module(), :acquired | :unavailable, term()) :: :ok
+  defp emit_lock(lock_start, run_id, strategy, outcome, reason) do
+    Telemetry.run_lock(System.monotonic_time() - lock_start,
+      run_id: run_id,
+      strategy: strategy,
+      outcome: outcome,
+      reason: reason
+    )
+  end
+
+  # The stop half's metadata, read off whichever of the four return shapes
+  # the tail produced. `session_id` is `nil` wherever no position was
+  # decoded (ADR-0009 decision 4's honest nil): a terminal-run discard
+  # reads the run record only, and a lock or identity refusal never loads
+  # at all. `status` is `nil` where the step reached no write - with the
+  # one exception of `{:budget_exhausted, _}`, which reaches a `:failed`
+  # write and *then* returns an error (`tail_result/5`).
+  @spec step_stop_fields(run_id(), entry(), reference(), term()) :: keyword()
+  defp step_stop_fields(run_id, entry, span_ref, result) do
+    {session_id, content_hash, outcome, status, reason} = stop_shape(result)
+
+    [
+      run_id: run_id,
+      session_id: session_id,
+      content_hash: content_hash,
+      entry: entry,
+      outcome: outcome,
+      status: status,
+      reason: reason,
+      span_ref: span_ref
+    ]
+  end
+
+  @spec stop_shape(term()) ::
+          {String.t() | nil, String.t() | nil, :ok | :discarded | :error,
+           Adapter.run_status() | nil, term()}
+  defp stop_shape({:ok, %Run{} = run, %MachineState{} = machine_state}),
+    do: {session_id(machine_state), run.content_hash, :ok, run.status, nil}
+
+  defp stop_shape({:ok, %Run{} = run}), do: {nil, run.content_hash, :ok, run.status, nil}
+
+  defp stop_shape({:discarded, %Run{} = run}),
+    do: {nil, run.content_hash, :discarded, run.status, nil}
+
+  defp stop_shape({:error, {:budget_exhausted, _payload} = reason}),
+    do: {nil, nil, :error, :failed, reason}
+
+  defp stop_shape({:error, reason}), do: {nil, nil, :error, nil, reason}
+
+  # The chart's own `_sessionid`, read out of the decoded datamodel - the
+  # same read `StatifierPersistence.Driver` performs for event origin, and
+  # no extra lookup (ADR-0009 decision 2). Permissive where the driver's
+  # read is strict: an absent `_sessionid` is a missing correlation id on
+  # an event, never a reason to fail a step that has already persisted.
+  @spec session_id(MachineState.t()) :: String.t() | nil
+  defp session_id(%MachineState{datamodel: datamodel}), do: Map.get(datamodel, "_sessionid")
+
+  @spec entry([opt()], entry()) :: entry()
+  defp entry(opts, default), do: Keyword.get(opts, :entry, default)
+
+  # `{:discarded, run}` with its event: the three ways a delivery becomes
+  # a non-event are a closed vocabulary (`docs/telemetry.md`), and only
+  # `:position_terminal` repairs anything.
+  @spec discarded(Adapter.run_record(), run_id(), entry(), atom(), boolean()) ::
+          {:discarded, Run.t()}
+  defp discarded(run_record, run_id, entry, reason, repaired? \\ false) do
+    Telemetry.run_discarded(run_id: run_id, entry: entry, reason: reason, repaired?: repaired?)
+
+    {:discarded, Run.from_record(run_record)}
+  end
+
+  @spec terminated(run_id(), String.t() | nil, Adapter.run_status(), String.t() | nil) :: :ok
+  defp terminated(run_id, content_hash, status, reason) do
+    Telemetry.run_terminated(
+      run_id: run_id,
+      session_id: nil,
+      content_hash: content_hash,
+      status: status,
+      driven_by: :host,
+      reason: reason
+    )
   end
 
   @spec step_loaded(
@@ -460,9 +659,10 @@ defmodule StatifierPersistence.Runs do
           MachineState.t(),
           Event.t() | event_builder(),
           [opt()],
-          Executor.t()
+          Executor.t(),
+          entry()
         ) :: {:ok, Run.t(), MachineState.t()} | {:discarded, Run.t()} | {:error, error()}
-  defp step_loaded(store, run_id, run_record, machine_state, event, opts, executor) do
+  defp step_loaded(store, run_id, run_record, machine_state, event, opts, executor, entry) do
     # The bare match IS the st-ADR-0064 tripwire: `from_binary/2` blanks
     # both fields unconditionally on decode, so if upstream ever stops,
     # this fails loudly here rather than silently resuming a stale
@@ -480,8 +680,8 @@ defmodule StatifierPersistence.Runs do
     # the step. Nothing has been executed or written yet, so a decline is
     # a discard in the full sense - the position is untouched.
     case resolve_event(event, machine_state) do
-      {:ok, event} -> stepped(store, run_id, machine_state, event, executor)
-      :discard -> {:discarded, Run.from_record(run_record)}
+      {:ok, event} -> stepped(store, run_id, machine_state, event, executor, entry)
+      :discard -> discarded(run_record, run_id, entry, :builder_declined)
     end
   end
 
@@ -492,15 +692,15 @@ defmodule StatifierPersistence.Runs do
   defp resolve_event(builder, machine_state) when is_function(builder, 1),
     do: builder.(machine_state)
 
-  @spec stepped(Storage.t(), run_id(), MachineState.t(), Event.t(), Executor.t()) ::
+  @spec stepped(Storage.t(), run_id(), MachineState.t(), Event.t(), Executor.t(), entry()) ::
           {:ok, Run.t(), MachineState.t()} | {:discarded, Run.t()} | {:error, error()}
-  defp stepped(store, run_id, machine_state, event, executor) do
+  defp stepped(store, run_id, machine_state, event, executor, entry) do
     case Interpreter.handle_event(machine_state, event) do
       {:ok, machine_state, effects} ->
         persist_tail(store, run_id, machine_state, effects, executor, :update)
 
       {:error, :not_running} ->
-        repair_terminal(store, run_id, machine_state)
+        repair_terminal(store, run_id, machine_state, entry)
     end
   end
 
@@ -510,11 +710,33 @@ defmodule StatifierPersistence.Runs do
   # chart-driven terminal state (ADR-0004 decision 6), so the repaired
   # status is `:completed`. `position: :skip` carries the stored blob
   # forward untouched - nothing stepped.
-  @spec repair_terminal(Storage.t(), run_id(), MachineState.t()) ::
+  @spec repair_terminal(Storage.t(), run_id(), MachineState.t(), entry()) ::
           {:discarded, Run.t()} | {:error, error()}
-  defp repair_terminal(store, run_id, machine_state) do
+  defp repair_terminal(store, run_id, machine_state, entry) do
     with :ok <- Storage.update_run(store, run_id, machine_state, :completed, position: :skip) do
-      {:discarded, run(run_id, :completed, Machine.identity(machine_state.machine))}
+      identity = Machine.identity(machine_state.machine)
+
+      # Both events, because the repair is two facts at once: the delivery
+      # became a non-event, and the record reached a terminal status on
+      # this call. `driven_by: :chart` - the position was already terminal
+      # because the chart put it there; no host asked for this.
+      Telemetry.run_discarded(
+        run_id: run_id,
+        entry: entry,
+        reason: :position_terminal,
+        repaired?: true
+      )
+
+      Telemetry.run_terminated(
+        run_id: run_id,
+        session_id: session_id(machine_state),
+        content_hash: identity && identity.content_hash,
+        status: :completed,
+        driven_by: :chart,
+        reason: nil
+      )
+
+      {:discarded, run(run_id, :completed, identity)}
     end
   end
 
@@ -535,24 +757,87 @@ defmodule StatifierPersistence.Runs do
   defp persist_tail(store, run_id, machine_state, effects, executor, write) do
     case Machine.identity(machine_state.machine) do
       nil ->
+        Telemetry.identity_refused(
+          run_id: run_id,
+          session_id: session_id(machine_state),
+          stage: :run,
+          reason: :unidentified_chart
+        )
+
         {:error, :unidentified_chart}
 
       identity ->
         {lifecycle, executable} = Enum.split_with(effects, &lifecycle_effect?/1)
         context = %{run_id: run_id, content_hash: identity.content_hash}
+        seam = %{context: context, executor: executor, session_id: session_id(machine_state)}
 
-        failures = execute_effects(executable, executor, context)
+        failures = execute_effects(executable, seam, :defer)
 
-        {machine_state, lifecycle} =
-          reenter_failures(machine_state, failures, executor, context, lifecycle)
+        {machine_state, lifecycle} = reenter_failures(machine_state, failures, seam, lifecycle)
 
         status = run_status(machine_state, lifecycle)
         :ok = assert_quiescent(machine_state, lifecycle)
 
         with :ok <- write_run(write, store, run_id, machine_state, status, lifecycle) do
+          report_write(write, run_id, seam.session_id, identity, status, lifecycle)
           tail_result(run_id, status, identity, lifecycle, machine_state)
         end
     end
+  end
+
+  # The lifecycle events the persist tail owns, emitted only once the write
+  # has actually landed: a create reports `[..., :run, :created]`, and any
+  # write that reached a terminal status reports `[..., :run, :terminated]`
+  # with `driven_by: :chart` - `fail/4` and `cancel/3` are the `:host`
+  # ones and report their own.
+  #
+  # `child?` and `metadata?` are both read off the merged map rather than
+  # plumbed: the reserved linkage key is what makes a run a child
+  # (ADR-0008 decision 2), and what is left after dropping it is exactly
+  # the host's own `metadata:` (ADR-0006 decision 1). Neither the map nor
+  # any key of it is ever emitted - only the two booleans (ADR-0009
+  # decision 7).
+  @spec report_write(
+          {:insert, Adapter.metadata()} | :update,
+          run_id(),
+          String.t() | nil,
+          Identity.t(),
+          Adapter.run_status(),
+          [Statifier.Effect.t()]
+        ) :: :ok
+  defp report_write({:insert, metadata}, run_id, session_id, identity, status, lifecycle) do
+    Telemetry.run_created(
+      run_id: run_id,
+      session_id: session_id,
+      content_hash: identity.content_hash,
+      child?: Map.has_key?(metadata, Linkage.reserved_key()),
+      metadata?: map_size(Map.delete(metadata, Linkage.reserved_key())) > 0
+    )
+
+    report_termination(run_id, session_id, identity, status, lifecycle)
+  end
+
+  defp report_write(:update, run_id, session_id, identity, status, lifecycle),
+    do: report_termination(run_id, session_id, identity, status, lifecycle)
+
+  @spec report_termination(
+          run_id(),
+          String.t() | nil,
+          Identity.t(),
+          Adapter.run_status(),
+          [Statifier.Effect.t()]
+        ) :: :ok
+  defp report_termination(_run_id, _session_id, _identity, :active, _lifecycle), do: :ok
+
+  defp report_termination(run_id, session_id, identity, status, lifecycle) do
+    Telemetry.run_terminated(
+      run_id: run_id,
+      session_id: session_id,
+      content_hash: identity.content_hash,
+      status: status,
+      driven_by: :chart,
+      reason: failure_string(lifecycle)
+    )
   end
 
   # The persisted-run return: `{:ok, ...}` for a live or completed run,
@@ -600,33 +885,53 @@ defmodule StatifierPersistence.Runs do
   # the wave, as does a re-entry exhausting the macrostep budget - the tail
   # then reads status normally. A wave is never opened into a state the
   # primary pass already reported budget-exhausted.
+  #
+  # This is also where `[:statifier_persistence, :effect, :failed]`'s
+  # `reentered?` is settled for the primary pass, which is why the primary
+  # pass defers its emission here rather than emitting inside
+  # `execute_effects/3`: whether a failure opened a re-entry is not known
+  # at the moment it is collected. A wave's own failures emit immediately
+  # with `reentered?: false`, because the wave is single by design.
   @spec reenter_failures(
           MachineState.t(),
           [{Statifier.Effect.t(), term()}],
-          Executor.t(),
-          Executor.context(),
+          seam(),
           [Statifier.Effect.t()]
         ) :: {MachineState.t(), [Statifier.Effect.t()]}
-  defp reenter_failures(machine_state, failures, executor, context, lifecycle) do
-    if budget_exhausted?(lifecycle) do
-      {machine_state, lifecycle}
-    else
-      Enum.reduce_while(failures, {machine_state, lifecycle}, fn {effect, _reason}, acc ->
-        reenter_one(effect, acc, executor, context)
-      end)
-    end
+  defp reenter_failures(machine_state, failures, seam, lifecycle) do
+    {machine_state, lifecycle, _halted?} =
+      if budget_exhausted?(lifecycle) do
+        Enum.each(failures, &report_failure(&1, seam, false))
+        {machine_state, lifecycle, true}
+      else
+        Enum.reduce(failures, {machine_state, lifecycle, false}, &reenter_one(&1, &2, seam))
+      end
+
+    {machine_state, lifecycle}
   end
 
   @spec reenter_one(
-          Statifier.Effect.t(),
-          {MachineState.t(), [Statifier.Effect.t()]},
-          Executor.t(),
-          Executor.context()
-        ) :: {:cont | :halt, {MachineState.t(), [Statifier.Effect.t()]}}
-  defp reenter_one(effect, {_machine_state, _lifecycle} = acc, executor, context) do
+          {Statifier.Effect.t(), term()},
+          {MachineState.t(), [Statifier.Effect.t()], boolean()},
+          seam()
+        ) :: {MachineState.t(), [Statifier.Effect.t()], boolean()}
+  defp reenter_one(failure, {machine_state, lifecycle, true}, seam) do
+    report_failure(failure, seam, false)
+    {machine_state, lifecycle, true}
+  end
+
+  defp reenter_one({effect, _reason} = failure, {machine_state, lifecycle, false}, seam) do
     case reentry_origin(effect) do
-      :observational -> {:cont, acc}
-      {origin, opts} -> deliver_reentry(acc, origin, opts, executor, context)
+      :observational ->
+        report_failure(failure, seam, false)
+        {machine_state, lifecycle, false}
+
+      {origin, opts} ->
+        {flow, reentered?, {machine_state, lifecycle}} =
+          deliver_reentry({machine_state, lifecycle}, origin, opts, seam)
+
+        report_failure(failure, seam, reentered?)
+        {machine_state, lifecycle, flow == :halt}
     end
   end
 
@@ -634,10 +939,9 @@ defmodule StatifierPersistence.Runs do
           {MachineState.t(), [Statifier.Effect.t()]},
           Statifier.Event.Cause.origin(),
           keyword(),
-          Executor.t(),
-          Executor.context()
-        ) :: {:cont | :halt, {MachineState.t(), [Statifier.Effect.t()]}}
-  defp deliver_reentry({machine_state, lifecycle} = acc, origin, opts, executor, context) do
+          seam()
+        ) :: {:cont | :halt, boolean(), {MachineState.t(), [Statifier.Effect.t()]}}
+  defp deliver_reentry({machine_state, lifecycle} = acc, origin, opts, seam) do
     case Interpreter.deliver_internal(
            machine_state,
            :platform,
@@ -648,15 +952,18 @@ defmodule StatifierPersistence.Runs do
       {:ok, machine_state, wave_effects} ->
         {wave_lifecycle, wave_executable} = Enum.split_with(wave_effects, &lifecycle_effect?/1)
 
-        # Single wave: these failures are dropped, never re-entered.
-        _wave_failures = execute_effects(wave_executable, executor, context)
+        # Single wave: these failures are dropped, never re-entered - so
+        # they report themselves, with `reentered?: false`.
+        _wave_failures = execute_effects(wave_executable, seam, :emit)
 
         lifecycle = lifecycle ++ wave_lifecycle
         flow = if budget_exhausted?(wave_lifecycle), do: :halt, else: :cont
-        {flow, {machine_state, lifecycle}}
+        {flow, true, {machine_state, lifecycle}}
 
+      # The re-entry itself reached a final state, so nothing was
+      # delivered: this failure did not re-enter the chart either.
       {:error, :not_running} ->
-        {:halt, acc}
+        {:halt, false, acc}
     end
   end
 
@@ -709,18 +1016,66 @@ defmodule StatifierPersistence.Runs do
   defp lifecycle_effect?({:budget_exhausted, _payload}), do: true
   defp lifecycle_effect?(_effect), do: false
 
-  @spec execute_effects([Statifier.Effect.t()], Executor.t(), Executor.context()) ::
+  @spec execute_effects([Statifier.Effect.t()], seam(), :emit | :defer) ::
           [{Statifier.Effect.t(), term()}]
-  defp execute_effects(effects, executor, context) do
+  defp execute_effects(effects, seam, report) do
     effects
-    |> Enum.reduce([], fn effect, failures ->
-      case Executor.run(executor, effect, context) do
-        :ok -> failures
-        {:error, reason} -> [{effect, reason} | failures]
-      end
-    end)
+    |> Enum.reduce([], &execute_one(&1, &2, seam, report))
     |> Enum.reverse()
   end
+
+  @spec execute_one(
+          Statifier.Effect.t(),
+          [{Statifier.Effect.t(), term()}],
+          seam(),
+          :emit | :defer
+        ) :: [{Statifier.Effect.t(), term()}]
+  defp execute_one(effect, failures, seam, report) do
+    case Executor.run(seam.executor, effect, seam.context) do
+      :ok -> failures
+      {:error, reason} -> collect({effect, reason}, failures, seam, report)
+    end
+  end
+
+  @spec collect(
+          {Statifier.Effect.t(), term()},
+          [{Statifier.Effect.t(), term()}],
+          seam(),
+          :emit | :defer
+        ) :: [{Statifier.Effect.t(), term()}]
+  defp collect(failure, failures, seam, :emit) do
+    report_failure(failure, seam, false)
+    [failure | failures]
+  end
+
+  defp collect(failure, failures, _seam, :defer), do: [failure | failures]
+
+  # `[:statifier_persistence, :effect, :failed]` for one executor verdict
+  # (ADR-0009 decision 3). `executor` is the module, or `:fun` for the
+  # arity-2 form `t:StatifierPersistence.Executor.t/0` also accepts -
+  # there is no name to report for an anonymous function, and reporting
+  # its `inspect/1` would be an unbounded dimension.
+  #
+  # `reason` is the executor's own `{:error, reason}` term unchanged, so a
+  # consumer folding it into a metric dimension must narrow it first
+  # (`docs/telemetry.md`, "Cardinality and disclosure"). The effect's own
+  # payload never travels: only its kind atom.
+  @spec report_failure({Statifier.Effect.t(), term()}, seam(), boolean()) :: :ok
+  defp report_failure({{kind, _payload}, reason}, seam, reentered?) do
+    Telemetry.effect_failed(
+      run_id: seam.context.run_id,
+      session_id: seam.session_id,
+      content_hash: seam.context.content_hash,
+      kind: kind,
+      executor: executor_name(seam.executor),
+      reason: reason,
+      reentered?: reentered?
+    )
+  end
+
+  @spec executor_name(Executor.t()) :: module() | :fun
+  defp executor_name(executor) when is_atom(executor), do: executor
+  defp executor_name(_executor), do: :fun
 
   # `:done` is the only path to `:completed` (ADR-0004 decision 6);
   # `:budget_exhausted` - from the primary pass or from a re-entry wave -
@@ -737,6 +1092,18 @@ defmodule StatifierPersistence.Runs do
   @spec budget_exhausted?([Statifier.Effect.t()]) :: boolean()
   defp budget_exhausted?(lifecycle_effects),
     do: Enum.any?(lifecycle_effects, &match?({:budget_exhausted, _payload}, &1))
+
+  # The run record's short `failure` string - psql-console readable, not
+  # an inspect dump (ADR-0004 decision 1) - and the same string
+  # `[:statifier_persistence, :run, :terminated]` reports as `reason`, so
+  # the event and the row can never disagree.
+  @spec failure_string([Statifier.Effect.t()]) :: String.t() | nil
+  defp failure_string(lifecycle_effects) do
+    case budget_effect(lifecycle_effects) do
+      nil -> nil
+      %BudgetExhausted{budget: budget} -> "budget_exhausted: #{budget} rounds"
+    end
+  end
 
   @spec budget_effect([Statifier.Effect.t()]) :: BudgetExhausted.t() | nil
   defp budget_effect(lifecycle_effects) do
@@ -774,13 +1141,8 @@ defmodule StatifierPersistence.Runs do
           [Statifier.Effect.t()]
         ) :: :ok | {:error, error()}
   defp write_run(write, store, run_id, machine_state, status, lifecycle_effects) do
-    {position, failure} =
-      case budget_effect(lifecycle_effects) do
-        nil -> {:persist, nil}
-        %BudgetExhausted{budget: budget} -> {:skip, "budget_exhausted: #{budget} rounds"}
-      end
-
-    opts = [position: position, failure: failure]
+    position = if budget_exhausted?(lifecycle_effects), do: :skip, else: :persist
+    opts = [position: position, failure: failure_string(lifecycle_effects)]
 
     case write do
       {:insert, metadata} ->

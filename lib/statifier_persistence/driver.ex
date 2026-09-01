@@ -173,7 +173,7 @@ defmodule StatifierPersistence.Driver do
   alias Statifier.Invoke.Source
   alias Statifier.Machine.Identity
   alias Statifier.Session.Invocations
-  alias StatifierPersistence.{Executor, Run, Runs, Storage}
+  alias StatifierPersistence.{Executor, Run, Runs, Storage, Telemetry}
   alias StatifierPersistence.Run.Linkage
 
   @typedoc """
@@ -360,7 +360,7 @@ defmodule StatifierPersistence.Driver do
   @spec create(driver :: t(), run_id :: Runs.run_id(), opts :: keyword()) :: result()
   def create(%__MODULE__{} = driver, run_id, opts \\ []) do
     ref = make_ref()
-    opts = create_opts(driver, opts)
+    opts = driver |> create_opts(opts) |> Keyword.put_new(:entry, :create)
     result = Runs.create(driver.store, run_id, driver.machine, run_opts(driver, opts, ref))
     result = advance(driver, run_id, opts, result, drain(ref, []), 0)
 
@@ -402,6 +402,7 @@ defmodule StatifierPersistence.Driver do
         ) :: result()
   def send_event(%__MODULE__{} = driver, run_id, %Event{} = event, opts \\ []) do
     ref = make_ref()
+    opts = Keyword.put_new(opts, :entry, :step)
     result = step(driver, run_id, opts, event, ref)
     result = advance(driver, run_id, opts, result, drain(ref, []), 0)
 
@@ -512,20 +513,51 @@ defmodule StatifierPersistence.Driver do
   def answer_parent(%__MODULE__{} = driver, child_run_id, donedata_or_failure)
       when is_binary(child_run_id) do
     case parent_link(driver.store, child_run_id) do
-      {:ok, %Linkage{} = linkage} -> respond_to_parent(driver, linkage, donedata_or_failure)
-      :no_parent -> :no_parent
-      {:error, _reason} = error -> error
+      {:ok, %Linkage{} = linkage} ->
+        result = respond_to_parent(driver, linkage, donedata_or_failure)
+        report_answered(child_run_id, linkage, donedata_or_failure)
+        result
+
+      :no_parent ->
+        :no_parent
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
+  # `[:statifier_persistence, :child, :answered]`, after the parent's own
+  # door has returned. A run with no linkage answers nothing and reports
+  # nothing: having no parent is an ordinary property of a run.
+  @spec report_answered(Runs.run_id(), Linkage.t(), {:done, term()} | {:failed, keyword()}) :: :ok
+  defp report_answered(child_run_id, %Linkage{} = linkage, {outcome, _payload}) do
+    Telemetry.child_answered(
+      child_run_id: child_run_id,
+      parent_run_id: linkage.parent_run_id,
+      invoke_id: linkage.invoke_id,
+      outcome: outcome
+    )
+  end
+
+  # `entry: :answer_parent` is telemetry only (`docs/telemetry.md`): the
+  # parent's own door is `done_invocation/5` or `failed_invocation/5`, but
+  # what an operator wants to see on the step is that a *child* drove it.
   @spec respond_to_parent(t(), Linkage.t(), {:done, term()} | {:failed, keyword()}) :: result()
   defp respond_to_parent(driver, %Linkage{} = linkage, {:done, donedata}) do
-    done_invocation(driver, linkage.parent_run_id, linkage.invoke_id, donedata)
+    done_invocation(driver, linkage.parent_run_id, linkage.invoke_id, donedata,
+      entry: :answer_parent
+    )
   end
 
   defp respond_to_parent(driver, %Linkage{} = linkage, {:failed, failure}) do
-    failed_invocation(driver, linkage.parent_run_id, linkage.invoke_id, failure)
+    failed_invocation(driver, linkage.parent_run_id, linkage.invoke_id, failure,
+      entry: :answer_parent
+    )
   end
+
+  @spec door({:done, term()} | {:failed, keyword()}) :: Runs.entry()
+  defp door({:done, _donedata}), do: :done_invocation
+  defp door({:failed, _failure}), do: :failed_invocation
 
   # The automatic re-entry `create/3`, `send_event/4` and `reenter/5` all
   # call after their own drive returns: a completed or permanently-failed
@@ -592,6 +624,7 @@ defmodule StatifierPersistence.Driver do
         ) :: result()
   defp reenter(driver, run_id, opts, invoke_id, answer) do
     ref = make_ref()
+    opts = Keyword.put_new(opts, :entry, door(answer))
     builder = fn machine_state -> late_answer(machine_state, invoke_id, answer) end
 
     result =
@@ -627,9 +660,16 @@ defmodule StatifierPersistence.Driver do
 
   defp advance(_driver, _run_id, _opts, {:error, _reason} = result, _answers, _turns), do: result
 
-  defp advance(%__MODULE__{max_turns: max_turns}, _run_id, _opts, _result, _answers, turns)
-       when turns >= max_turns,
-       do: {:error, {:turns_exhausted, max_turns}}
+  defp advance(%__MODULE__{max_turns: max_turns}, run_id, opts, _result, _answers, turns)
+       when turns >= max_turns do
+    # The drive loop's own refusal, reported as a point-in-time verdict
+    # rather than a span (ADR-0009 decision 5): the loop is one turn in the
+    # ordinary case, so an outer pair bracketing it would almost always
+    # duplicate the single step span inside it.
+    Telemetry.drive_turns_exhausted(turns, run_id: run_id, entry: opts[:entry])
+
+    {:error, {:turns_exhausted, max_turns}}
+  end
 
   defp advance(driver, run_id, opts, {:ok, _run, machine_state} = result, [answer | rest], turns) do
     if live?(machine_state, answer) do
@@ -798,14 +838,37 @@ defmodule StatifierPersistence.Driver do
   # could never be found is a child that could never be cancelled, and
   # starting one would break ADR-0008 decision 5. Same posture as ADR-0006
   # decision 3's refusal at open, and it happens before any write.
+  #
+  # This is also the one reporting site for
+  # `[:statifier_persistence, :child, :refused]`: every one of ADR-0008
+  # decision 4's four refusal reasons - the unsupported adapter here, a
+  # `Statifier.Invoke.Source.resolve/2` reason, `:unidentified_chart`, and
+  # `:run_exists` - funnels back through this return, so the event is
+  # emitted once, in one place, whatever refused.
   @spec start_child(t(), Invoke.t(), dispatch_context()) :: :ok | {:refused, term()}
   defp start_child(driver, %Invoke{} = resolved, context) do
-    if Storage.child_listing_supported?(driver.store) do
-      resolve_child(driver, resolved, context)
-    else
-      {:refused, :child_listing_unsupported}
-    end
+    result =
+      if Storage.child_listing_supported?(driver.store) do
+        resolve_child(driver, resolved, context)
+      else
+        {:refused, :child_listing_unsupported}
+      end
+
+    report_refusal(result, context)
   end
+
+  @spec report_refusal(:ok | {:refused, term()}, dispatch_context()) :: :ok | {:refused, term()}
+  defp report_refusal({:refused, reason} = result, context) do
+    Telemetry.child_refused(
+      parent_run_id: context.run_id,
+      invoke_id: context.invoke_id,
+      reason: reason
+    )
+
+    result
+  end
+
+  defp report_refusal(result, _context), do: result
 
   # `invoke.content` is SCXML markup, and `Source.resolve/2` compiles it
   # (`Statifier.Invoke.Source`) - the durable path resolves a child exactly
@@ -853,12 +916,46 @@ defmodule StatifierPersistence.Driver do
     datamodel = Invocations.seed_datamodel(resolved.params, child_machine)
 
     case create(child_driver, child_run_id, linkage: linkage, initialize: [datamodel: datamodel]) do
-      {:ok, _run, _machine_state} -> :ok
-      {:error, :run_exists} -> adopt_child(driver.store, child_run_id, linkage)
-      {:error, reason} -> {:refused, reason}
-      {:discarded, _run} -> {:refused, :run_exists}
+      {:ok, _run, machine_state} ->
+        report_started(child_run_id, linkage, child_session_id(machine_state))
+
+      {:error, :run_exists} ->
+        adopt_child(driver.store, child_run_id, linkage)
+
+      {:error, reason} ->
+        {:refused, reason}
+
+      {:discarded, _run} ->
+        {:refused, :run_exists}
     end
   end
+
+  # `[:statifier_persistence, :child, :started]`. Every field comes from
+  # the linkage this package just wrote (ADR-0008 decision 2), which is
+  # what lets the bridge link parent and child without reading
+  # `StatifierPersistence.Run.Linkage` back out of a metadata map.
+  #
+  # `session_id` is the child's own logical session, and it is `nil` on
+  # the adoption path alone: an adopted child was created by an earlier,
+  # crashed drive, so this drive has no decoded position of it and does
+  # not perform a load to invent one (ADR-0009 decision 4's honest nil).
+  @spec report_started(Runs.run_id(), Linkage.t(), String.t() | nil) :: :ok
+  defp report_started(child_run_id, %Linkage{} = linkage, session_id) do
+    Telemetry.child_started(
+      parent_run_id: linkage.parent_run_id,
+      child_run_id: child_run_id,
+      invoke_id: linkage.invoke_id,
+      child_index: linkage.child_index,
+      content_hash: linkage.content_hash,
+      session_id: session_id
+    )
+  end
+
+  # `session_id/1`'s permissive twin: a missing correlation id on an event
+  # is not a reason to fail a child that has already been created.
+  @spec child_session_id(MachineState.t()) :: String.t() | nil
+  defp child_session_id(%MachineState{datamodel: datamodel}),
+    do: Map.get(datamodel, "_sessionid")
 
   # `{:error, :run_exists}` is not a failure. ADR-0004 decision 3's
   # at-least-once execution means a crash between the child create and the
@@ -874,7 +971,7 @@ defmodule StatifierPersistence.Driver do
         case Linkage.from_metadata(run_record.metadata) do
           {:ok, %Linkage{parent_run_id: parent_run_id, invoke_id: invoke_id}}
           when parent_run_id == linkage.parent_run_id and invoke_id == linkage.invoke_id ->
-            :ok
+            report_started(child_run_id, linkage, nil)
 
           _other ->
             {:refused, :run_exists}
