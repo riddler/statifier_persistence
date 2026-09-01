@@ -68,12 +68,12 @@ jobs:
 
       # _build carries the Dialyzer PLT
       # (_build/dev/dialyxir_erlang-*_elixir-*_deps-dev.plt), so this cache is
-      # the PLT cache too. statifier is a git dependency whose SHA mix.lock
-      # pins (st-ADR-0061), so the hash key moves whenever the engine pin
-      # moves - CI never sets STATIFIER_PATH, so the pin in mix.lock is
-      # exactly what gets built. The restore-keys fallback means a lockfile
-      # bump rebuilds the PLT incrementally from the previous one rather than
-      # from scratch.
+      # the PLT cache too. statifier is a Hex dependency whose resolved
+      # version mix.lock pins, so the hash key moves whenever the engine pin
+      # moves. mix.exs swaps that for a path dep when STATIFIER_PATH is set,
+      # but CI never sets it, so the Hex pin in mix.lock is exactly what gets
+      # built. The restore-keys fallback means a lockfile bump rebuilds the
+      # PLT incrementally from the previous one rather than from scratch.
       #
       # Known tradeoff, the same one statifier-ex and statifier-ui accept: a
       # warm _build means the compile stage is incremental, so
