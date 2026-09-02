@@ -44,9 +44,17 @@ this project's convention (CLAUDE.md: sabotage every new test that asserts
 `changelog.mode` is `fragments` with `dir: changelog.d`. The needs/no-entry
 test is written down in `changelog.d/README.md` - one file per bead, named
 `changelog.d/<bead-id>.md`, standard Keep a Changelog headings, entries only
-for changes visible to someone calling the public API. While the package is
-pre-first-release, most scaffold and tooling work needs no fragment, and that
-is the expected outcome, not a step you skipped.
+for changes visible to someone calling the public API. That file's two lists
+are the whole test, and this section deliberately does not restate them: read
+them there rather than inferring the answer from the size of the diff.
+
+The package is released, so the decision is the released-package one in every
+case: a change on that README's "write a fragment for" side carries one, a
+change on its "do not" side carries none, and no fragment is the expected
+outcome there, not a step you skipped. Fragments accumulate in
+`changelog.d/` until a release bead's prep promotes them into `CHANGELOG.md`
+and deletes them - see `.claude/wurk/release.md`, and `CLAUDE.md`'s
+version-bump row for what a release bead is.
 
 ## Version bump: never
 
