@@ -55,8 +55,11 @@ record's lifecycle, the executor seam's failures, and the durable-subchart
 seam. `st-ADR-0067` decision 6 draws that line and names this namespace.
 
 The two nest. A durable macrostep span appears *inside* the step span this
-package opens around it, by ordinary OTel ambient context, because both are
-emitted in the same process during the same synchronous call.
+package opens around it, because the bridge parents it from its own
+pid-keyed span table (`ots-ADR-0004` decision 4) rather than from the
+process's ambient OTel context, which it never reads; both are emitted in
+the same process during the same synchronous call, which is what puts them
+in one row's reach.
 
 ## Family one: what this package emits as a driver
 
@@ -98,13 +101,14 @@ Two shapes a reader of the emit sites will notice, both deliberate:
   somewhere other than where the interpreter put them.
 - **The `:initialize` span is the one span not nested inside a step
   span.** `Interpreter.initialize/2` runs in `Runs.create/4` before the
-  per-run exclusion opens, so that span is a sibling of the create's
-  `[:statifier_persistence, :run, :step, :start]`/`:stop` pair rather than
-  a child of it. Every other macrostep span is emitted inside the
-  serialized unit and nests as `st-ADR-0067` decision 6 expects. Both
-  halves of every one of them are emitted inside one synchronous call, so
-  decision 5's "a span never crosses a persist boundary" holds
-  structurally.
+  per-run exclusion opens, so the bridge has no step span recorded for that
+  process when it fires: it is not a child of the create's
+  `[:statifier_persistence, :run, :step, :start]`/`:stop` pair, and with
+  nothing of the bridge's own open around it, it is the root of its own
+  trace. Every other macrostep span is emitted inside the serialized unit and
+  nests as `st-ADR-0067` decision 6 expects. Both halves of every one of them
+  are emitted inside one synchronous call, so decision 5's "a span never
+  crosses a persist boundary" holds structurally.
 
 ## Family two: the storage-phase contract
 
@@ -162,13 +166,13 @@ explicitly `nil` otherwise.
 rule - no pairs - rests on Oban already owning every interval it could
 bracket. This package owns an interval nobody else measures: lock, load,
 decode, identity-check, advance, execute effects, persist. The upstream
-macrostep span is expected to nest inside it, and ambient-context nesting
-needs an outer span that is genuinely open, which a single event carrying a
-duration cannot provide. `span_ref` keeps `st-ADR-0040` decision 2's
-semantics exactly: a fresh `make_ref/0` per span, on both halves, the only
-pairing key. Both halves are emitted inside one function call, so
-`st-ADR-0067` decision 5's "a span never crosses a persist boundary" holds
-structurally.
+macrostep span is expected to nest inside it, and the bridge's nesting needs
+an outer span that is genuinely open to record in its table, which a single
+event carrying a duration cannot provide. `span_ref` keeps `st-ADR-0040`
+decision 2's semantics exactly: a fresh `make_ref/0` per span, on both
+halves, the only pairing key. Both halves are emitted inside one function
+call, so `st-ADR-0067` decision 5's "a span never crosses a persist
+boundary" holds structurally.
 
 Everything that is *not* the step seam is a single point-in-time event, on
 that record's own reasoning.
@@ -250,7 +254,7 @@ travel**, never the `Identity` structs the error term carries; see
 "Cardinality and disclosure" below.
 
 An adapter call inside a lock inside a step nests three deep in the bridge,
-by ambient context, with no propagation machinery involved.
+through its own span table, with no propagation machinery involved.
 
 ### The run lifecycle seam
 
@@ -414,12 +418,16 @@ What the events are built to let the bridge do:
   maps by name into `statifier_persistence.`, as upstream's attribute rule
   already specifies for its own namespace.
 
-- **Nesting is ambient, three deep.** A step span opens, the adapter events
-  and the upstream macrostep span land inside it in the same process, and
-  the whole thing lands inside whatever job or request span the host or
-  `statifier_oban` already had open. `st-ADR-0067` decision 6 describes
-  exactly this shape. No propagation machinery is involved, and no package
-  has to know about another.
+- **Nesting is bridge-owned, three deep.** A step span opens and the bridge
+  records it in its own span table, tagged with the emitting pid; the
+  adapter events and the upstream macrostep span land inside it because the
+  bridge parents them from that row, never from the process's ambient OTel
+  context, which it does not read (`ots-ADR-0004` decision 4). A job or
+  request span a host or `statifier_oban` already had open in the same
+  process therefore does not parent the step span - with nothing of the
+  bridge's own open around it, the step span is the root of its own trace.
+  `st-ADR-0067` decision 6 describes the shape inside it. No propagation
+  machinery is involved, and no package has to know about another.
 
 - **Resume and cross-step stitching use links, never parenthood, and the
   position blob carries nothing trace-shaped.** ADR-0009 decision 6 settles
