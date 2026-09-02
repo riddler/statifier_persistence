@@ -2,16 +2,16 @@
 
 This note is the design record for what `statifier_persistence` emits and
 what it deliberately leaves to others. It was written as a specification
-ahead of the code; the family-two emit sites landed in sp-m0i, so the
-tables below now describe what `StatifierPersistence.Telemetry` emits as
-well as what it promises. Nothing in the contract changed on the way in -
+ahead of the code; the family-two emit sites landed in sp-m0i and the
+family-one ones in sp-t01, so both tables below now describe what this
+package emits rather than what it promises to. Nothing in the contract
+changed on the way in -
 `docs/adr/0009-telemetry-events-for-the-durable-stepper.md` froze it, and
 decision 8's amendment discipline is how it moves.
 
-Family one - the `[:statifier, :session, ...]` events this package emits
-as a stepping driver, through `Statifier.Telemetry` with
-`driver: :persistence` - is still specification: the table below is its
-contract, and wiring those calls into the stepper seam is separate work.
+One row is specification still, and the table says so where it sits:
+`[:statifier, :session, :unroutable]` has no emit site, because no seam in
+this package can currently produce the case it names.
 
 Four records govern and are not restated here:
 
@@ -65,14 +65,14 @@ concretely, at the emit sites:
 
 | Event | Emitted by this package? | Where |
 |---|---|---|
-| `[:statifier, :session, :init]` | yes, exactly once per logical run | `Runs.create/4`, around `Interpreter.initialize/2`, `resumed: false`. **Never on a load** - every `Runs.step/5` is a rehydration, and an `:init` per load would fire thousands of times per run |
-| `[..., :halt]` | yes | the step whose outcome is terminal |
+| `[:statifier, :session, :init]` | yes, exactly once per logical run | `Runs.create/4`, around `Interpreter.initialize/2`, `resumed: false`, `invoked_by: nil`. **Never on a load** - every `Runs.step/5` is a rehydration, and an `:init` per load would fire thousands of times per run |
+| `[..., :halt]` | yes | the step whose outcome is terminal, once its write has landed. `reason` is `:done` or `:budget_exhausted`; `fail/4` and `cancel/3` reach no interpreter and emit none |
 | `[..., :terminate]` | **never** | it names a GenServer callback; there is no process here, and both halves of every span arrive inside one call, so there is no open-span entry to leak |
-| `[..., :macrostep, :start]` / `[..., :stop]` | yes | brackets the `Interpreter` advance call inside `Runs.stepped/5` |
+| `[..., :macrostep, :start]` / `[..., :stop]` | yes | brackets each `Interpreter` advance call: `initialize/2` in `Runs.create/4` (`trigger: :initialize`), `handle_event/2` in `Runs.stepped/6` (`trigger: :event`), and each `deliver_internal/5` re-entry wave (`trigger: :internal`, nested, per `st-ADR-0067` decision 5) |
 | `[..., :interpret]` | **never** | this package has no `st-ADR-0029` injection seam. If it grows one it emits this event rather than minting a name |
-| `[..., :unroutable]` | yes | an effect nothing could route - no dispatch arm, no executor accepted its kind. **Not** an executor that accepted the effect and returned `{:error, reason}`; that is `[:statifier_persistence, :effect, :failed]` |
-| `[..., :effect, _]` (11) | yes | as each effect is routed in `persist_tail/6` |
-| `[..., :trace, _]` (9) | yes, under `trace: true` | the flag rides the position (`st-ADR-0060`) and the gate stays in the core |
+| `[..., :unroutable]` | contract only - **no emit site today** | it names an effect nothing could route: no dispatch arm, and no executor accepted its kind. The executor seam's only verdicts are `:ok` and `{:error, reason}` (`StatifierPersistence.Executor`), and `Driver`'s own dispatch ends in an accepting catch-all, so the case is absent by circumstance rather than inapplicable. An executor that accepted the effect and returned `{:error, reason}` is **not** it; that is `[:statifier_persistence, :effect, :failed]`. A seam that can refuse an effect outright emits this event rather than minting a name |
+| `[..., :effect, _]` (11) | yes | every effect the advance produced, in the core's own list order, from `persist_tail/6` - lifecycle effects (`:done`, `:budget_exhausted`) included, since the bridge needs them even though the executor never sees them |
+| `[..., :trace, _]` (9) | yes, under `trace: true` | the same pass; the flag rides the position (`st-ADR-0060`) and the gate stays in the core, which simply produces no trace effects when it is off |
 
 `driver: :persistence` is on every one of them, and it is frozen (ADR-0009
 decision 2). `st-ADR-0067` open question 1 left the atom to this
@@ -87,6 +87,24 @@ and never invents one.
 `st-ADR-0067` decision 4's rule holds unchanged: **no `run_id` on this
 family.** The storage key is this package's vocabulary and travels on
 family two.
+
+Two shapes a reader of the emit sites will notice, both deliberate:
+
+- **The effect events are emitted up front, not interleaved with
+  execution.** They report what the *chart* produced; what the host's
+  executor then made of each one is family two's
+  `[:statifier_persistence, :effect, :failed]`. Interleaving would also
+  have to place the two lifecycle effects the executor never sees
+  somewhere other than where the interpreter put them.
+- **The `:initialize` span is the one span not nested inside a step
+  span.** `Interpreter.initialize/2` runs in `Runs.create/4` before the
+  per-run exclusion opens, so that span is a sibling of the create's
+  `[:statifier_persistence, :run, :step, :start]`/`:stop` pair rather than
+  a child of it. Every other macrostep span is emitted inside the
+  serialized unit and nests as `st-ADR-0067` decision 6 expects. Both
+  halves of every one of them are emitted inside one synchronous call, so
+  decision 5's "a span never crosses a persist boundary" holds
+  structurally.
 
 ## Family two: the storage-phase contract
 
