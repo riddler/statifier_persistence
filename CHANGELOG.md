@@ -10,6 +10,19 @@ fragment in [`changelog.d/`](changelog.d/README.md); the fragments are assembled
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
 
+## [0.6.0] 2026-09-02
+
+Feature release: a durably-stepped run is observable through statifier's own
+session telemetry, so the OpenTelemetry bridge produces the same spans and
+effect events for a durable run as for a session-hosted one.
+
+### Added
+
+- Durably-stepped runs now emit statifier's own `[:statifier, :session, ...]`
+  telemetry with `driver: :persistence`, so `opentelemetry_statifier` produces
+  the same macrostep spans and effect events for a durable run as for a
+  session-hosted one, with no bridge change.
+
 ## [0.5.0] 2026-09-01
 
 Feature release: the durable step is observable, and a `:dispatch` fun can
