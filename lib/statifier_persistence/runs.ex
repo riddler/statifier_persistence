@@ -55,6 +55,14 @@ defmodule StatifierPersistence.Runs do
   }
 
   alias Statifier.Machine.Identity
+
+  # Family one's emitter (ADR-0009 decision 2), aliased rather than wrapped:
+  # `Telemetry` in this module is this package's own family-two module, and
+  # `st-ADR-0067` decision 2 exists precisely so this package calls the same
+  # functions `Statifier.Session` calls instead of standing up a second
+  # implementation of a 27-name contract.
+  alias Statifier.Telemetry, as: CoreTelemetry
+
   alias StatifierPersistence.{Executor, Run, Storage, Telemetry}
   alias StatifierPersistence.Run.Linkage
   alias StatifierPersistence.Serialization.AdapterLock
@@ -62,6 +70,18 @@ defmodule StatifierPersistence.Runs do
 
   @typedoc "A run's caller-supplied opaque key (ADR-0004 decision 2)."
   @type run_id :: Adapter.run_id()
+
+  # The `driver` metadatum on every family-one event this module emits
+  # (`st-ADR-0067` decision 4 left the atom to this repository; ADR-0009
+  # decision 2 fixed it and froze it). Changing it is a breaking change to
+  # a real consumer, not an amendment.
+  @driver :persistence
+
+  # A family-one macrostep span in flight: the `System.monotonic_time/0`
+  # reading the stop half measures `duration` against, and the
+  # `make_ref/0` that pairs the two halves (`st-ADR-0040` decision 2's
+  # semantics, kept verbatim). `nil` where no span was opened.
+  @typep span :: {integer(), reference()} | nil
 
   # The persist tail's executor seam, carried as one term so the
   # effect-execution functions take a `context` and its telemetry
@@ -224,8 +244,15 @@ defmodule StatifierPersistence.Runs do
     metadata = metadata(opts)
 
     with :ok <- Storage.check_metadata(store, metadata: metadata) do
+      # Read before the advance so the `:initialize` span's `duration`
+      # measures the core call alone, even though both halves are emitted
+      # after it (`report_initialized/4` says why).
+      span_start = System.monotonic_time()
+
       {machine_state, effects} =
         Interpreter.initialize(machine, Keyword.get(opts, :initialize, []))
+
+      report_initialized(machine, machine_state, effects, span_start)
 
       serialized(store, run_id, :create, opts, fn ->
         persist_tail(store, run_id, machine_state, effects, executor, {:insert, metadata})
@@ -695,8 +722,12 @@ defmodule StatifierPersistence.Runs do
   @spec stepped(Storage.t(), run_id(), MachineState.t(), Event.t(), Executor.t(), entry()) ::
           {:ok, Run.t(), MachineState.t()} | {:discarded, Run.t()} | {:error, error()}
   defp stepped(store, run_id, machine_state, event, executor, entry) do
+    session_id = session_id(machine_state)
+    span = open_macrostep(machine_state, session_id, :event, event)
+
     case Interpreter.handle_event(machine_state, event) do
       {:ok, machine_state, effects} ->
+        close_macrostep(span, session_id, :event, machine_state, event, effects)
         persist_tail(store, run_id, machine_state, effects, executor, :update)
 
       {:error, :not_running} ->
@@ -771,6 +802,8 @@ defmodule StatifierPersistence.Runs do
         context = %{run_id: run_id, content_hash: identity.content_hash}
         seam = %{context: context, executor: executor, session_id: session_id(machine_state)}
 
+        report_effects(machine_state, effects, seam)
+
         failures = execute_effects(executable, seam, :defer)
 
         {machine_state, lifecycle} = reenter_failures(machine_state, failures, seam, lifecycle)
@@ -780,6 +813,7 @@ defmodule StatifierPersistence.Runs do
 
         with :ok <- write_run(write, store, run_id, machine_state, status, lifecycle) do
           report_write(write, run_id, seam.session_id, identity, status, lifecycle)
+          report_halt(machine_state, seam.session_id, status, lifecycle)
           tail_result(run_id, status, identity, lifecycle, machine_state)
         end
     end
@@ -838,6 +872,167 @@ defmodule StatifierPersistence.Runs do
       driven_by: :chart,
       reason: failure_string(lifecycle)
     )
+  end
+
+  # -- family one: the interpreter's own events, as a stepping driver -----
+  #
+  # ADR-0009 decision 2 and `st-ADR-0067` decisions 2-4: a durably-stepped
+  # macrostep is structurally the same `[:statifier, :session, ...]` family
+  # a session-stepped one is, distinguished only by `driver: :persistence`,
+  # because these call sites call the same `Statifier.Telemetry` functions
+  # `Statifier.Session` calls. `docs/telemetry.md`'s family-one table is
+  # the contract; `st-ADR-0067` decision 3's applicability table is why
+  # `:terminate` and `:interpret` appear nowhere in this module.
+  #
+  # `session_id` is always the chart's own `_sessionid`, read out of the
+  # decoded datamodel by `session_id/1` - never a lookup, never invented.
+
+  # Family one's run-scoped opening: `:init` fires exactly once per logical
+  # run, here, with `resumed: false` (every `step/5` is a rehydration, not
+  # a boot, so an `:init` per load would fire thousands of times per run and
+  # would mean "process boot", which does not exist on this path), and the
+  # `:initialize` span brackets the one `Interpreter.initialize/2` call the
+  # run ever makes. `invoked_by` is `nil` unconditionally: it names a live
+  # parent pid, and a durable subchart's parent is a run record, not a
+  # process (ADR-0008).
+  #
+  # Both halves are emitted *after* that call rather than around it because
+  # the `session_id` they carry is what the call mints. `span_start` is read
+  # by the caller before the advance, so `duration` still measures the core
+  # call alone - the same shape, for the same reason, as
+  # `Statifier.Session.init_boot/3`, which also emits `init` and
+  # `macrostep_start` only once `boot/6` has returned a `%MachineState{}`.
+  @spec report_initialized(Machine.t(), MachineState.t(), [Statifier.Effect.t()], integer()) ::
+          :ok
+  defp report_initialized(machine, machine_state, effects, span_start) do
+    session_id = session_id(machine_state)
+    span_ref = make_ref()
+
+    CoreTelemetry.init(@driver, session_id, machine, machine_state, nil, false)
+    CoreTelemetry.macrostep_start(@driver, session_id, :initialize, nil, span_ref)
+
+    CoreTelemetry.macrostep_stop(
+      @driver,
+      session_id,
+      :initialize,
+      machine_state,
+      nil,
+      macrostep_outcome(machine_state, effects),
+      span_start,
+      span_ref
+    )
+  end
+
+  # Opens a macrostep span around a core advance, or opens nothing for a
+  # position the advance entry will refuse: `%MachineState{running: false}`
+  # is verbatim `Interpreter.handle_event/2`'s and
+  # `Interpreter.deliver_internal/5`'s `{:error, :not_running}` guard, so a
+  # delivery that performs no advance emits no half of a pair the bridge
+  # would then have to time out.
+  @spec open_macrostep(MachineState.t(), String.t() | nil, :event | :internal, Event.t() | nil) ::
+          span()
+  defp open_macrostep(%MachineState{running: false}, _session_id, _trigger, _event), do: nil
+
+  defp open_macrostep(%MachineState{}, session_id, trigger, event) do
+    span_start = System.monotonic_time()
+    span_ref = make_ref()
+
+    CoreTelemetry.macrostep_start(@driver, session_id, trigger, event, span_ref)
+
+    {span_start, span_ref}
+  end
+
+  # Closes the span `open_macrostep/4` opened. Both halves are emitted
+  # inside one synchronous call, so `st-ADR-0067` decision 5's constraint -
+  # a macrostep span never crosses a persist boundary - holds structurally
+  # here rather than by discipline.
+  @spec close_macrostep(
+          span(),
+          String.t() | nil,
+          :event | :internal,
+          MachineState.t(),
+          Event.t() | nil,
+          [Statifier.Effect.t()]
+        ) :: :ok
+  defp close_macrostep(nil, _session_id, _trigger, _machine_state, _event, _effects), do: :ok
+
+  defp close_macrostep(
+         {span_start, span_ref},
+         session_id,
+         trigger,
+         machine_state,
+         event,
+         effects
+       ) do
+    CoreTelemetry.macrostep_stop(
+      @driver,
+      session_id,
+      trigger,
+      machine_state,
+      event,
+      macrostep_outcome(machine_state, effects),
+      span_start,
+      span_ref
+    )
+  end
+
+  # The stop half's `outcome`, read off exactly what `run_status/2` reads
+  # off - so a span that reports `:done` and a record that persists
+  # `:completed` can never disagree. `:cancelled` is upstream's fourth
+  # value and is unreachable here: this package never calls
+  # `Interpreter.cancel/1`, and `cancel/3` is a host decision about the run
+  # record that reaches no interpreter at all (ADR-0004 decision 6).
+  @spec macrostep_outcome(MachineState.t(), [Statifier.Effect.t()]) ::
+          :quiescent | :done | :budget_exhausted
+  defp macrostep_outcome(machine_state, effects) do
+    cond do
+      budget_exhausted?(effects) -> :budget_exhausted
+      machine_state.status == :done -> :done
+      true -> :quiescent
+    end
+  end
+
+  # Family one's per-effect events - `st-ADR-0067` decision 3's `:effect`
+  # (11 kinds) and `:trace` (9 kinds) rows, which
+  # `Statifier.Telemetry.effect/4` dispatches between on the effect's own
+  # tag. The `trace: true` gate stays in the core, which simply produces no
+  # trace effects when it is off (the flag rides the position,
+  # `st-ADR-0060`), so there is no gate to restate here.
+  #
+  # Every effect the advance produced, in the core's own list order, before
+  # any of them reaches the host executor - deliberately not interleaved
+  # with execution. This family reports what the *chart* emitted; what the
+  # host then made of it is family two's
+  # `[:statifier_persistence, :effect, :failed]`. Interleaving would also
+  # have to place the two lifecycle effects `execute_effects/3` never sees
+  # (`:done`, `:budget_exhausted`) somewhere other than where the
+  # interpreter put them, and a `:done` reported before the sends that
+  # preceded it is a worse timeline than one reported a few microseconds
+  # early.
+  @spec report_effects(MachineState.t(), [Statifier.Effect.t()], seam()) :: :ok
+  defp report_effects(%MachineState{machine: machine}, effects, seam) do
+    Enum.each(effects, &CoreTelemetry.effect(@driver, seam.session_id, machine, &1))
+  end
+
+  # Family one's `:halt`: the step whose outcome is terminal, emitted once
+  # the write has landed for the same reason `report_write/6` is - a step
+  # that could not be persisted did not happen. `fail/4` and `cancel/3`
+  # reach no interpreter, so they emit nothing here; upstream has no event
+  # for a host abandoning a run and this package does not mint one. Family
+  # two's `[:statifier_persistence, :run, :terminated]` reports those, with
+  # `driven_by: :host`.
+  @spec report_halt(
+          MachineState.t(),
+          String.t() | nil,
+          Adapter.run_status(),
+          [Statifier.Effect.t()]
+        ) :: :ok
+  defp report_halt(_machine_state, _session_id, :active, _lifecycle), do: :ok
+
+  defp report_halt(machine_state, session_id, _status, lifecycle) do
+    reason = if budget_exhausted?(lifecycle), do: :budget_exhausted, else: :done
+
+    CoreTelemetry.halt(@driver, session_id, reason, machine_state)
   end
 
   # The persisted-run return: `{:ok, ...}` for a live or completed run,
@@ -942,6 +1137,16 @@ defmodule StatifierPersistence.Runs do
           seam()
         ) :: {:cont | :halt, boolean(), {MachineState.t(), [Statifier.Effect.t()]}}
   defp deliver_reentry({machine_state, lifecycle} = acc, origin, opts, seam) do
+    # The wave is a core advance like any other, so it gets its own
+    # macrostep span, nested inside the `:event` span the primary pass
+    # already closed the way `st-ADR-0039` re-entry nests one inside a
+    # session's (`st-ADR-0067` decision 5 names this case explicitly). An
+    # already-terminal position opens none: `open_macrostep/4` reads the
+    # same `running: false` guard `deliver_internal/5` refuses on, so the
+    # `{:error, :not_running}` arm below can never leave a start half
+    # without its stop.
+    span = open_macrostep(machine_state, seam.session_id, :internal, nil)
+
     case Interpreter.deliver_internal(
            machine_state,
            :platform,
@@ -950,6 +1155,9 @@ defmodule StatifierPersistence.Runs do
            opts
          ) do
       {:ok, machine_state, wave_effects} ->
+        close_macrostep(span, seam.session_id, :internal, machine_state, nil, wave_effects)
+        report_effects(machine_state, wave_effects, seam)
+
         {wave_lifecycle, wave_executable} = Enum.split_with(wave_effects, &lifecycle_effect?/1)
 
         # Single wave: these failures are dropped, never re-entered - so
