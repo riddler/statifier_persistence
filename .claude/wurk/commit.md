@@ -50,9 +50,13 @@ is the expected outcome, not a step you skipped.
 
 ## Version bump: never
 
-`mix.exs` holds the last released version (`0.1.2` as of this writing) until
-a release bead says otherwise, and the authority table marks releases and
-version bumps as never an agent's. Never
+`mix.exs` holds the last released version until a release bead says
+otherwise. `CLAUDE.md`'s authority table is the authority on when that
+happens and this section does not restate it: a release (tag,
+`mix hex.publish`, GitHub release) is never an agent's, and the version-bump
+row allows the bump only on an operator-authorized release bead's branch,
+inside a campaign carrying the operator's explicit consent. Read the row
+rather than a version quoted here, which goes stale at every release. Never
 edit the version field as part of an ordinary commit.
 
 ## Gate thresholds are the operator's call
