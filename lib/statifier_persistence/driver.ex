@@ -840,11 +840,15 @@ defmodule StatifierPersistence.Driver do
   # decision 3's refusal at open, and it happens before any write.
   #
   # This is also the one reporting site for
-  # `[:statifier_persistence, :child, :refused]`: every one of ADR-0008
-  # decision 4's four refusal reasons - the unsupported adapter here, a
-  # `Statifier.Invoke.Source.resolve/2` reason, `:unidentified_chart`, and
-  # `:run_exists` - funnels back through this return, so the event is
-  # emitted once, in one place, whatever refused.
+  # `[:statifier_persistence, :child, :refused]`: every refusal arm below
+  # funnels back through this return, so the event is emitted once, in one
+  # place, whatever refused. The arms are the unsupported adapter here, a
+  # `Statifier.Invoke.Source.resolve/2` reason (ADR-0008 decision 4's three
+  # in-memory reasons), `:unidentified_chart`, `:run_exists` from a
+  # collision the adoption path will not adopt, and whatever reason
+  # `create/3` or the adoption read answers with - the last two being
+  # decision 4's one durable-only reason, a child run that could not be
+  # created. Counting the arms is not the invariant; the single return is.
   @spec start_child(t(), Invoke.t(), dispatch_context()) :: :ok | {:refused, term()}
   defp start_child(driver, %Invoke{} = resolved, context) do
     result =
