@@ -12,3 +12,12 @@ config :statifier_persistence, StatifierPersistence.TestRepo,
   database: System.get_env("PGDATABASE", "statifier_persistence_test"),
   pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: System.schedulers_online() * 2
+
+# sp-11w: the second repo, on SQLite, that
+# `test/statifier_persistence/ecto/sqlite_migrations_test.exs` starts for
+# itself. Its database is a file the test creates and deletes; nothing
+# else in the suite touches this repo, and ADR-0005 decision 2's Postgres
+# harness above is unchanged.
+config :statifier_persistence, StatifierPersistence.SqliteTestRepo,
+  database: System.get_env("SQLITE_TEST_DATABASE", "tmp/sp_11w_sqlite_test.db"),
+  pool_size: 1
