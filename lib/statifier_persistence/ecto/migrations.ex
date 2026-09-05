@@ -50,11 +50,12 @@ if Code.ensure_loaded?(Ecto.Migration) do
     alias StatifierPersistence.Ecto.Config
 
     @initial_version 1
-    @current_version 2
+    @current_version 3
 
     @migrations %{
       1 => StatifierPersistence.Ecto.Migrations.V01,
-      2 => StatifierPersistence.Ecto.Migrations.V02
+      2 => StatifierPersistence.Ecto.Migrations.V02,
+      3 => StatifierPersistence.Ecto.Migrations.V03
     }
 
     @doc """
