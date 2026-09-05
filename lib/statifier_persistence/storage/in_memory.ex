@@ -13,6 +13,7 @@ defmodule StatifierPersistence.Storage.InMemory do
 
   @behaviour StatifierPersistence.Storage.Adapter
 
+  alias StatifierPersistence.Run.Linkage
   alias StatifierPersistence.Storage.Adapter
 
   @typedoc """
@@ -109,7 +110,10 @@ defmodule StatifierPersistence.Storage.InMemory do
   @impl Adapter
   @spec insert_run(Adapter.opts(), Adapter.run_record()) :: :ok | {:error, Adapter.error()}
   def insert_run(opts, %{run_id: run_id} = run_record) do
-    run_record = Map.put_new(run_record, :metadata, %{})
+    run_record =
+      run_record
+      |> Map.put_new(:metadata, %{})
+      |> Map.put_new(:outcome_blob, nil)
 
     Agent.get_and_update(pid(opts), fn state ->
       if Map.has_key?(state.runs, run_id) do
@@ -140,7 +144,8 @@ defmodule StatifierPersistence.Storage.InMemory do
   `metadata` is the documented exception to the full overwrite: it is
   write-once (ADR-0006 decision 1 grants no way to change it after create),
   so the stored map is carried forward and the given record's `metadata`
-  is ignored.
+  is ignored. `outcome_blob` is the second exception: a `nil` in the given
+  record carries the stored value forward, and a binary sets it.
   """
   @impl Adapter
   @spec update_run(Adapter.opts(), Adapter.run_record()) :: :ok | {:error, Adapter.error()}
@@ -148,13 +153,61 @@ defmodule StatifierPersistence.Storage.InMemory do
     Agent.get_and_update(pid(opts), fn state ->
       case state.runs do
         %{^run_id => stored} ->
-          kept = Map.put(run_record, :metadata, Map.get(stored, :metadata, %{}))
-          {:ok, put_in(state, [:runs, run_id], kept)}
+          {:ok, put_in(state, [:runs, run_id], carry_forward(run_record, stored))}
 
         _absent ->
           {{:error, :run_not_found}, state}
       end
     end)
+  end
+
+  @spec carry_forward(Adapter.run_record(), Adapter.run_record()) :: Adapter.run_record()
+  defp carry_forward(run_record, stored) do
+    outcome_blob = Map.get(run_record, :outcome_blob) || Map.get(stored, :outcome_blob)
+
+    run_record
+    |> Map.put(:metadata, Map.get(stored, :metadata, %{}))
+    |> Map.put(:outcome_blob, outcome_blob)
+  end
+
+  @doc """
+  Declares outcome support (the optional
+  `c:StatifierPersistence.Storage.Adapter.supports_run_outcome?/1`): this
+  adapter keeps the blob on the run record like every other field.
+  """
+  @impl Adapter
+  @spec supports_run_outcome?(Adapter.opts()) :: boolean()
+  def supports_run_outcome?(_opts), do: true
+
+  @doc """
+  The status projection over a metadata match (the optional
+  `c:StatifierPersistence.Storage.Adapter.list_run_states_by_metadata/2`).
+
+  The same containment `list_runs_by_metadata/2` applies, projected down
+  to the three `t:StatifierPersistence.Storage.Adapter.run_state/0`
+  fields. There is no index to serve it from here - an Agent holds a map -
+  so this is the reference implementation of the *contract*, not of the
+  performance the contract exists for; the Ecto adapter is where the
+  projection is a projection.
+  """
+  @impl Adapter
+  @spec list_run_states_by_metadata(Adapter.opts(), Adapter.metadata()) ::
+          {:ok, [Adapter.run_state()]} | {:error, Adapter.error()}
+  def list_run_states_by_metadata(opts, metadata) do
+    with {:ok, runs} <- list_runs_by_metadata(opts, metadata) do
+      {:ok, Enum.map(runs, &to_run_state/1)}
+    end
+  end
+
+  @spec to_run_state(Adapter.run_record()) :: Adapter.run_state()
+  defp to_run_state(run_record) do
+    child_index =
+      run_record
+      |> Map.get(:metadata, %{})
+      |> Map.get(Linkage.reserved_key(), %{})
+      |> Map.get("child_index")
+
+    %{run_id: run_record.run_id, status: run_record.status, child_index: child_index}
   end
 
   @doc """

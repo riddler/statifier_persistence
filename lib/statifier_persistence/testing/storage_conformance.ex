@@ -240,7 +240,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           identity_blob: <<9, 0, 8, 255, 7>>,
           position_blob: <<0, 255, 1, 2, 3, 0, 0, 254>>,
           failure: nil,
-          metadata: %{}
+          metadata: %{},
+          outcome_blob: nil
         }
 
         assert :ok = @conformance_adapter.insert_run(store.opts, run_record)
@@ -262,7 +263,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           identity_blob: <<1, 2, 3>>,
           position_blob: <<7, 8, 9>>,
           failure: nil,
-          metadata: %{}
+          metadata: %{},
+          outcome_blob: nil
         }
 
         assert :ok = @conformance_adapter.insert_run(store.opts, run_record)
@@ -286,7 +288,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           identity_blob: <<1, 2, 3>>,
           position_blob: nil,
           failure: "abandoned",
-          metadata: %{}
+          metadata: %{},
+          outcome_blob: nil
         }
 
         assert {:error, :run_not_found} =
@@ -319,7 +322,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           identity_blob: <<1, 2, 3>>,
           position_blob: nil,
           failure: "budget_exhausted: 100 rounds",
-          metadata: %{}
+          metadata: %{},
+          outcome_blob: nil
         }
 
         assert :ok = @conformance_adapter.insert_run(store.opts, run_record)
@@ -345,7 +349,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           identity_blob: <<1, 2, 3>>,
           position_blob: <<7, 8, 9>>,
           failure: nil,
-          metadata: %{}
+          metadata: %{},
+          outcome_blob: nil
         }
 
         updated = %{
@@ -376,7 +381,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           identity_blob: <<1, 2, 3>>,
           position_blob: <<7, 8, 9>>,
           failure: nil,
-          metadata: %{}
+          metadata: %{},
+          outcome_blob: nil
         }
 
         assert :ok = @conformance_adapter.insert_run(store.opts, inserted)
@@ -422,7 +428,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                 "parent_run_id" => "run-conformance-parent",
                 "invoke_id" => "call"
               }
-            }
+            },
+            outcome_blob: nil
           }
 
           other_parent = %{
@@ -448,6 +455,120 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                    })
 
           assert Enum.map(matches, & &1.run_id) == ["run-conformance-child-linked"]
+        end
+      end
+
+      # -- Adapter level: the optional outcome payload and the status
+      # projection (sp-t57) ---------------------------------------------
+      #
+      # Generated only for an adapter that exports each, the same
+      # opt-in-by-export shape the child enumeration above uses. An adapter
+      # that exports neither is conformant unchanged: nothing but a fan-out
+      # child needs either, and Driver.start_child_at/6 refuses at open
+      # rather than starting one it could not settle.
+
+      if Code.ensure_loaded?(conformance_adapter) and
+           function_exported?(conformance_adapter, :supports_run_outcome?, 1) do
+        # sabotage: in StatifierPersistence.Storage.InMemory's private
+        # carry_forward/2, drop the `|| Map.get(stored, :outcome_blob)`
+        # fallback so a nil in the given record overwrites the stored one
+        # -> red, the final fetch below came back with a nil outcome_blob
+        # instead of the payload the earlier update wrote. Verified red on
+        # the InMemory conformance suite, reverted. Also verified on the
+        # Ecto side: make outcome_update(nil) return
+        # [outcome_blob: nil] rather than [] -> red the same way.
+        test "adapter: outcome_blob round-trips and survives a later status-only update",
+             %{store: store} do
+          inserted = %{
+            run_id: "run-conformance-outcome",
+            status: :active,
+            content_hash: "sha256:conformance-chart-a",
+            identity_blob: <<1, 2, 3>>,
+            position_blob: <<7, 8, 9>>,
+            failure: nil,
+            metadata: %{},
+            outcome_blob: nil
+          }
+
+          assert :ok = @conformance_adapter.insert_run(store.opts, inserted)
+
+          assert {:ok, %{outcome_blob: nil}} =
+                   @conformance_adapter.fetch_run(store.opts, "run-conformance-outcome")
+
+          answered = %{inserted | status: :completed, outcome_blob: <<42, 43>>}
+          assert :ok = @conformance_adapter.update_run(store.opts, answered)
+
+          assert {:ok, %{outcome_blob: <<42, 43>>}} =
+                   @conformance_adapter.fetch_run(store.opts, "run-conformance-outcome")
+
+          # A later write carrying no payload must not erase the stored one:
+          # nil means unchanged, which is what keeps an ordinary step of an
+          # already-answered run from clearing its answer.
+          stepped = %{answered | position_blob: <<9, 9>>, outcome_blob: nil}
+          assert :ok = @conformance_adapter.update_run(store.opts, stepped)
+
+          assert {:ok, fetched} =
+                   @conformance_adapter.fetch_run(store.opts, "run-conformance-outcome")
+
+          assert fetched.outcome_blob == <<42, 43>>
+          assert fetched.position_blob == <<9, 9>>
+        end
+      end
+
+      if Code.ensure_loaded?(conformance_adapter) and
+           function_exported?(conformance_adapter, :list_run_states_by_metadata, 2) do
+        # sabotage: in StatifierPersistence.Storage.InMemory's private
+        # to_run_state/1, read "child_index" off the whole metadata map
+        # instead of the reserved sub-map -> red, every projected row came
+        # back with a nil child_index instead of 0 and 1. Verified red on
+        # the InMemory conformance suite, reverted. Also verified on the
+        # Ecto side: replace the child_index fragment with NULL::text ->
+        # red the same way.
+        test "adapter: list_run_states_by_metadata/2 projects id, status and index without blobs",
+             %{store: store} do
+          child = fn index, status ->
+            %{
+              run_id: "run-conformance-state-#{index}",
+              status: status,
+              content_hash: "sha256:conformance-chart-a",
+              identity_blob: <<1, 2, 3>>,
+              position_blob: <<7, 8, 9>>,
+              failure: nil,
+              metadata: %{
+                "statifier_persistence" => %{
+                  "parent_run_id" => "run-conformance-state-parent",
+                  "invoke_id" => "call",
+                  "child_index" => index,
+                  "content_hash" => "sha256:conformance-chart-a",
+                  "child_count" => 2,
+                  "policy" => "all"
+                }
+              },
+              outcome_blob: nil
+            }
+          end
+
+          assert :ok = @conformance_adapter.insert_run(store.opts, child.(0, :completed))
+          assert :ok = @conformance_adapter.insert_run(store.opts, child.(1, :active))
+
+          assert {:ok, states} =
+                   @conformance_adapter.list_run_states_by_metadata(store.opts, %{
+                     "statifier_persistence" => %{
+                       "parent_run_id" => "run-conformance-state-parent",
+                       "invoke_id" => "call"
+                     }
+                   })
+
+          assert Enum.sort_by(states, & &1.child_index) == [
+                   %{run_id: "run-conformance-state-0", status: :completed, child_index: 0},
+                   %{run_id: "run-conformance-state-1", status: :active, child_index: 1}
+                 ]
+
+          # The rows are a projection, not records: no blob ever rides one.
+          for state <- states do
+            refute Map.has_key?(state, :position_blob)
+            refute Map.has_key?(state, :identity_blob)
+          end
         end
       end
 
