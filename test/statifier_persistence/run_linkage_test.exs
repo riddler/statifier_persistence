@@ -93,4 +93,104 @@ defmodule StatifierPersistence.RunLinkageTest do
              }
     end
   end
+
+  describe "the fan-out values (sp-t57)" do
+    # sabotage: to_metadata/1's fan_out_metadata/1 nil clause returns the
+    # two keys with nil values instead of %{} -> red, this map carried
+    # "child_count" => nil and "policy" => nil beside the four. Verified
+    # red, reverted.
+    test "a non-fan-out linkage stores exactly the four keys it always has" do
+      linkage = Linkage.new("run_parent", "call", 0, "sha256:abc")
+
+      assert Linkage.to_metadata(linkage) == %{
+               "statifier_persistence" => %{
+                 "parent_run_id" => "run_parent",
+                 "invoke_id" => "call",
+                 "child_index" => 0,
+                 "content_hash" => "sha256:abc"
+               }
+             }
+
+      refute Linkage.fan_out?(linkage)
+    end
+
+    # sabotage: fan_out_metadata/1 stored the policy atom rather than its
+    # string spelling -> red, the asserted map's "policy" was :all instead
+    # of "all", which is also not JSON-representable. Verified red,
+    # reverted.
+    test "a fan-out linkage round-trips both values through the reserved map" do
+      linkage = Linkage.new("run_parent", "call", 2, "sha256:abc", 3, :first_error)
+
+      metadata = Linkage.to_metadata(linkage)
+
+      assert metadata == %{
+               "statifier_persistence" => %{
+                 "parent_run_id" => "run_parent",
+                 "invoke_id" => "call",
+                 "child_index" => 2,
+                 "content_hash" => "sha256:abc",
+                 "child_count" => 3,
+                 "policy" => "first_error"
+               }
+             }
+
+      assert {:ok, ^linkage} = Linkage.from_metadata(metadata)
+      assert Linkage.fan_out?(linkage)
+    end
+
+    # sabotage: fan_out?/1's nil clause returns true -> red, the N=1 case
+    # below still passed but the non-fan-out assertion in the first test of
+    # this block failed. Verified red, reverted.
+    test "child_count: 1 is the N=1 fan-out, not a non-fan-out" do
+      linkage = Linkage.new("run_parent", "call", 0, "sha256:abc", 1, :all)
+
+      assert Linkage.fan_out?(linkage)
+      assert linkage.child_count == 1
+      assert linkage.policy == :all
+    end
+
+    # sabotage: new/6's child_index bound check compared against
+    # child_count + 1 -> red, index 3 of 3 was accepted instead of raising.
+    # Verified red, reverted.
+    test "new/6 refuses an index outside 0..child_count - 1" do
+      assert_raise ArgumentError, fn ->
+        Linkage.new("run_parent", "call", 3, "sha256:abc", 3, :all)
+      end
+    end
+
+    # sabotage: build/5's `_one_without_the_other` arm was changed to build
+    # a non-fan-out linkage instead of answering :no_linkage -> red, the
+    # first two assertions below returned {:ok, _}. Verified red, reverted.
+    test "a malformed fan-out half answers :no_linkage" do
+      assert :no_linkage = Linkage.from_metadata(reserved(%{"child_count" => 3}))
+      assert :no_linkage = Linkage.from_metadata(reserved(%{"policy" => "all"}))
+
+      assert :no_linkage =
+               Linkage.from_metadata(reserved(%{"child_count" => 0, "policy" => "all"}))
+
+      assert :no_linkage =
+               Linkage.from_metadata(reserved(%{"child_count" => 3, "policy" => "some"}))
+
+      assert :no_linkage =
+               Linkage.from_metadata(reserved(%{"child_count" => 2, "policy" => "all"}))
+    end
+  end
+
+  # The reserved map with `child_index` 2, plus whatever the case under
+  # test adds: index 2 is inside a count of 3 and outside a count of 2,
+  # which is what the last malformed case above turns on.
+  defp reserved(extra) do
+    %{
+      "statifier_persistence" =>
+        Map.merge(
+          %{
+            "parent_run_id" => "run_parent",
+            "invoke_id" => "call",
+            "child_index" => 2,
+            "content_hash" => "sha256:abc"
+          },
+          extra
+        )
+    }
+  end
 end
