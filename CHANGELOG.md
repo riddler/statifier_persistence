@@ -46,6 +46,10 @@ migration.
 - The Ecto adapter's V03 migration adds the `outcome_blob` column and a
   GIN `jsonb_path_ops` index on `metadata`. A host already on V02 picks
   it up with `StatifierPersistence.Ecto.Migrations.up(for: MyApp, from: 3)`.
+  Run it before deploying 0.7.0, and read the README's "Upgrading to V03
+  before deploying 0.7.0" first: the index build is a plain
+  `CREATE INDEX` that blocks writes to the runs table for the length of
+  the build.
 - `StatifierPersistence.Driver` takes a `child_canceller:` option: how a
   `:first_error` settlement asks the scheduler to cancel the start jobs of
   a fan-out's not-yet-started children, which have no run record for the
