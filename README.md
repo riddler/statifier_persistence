@@ -319,6 +319,86 @@ as a transaction-scoped advisory-plus-row lock (ADR-0004 as amended).
 In your test suite, pass `sandbox: true` so each test runs in its own
 `Ecto.Adapters.SQL.Sandbox` checkout via the adapter's `isolate/1`.
 
+### Upgrading to V03 before deploying 0.7.0
+
+0.7.0 needs V03 of the package DDL, and the order matters: **run the
+migration first, then deploy the new code.** `outcome_blob` is an
+unconditional field on the generated runs schema, so 0.7.0 against a V02
+database fails on every query that touches the runs table, not only on
+the fan-out write that introduced the column. The reverse order is safe:
+V03 on a database still served by 0.6.x adds a column nobody writes and
+an index nobody's query needs yet.
+
+A host already on V02 picks V03 up with an ordinary migration of its own:
+
+    defmodule MyApp.Repo.Migrations.AddStatifierPersistenceOutcomeBlob do
+      use Ecto.Migration
+      def up, do: StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, from: 3)
+      def down, do: StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence, version: 3)
+    end
+
+V03 does two things, and only one of them is cheap.
+
+**The `outcome_blob` column** is a nullable `:binary` added to the runs
+table. Postgres adds a nullable column with no default as a catalog-only
+change, so this part is fast whatever the table's size. It takes the
+configured `:blob_type` with the other three blob columns, so a
+`:blob_type` whose underlying database type is not binary needs the same
+hand-written `ALTER` this README's encryption section already describes
+for those three - now for four columns, not three.
+
+**The `metadata` GIN index** is the part to plan for. `up/1` issues a
+plain `CREATE INDEX`, **not** `CREATE INDEX CONCURRENTLY`: it takes a
+`SHARE` lock on the runs table for the whole build, which blocks every
+`INSERT`, `UPDATE` and `DELETE` against that table until the index is
+finished. Reads are unaffected. On a small or idle runs table this is
+imperceptible. On a large one it is an outage of every write the runs
+table takes - which, for a host stepping runs durably, means every step
+of every run.
+
+How long that is depends on the row count, the width of the `metadata`
+maps, and the server, so measure rather than guess (`sp-461` is this
+package's own measurement issue if you want a number to compare against).
+A host with millions of runs rows should treat this as a scheduled
+maintenance step rather than a deploy-time migration - or write V03's two
+statements out by hand instead of calling the helper, so the index can be
+built concurrently:
+
+    defmodule MyApp.Repo.Migrations.AddStatifierPersistenceOutcomeBlob do
+      use Ecto.Migration
+
+      @disable_ddl_transaction true
+      @disable_migration_lock true
+
+      def up do
+        alter table("runs") do
+          add(:outcome_blob, :binary, null: true)
+        end
+
+        create(
+          index("runs", ["metadata jsonb_path_ops"],
+            using: "GIN",
+            name: :runs_metadata_gin_index,
+            concurrently: true
+          )
+        )
+      end
+    end
+
+substituting your configured table name and prefix throughout; the index
+name must stay `<runs table>_metadata_gin_index`, which is what V03's
+`down/1` drops. A concurrent build does not block writes and takes
+longer, and it cannot run inside a transaction, which is what the two
+module attributes are for. A host that goes this route has reached V03
+without calling `up(from: 3)` and should not call it afterwards: V03's
+`create/1` is a plain `create`, not `create_if_not_exists`, so a second
+run fails on the index that is already there.
+
+The index is not optional in effect: without it, every fan-out child
+completion asks whether its N siblings are terminal with a `jsonb`
+containment query, and each one is a sequential scan of the whole runs
+table.
+
 ### Listing runs by host scope
 
 A run record carries engine identities and opaque blobs. Nothing on it
@@ -351,9 +431,11 @@ Equality on all given pairs is the whole query surface: no ranges, no
 partial matches, no ordering guarantee. Anything richer is a query you
 write against your own column - the table name is yours to configure, so
 that is a supported thing to do. The V02 migration adds the column as
-nullable `jsonb` with **no index**, because which pairs you query by is
-your call; add your own (a GIN index on the column serves the containment
-query the helper issues) when the volume asks for one.
+nullable `jsonb` with no index of its own, because which pairs you query
+by is your call. V03 (above) adds the one containment index this
+package's own settlement query needs, a GIN `jsonb_path_ops` index on the
+whole column; an expression index on particular keys, or the wider
+`jsonb_ops` operator set, is still yours to add when the volume asks.
 
 Two rules come with it.
 
