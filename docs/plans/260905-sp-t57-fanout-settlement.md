@@ -683,3 +683,109 @@ convention, with the mutation noted in one line above it.
 - Similar implementation: the single-child path,
   `lib/statifier_persistence/driver.ex:852-995`
 - The exclusion primitive: `lib/statifier_persistence/runs.ex:552-590`
+
+## Unattended verification pass (2026-09-05)
+
+`/wurk:verify --unattended` on the finished branch. The plan carried no
+Deferred Manual Verification section (the phases were driven directly, so
+no `--loop` wrote one), and an empty backlog is not a pass: every
+acceptance criterion on `sp-t57` and every phase's Manual Verification
+item was machine-checked against the branch instead. No human-confirmed
+marker is written by this pass.
+
+### The bead's acceptance criteria
+
+**Machine-checked (unattended, 2026-09-05):** N=3 children settle to one
+assembled answer in index order through the parent's door - the
+`settlement` block's "N=3 settle to one assembled answer in index order"
+test, which finishes the children in the order 2, 0, 1 and asserts the
+three entries at positions 0, 1, 2. Sabotaged three ways (the
+`answer_parent/3` routing clause, `entry/5`'s payload decode, and
+`assemble/4`'s ordering), each red.
+
+**Machine-checked (unattended, 2026-09-05):** `first_error` on a child
+cancels the remaining one and the answer reads it cancelled - the
+"first_error cancels a live sibling" test (child 1 fails, child 2's live
+run is cancelled by the cascade and reads `"cancelled"`, and its stored
+record's status is `:cancelled`), and the "reports the never-started
+indices" test for the other kind (index 2 never started, reported to the
+seam as `[2]`, reads `"cancelled"` in the same list).
+
+**Machine-checked (unattended, 2026-09-05):** the count test never lists -
+the "asks the projection and never the listing" test runs two settlements
+against `RaisingListingAdapter`, whose `list_runs_by_metadata/2` raises.
+Scoped deliberately to the settlements that answer nothing: the parent's
+exit from the invoking state cascades a cancel, and that legitimately
+walks records (ADR-0008 decision 5).
+
+**Machine-checked (unattended, 2026-09-05):** the refused-adapter case -
+the "refuses at open on a store that could not settle" test covers all
+three arms (`:child_listing_unsupported`, `:run_outcome_unsupported`,
+`:run_states_unsupported`) and asserts no child run was created in each.
+
+**Machine-checked (unattended, 2026-09-05):** conformance passes on Ecto -
+`test/statifier_persistence/storage/ecto_conformance_test.exs` and the
+blob-typed variant both green, including the two new cases. The
+`no_metadata` and `no_lock` conformance suites are green with their
+adapters unmodified (`git diff origin/main` touches neither file), which
+is the "an adapter written before this change is conformant unchanged"
+item from phase 3.
+
+**Machine-checked (unattended, 2026-09-05):** V03 up and down -
+`migrations_test.exs` migrates V01 through V03 up in `setup_all` and back
+down in `on_exit`, and two consecutive runs are green. A `down` that left
+the index or the column behind would fail the second run's `up`.
+
+**Machine-checked (unattended, 2026-09-05):** fragment present -
+`changelog.d/sp-t57.md`.
+
+**Machine-checked (unattended, 2026-09-05):** full gate green - bare
+`mix quality`, 379 tests, 94.3% coverage, dialyzer and credo clean.
+
+**Not applicable to an agent:** neither half of the mirrored pair closes
+without the operator's word. Both remain open; the second dated note on
+`sp-t57` records the shipped contract for `sob-q3y`.
+
+### The phases' Manual Verification items
+
+**Machine-checked (unattended, 2026-09-05):** a single-child subchart's
+stored metadata is unchanged - `run_linkage_test`'s "a non-fan-out
+linkage stores exactly the four keys it always has" asserts the map
+literally, and `driver_fanout_test`'s "the single-child subchart path
+records neither value" asserts it end to end through a real drive.
+
+**Machine-checked (unattended, 2026-09-05):** the GIN index serves the
+containment query - `EXPLAIN` on `statifier_runs` for
+`metadata @> $1::jsonb` yields `Bitmap Index Scan on
+statifier_runs_metadata_gin_index` with the `@>` predicate as its `Index
+Cond`. The default plan on the empty test table is a sequential scan,
+which is the planner being right about a zero-row table, so the check was
+taken with `enable_seqscan = off`. Cost at volume is `sp-461`, not this
+bead.
+
+**Machine-checked (unattended, 2026-09-05):** the public spec reads the
+way `sob-q3y` was told - compared against the first dated note on the
+bead. Two deltas, both now recorded in a second dated note: the
+`:run_not_found` refusal for a parent id naming no stored run, and the
+`ArgumentError` for an out-of-range index being raised by
+`Linkage.new/6` rather than repeated in `start_child_at/6`.
+
+**Machine-checked (unattended, 2026-09-05):** the assembled donedata is
+legible - the three-entry list in the N=3 test names the index, the
+status, and either the donedata or st-ADR-0068's own three failure keys
+per entry, so a failed or cancelled item is identifiable without opening
+a child run.
+
+**Deferred to the direction review:** whether a cold reader of ADR-0006
+sees decision 4 and the new Note as consistent rather than contradictory.
+That is a record-decision judgment and the docs/adr/ review gate's call,
+not an agent's.
+
+### Defects this pass found and fixed
+
+None. The two defects this bead's own sabotage discipline caught were
+fixed before their phases were committed, and both are worth naming here
+because neither was visible from the tests alone: a settlement that
+recursed through `answer_parent/3` without terminating, and a `settled?/3`
+arm that no test distinguished (the `:all` policy with a child whose start
+job had not run yet), for which a test was added.
