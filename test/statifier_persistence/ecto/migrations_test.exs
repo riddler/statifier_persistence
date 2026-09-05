@@ -226,15 +226,33 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
       end
     end
 
-    # sabotage: added a create(index(..., [:metadata])) to V02 whose down/1
-    # does not drop it -> red across the module, this assertion included:
-    # the index list was no longer empty and the leftover index broke the
-    # module's own up/down cycle. ADR-0006 decision 4 leaves the index to
-    # the host - which pairs it queries by is not something this package
-    # can guess. Verified red, reverted.
-    test "carries no index of its own" do
+    # V02 itself still creates no index; V03 is what ships one, and the
+    # assertion moved to "V03: ..." below with it (sp-t57, ruling C6).
+  end
+
+  describe "V03: the runs outcome column and the metadata index" do
+    # sabotage: removed V03's alter/add of the outcome_blob column (from
+    # up/1 and down/1 together, so the module's own cycle stayed clean)
+    # -> red here and in the two schema-insert tests, which the generated
+    # runs schema's declared field turns into a missing-column error.
+    # Verified red, reverted.
+    test "outcome_blob is a nullable bytea column on runs, across every key configuration" do
       for prefix <- @key_prefixes do
-        assert metadata_indexes(prefix <> "runs") == []
+        assert identity_columns(prefix <> "runs", ["outcome_blob"]) ==
+                 [["outcome_blob", "bytea", "YES"]]
+      end
+    end
+
+    # sabotage: removed V03's create(index(...)) and its matching drop/1
+    # -> red, the index list came back empty for every key configuration.
+    # Verified red, reverted.
+    test "metadata carries exactly one GIN jsonb_path_ops index" do
+      for prefix <- @key_prefixes do
+        table = prefix <> "runs"
+
+        assert metadata_indexes(table) == [[table <> "_metadata_gin_index"]]
+        assert metadata_index_definition(table) =~ "USING gin"
+        assert metadata_index_definition(table) =~ "jsonb_path_ops"
       end
     end
   end
@@ -308,7 +326,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     # sabotage: skipped parse!'s version validation -> red (KeyError, not ArgumentError)
     test "an unknown version raises before any DDL" do
       assert_raise ArgumentError, ~r/unknown migration version/, fn ->
-        Migrations.up(for: KxUxid, version: 3)
+        Migrations.up(for: KxUxid, version: 4)
       end
 
       assert_raise ArgumentError, ~r/unknown migration version/, fn ->
@@ -364,6 +382,22 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
       )
 
     rows
+  end
+
+  defp metadata_index_definition(table) do
+    %{rows: [[definition]]} =
+      SQL.query!(
+        TestRepo,
+        """
+        SELECT indexdef
+        FROM pg_indexes
+        WHERE schemaname = 'public' AND tablename = $1
+          AND indexdef LIKE '%metadata%'
+        """,
+        [table]
+      )
+
+    definition
   end
 
   defp identity_columns(table, columns) do

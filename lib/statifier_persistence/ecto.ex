@@ -50,7 +50,7 @@ if Code.ensure_loaded?(Ecto) do
 
     # The columns :blob_type reaches - identity/lookup columns never do
     # (moduledoc, Config's :blob_type option).
-    @blob_columns [:identity_blob, :chart_blob, :position_blob]
+    @blob_columns [:identity_blob, :chart_blob, :position_blob, :outcome_blob]
 
     # The storage contract's field set is the column list (ADR-0003
     # decision 3); the migrations helper's V01 DDL mirrors these exactly.
@@ -72,7 +72,8 @@ if Code.ensure_loaded?(Ecto) do
         position_blob: :binary,
         failure: :string,
         session_id: :string,
-        metadata: :map
+        metadata: :map,
+        outcome_blob: :binary
       ]
     }
 
