@@ -1,5 +1,9 @@
 # Tier A fan-out settlement Implementation Plan
 
+**Status**: phases 1 and 2 landed on the branch (commits `4480ff4` and
+`ac68f4e`); phases 3 to 6 remain. The Current State Analysis below
+describes `origin/main`, which is what the phases were written against.
+
 ## Overview
 
 Teach this package to settle a Tier A fan-out: an `<invoke>` whose one
@@ -36,7 +40,8 @@ The durable-subchart path exists and works for one child per invocation:
 - `Runs.cascade_cancel/3` (`runs.ex:468`) walks live children of an
   invocation match and cancels them, and `perform/5`'s `:cancel_invoke`
   arm (`driver.ex:816-831`) is its caller.
-- Migrations know versions 1 and 2 (`ecto/migrations.ex:52-58`).
+- Migrations know versions 1 and 2 (`ecto/migrations.ex:52-58`) - phase 2
+  is what adds V03.
 
 So four things are missing: a linkage that says "one of N, under policy
 P"; somewhere to keep a child's answer; a settlement test that does not
@@ -103,12 +108,15 @@ full `mix quality` gate green.
 
 - **Not storing the child set on the parent.** The campaign's ruling
   R31-10 (taken 2026-09-05) makes the set derived from the children, and
-  this plan derives it. ADR-0008's amendment point 1 describes the ordered
-  set as riding the parent's `active_invocations` entry; that structure
-  belongs to statifier-ex, which this campaign may not write to, and the
-  ruling declines the parent-stored shape. The tension is real and is
-  reported with this bead rather than resolved here: reconciling the
-  record with the ruling is a records decision, not this bead's.
+  this plan derives it. That is not in tension with ADR-0008: the
+  amendment's point 1 names the ordered set as the *logical* parent-side
+  view whose "concrete encoding is the implementation plan's, not this
+  record's", and the record's own later Note (2026-09-01, sp-21o,
+  `docs/adr/0008-durable-subchart-child-runs.md:404-435`) says outright
+  that there is no shipped `active_invocations` entry to widen and that
+  "today that view is derived from the children rather than stored on the
+  parent". The ruling picks the encoding the record left open; nothing
+  needs reconciling.
 - **No scheduling.** No cap, no queue bound, no job of any kind: those are
   statifier_oban's (sob-q3y). This package never enqueues anything and
   gains no dependency on statifier_oban.
@@ -488,6 +496,13 @@ end
   `runs.ex:578`. Inside it:
   1. `Storage.list_run_states_by_metadata/2` over
      `Linkage.invocation_match/2` - the projection, never the listing.
+  The exclusion is held across the cancel work under `:first_error`,
+  which is where the ruling puts it, and that is a real cost: a cascade
+  over live siblings and a host-supplied canceller both run while the
+  parent is locked. It is bounded by N and by the host's own callback,
+  and the alternative - cancelling outside the exclusion - reopens the
+  window where a sibling settles between the cancel and the decision.
+
   2. Under `:first_error`, when this child failed: `Runs.cascade_cancel/3`
      over the same match (live siblings), then `driver.child_canceller` with
      the indices in `0..count-1` that the projection did not return
@@ -501,10 +516,27 @@ end
      dense list in index order. An index with no run record, or a run whose
      status is `:cancelled`, contributes the cancelled entry; a failed child
      contributes its failure entry.
-- `answer_parent_once/3` is the existing `respond_to_parent/3` with the
-  assembled list as the donedata, through `done_invocation/5` and its
-  `entry: :answer_parent`. A losing racer's answer is discarded by
-  `late_answer/3`, unchanged.
+- `answer_parent_once/3` answers through `respond_to_parent/3` with the
+  assembled list as the donedata, `entry: :answer_parent`, **over a driver
+  built on the parent's own machine**. That swap is not optional and is
+  the one thing the single-child path already does that a naive settlement
+  would drop: `resolve_and_answer/4` (`driver.ex:598-612`) fetches the
+  parent record's `content_hash` and calls `driver.chart_resolver.(...)`
+  before answering, because `Storage`'s identity guard checks the supplied
+  machine against the *parent* run's stored identity. A fan-out child's
+  chart is not its parent's, so answering with the child's driver would be
+  refused with `{:identity_mismatch, _}` and the settlement could never
+  deliver. The settlement therefore reuses the same resolve step, and a
+  driver with no `chart_resolver:` settles nothing - the same no-op
+  `auto_answer_parent/3` already is for one.
+
+  A losing racer's answer is discarded by `late_answer/3`, unchanged. That
+  discard is idempotent for a chart that transitions out of the invoking
+  state on its answer, which the compiled fan-out block is (statifier_blocks
+  ADR-0009 decision 3: one `<invoke>`, one `done.invoke.<block id>`
+  transition); a chart that stays in the invoking state after answering is
+  the case the driver's moduledoc already names as not idempotent, and it
+  is no more and no less true here than for a single child.
 
 The assembled entry shape is a map with string keys - `"index"`,
 `"status"` (`"completed"` / `"failed"` / `"cancelled"`), and `"donedata"`
@@ -554,12 +586,15 @@ request's Provenance.
 - [ ] A single-child subchart (no `child_count`) still answers its parent
       directly with the child's own donedata - the regression guard for the
       shipped path
+- [ ] The re-drive case: settling the last child twice (the crash-between-
+      payload-write-and-decision shape) answers the parent once and the
+      second attempt is discarded
 - [ ] Every new test sabotaged
 
 #### Manual Verification:
-- [ ] A crash between the payload write and the settlement decision, re-driven,
-      answers once and not twice (reasoned through against the discard
-      mechanism; the automated racer test covers the concurrent case)
+- [ ] Read the assembled donedata of a three-child fan-out in the test
+      output and confirm an operator could tell from it which index failed
+      and which was cancelled, without opening a child run
 
 ---
 
@@ -641,8 +676,10 @@ convention, with the mutation noted in one line above it.
 - Bead: `sp-t57` (mirrors `sob-q3y` in statifier_oban)
 - Records: `docs/adr/0006-optional-opaque-run-metadata.md` (decisions 2, 3,
   4), `docs/adr/0008-durable-subcharts.md` (decisions 2, 5, 7 and the
-  sp-3n2 amendment), `docs/adr/0004-run-lifecycle.md` (decisions 2, 5, 6),
-  `docs/adr/0002-ecto-adapter.md` (decision 3, the versioned migrations)
+  sp-3n2 amendment), `docs/adr/0004-run-lifecycle-executor-seam-and-serialization.md`
+  (decisions 2, 5, 6),
+  `docs/adr/0002-configurable-keys-and-table-names.md` (decision 3, the
+  versioned migrations)
 - Similar implementation: the single-child path,
   `lib/statifier_persistence/driver.ex:852-995`
 - The exclusion primitive: `lib/statifier_persistence/runs.ex:552-590`

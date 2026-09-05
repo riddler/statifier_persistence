@@ -49,6 +49,7 @@ if Code.ensure_loaded?(Ecto) do
     alias Ecto.Adapters.SQL.Sandbox
     alias Ecto.Changeset
     alias StatifierPersistence.Ecto.Config
+    alias StatifierPersistence.Run.Linkage
     alias StatifierPersistence.Storage.Adapter
 
     # The runs.status column vocabulary (ADR-0004 decision 2), mapped
@@ -252,24 +253,110 @@ if Code.ensure_loaded?(Ecto) do
     decision 1 grants it at create and grants no way to change it), so the
     stored column is left exactly as `insert_run/2` wrote it and the given
     record's `metadata` is ignored.
+
+    `outcome_blob` is the second exception, and it joins the `set:` list
+    only when the given record carries one: a `nil` leaves the stored
+    column alone, so an ordinary step of a run that has already answered
+    does not erase its answer.
     """
     @impl Adapter
     @spec update_run(Adapter.opts(), Adapter.run_record()) :: :ok | {:error, Adapter.error()}
     def update_run(opts, %{run_id: run_id} = run_record) do
       query = from(r in run_schema(opts), where: r.run_id == ^run_id)
 
-      updates = [
-        status: encode_status(run_record.status),
-        content_hash: run_record.content_hash,
-        identity_blob: run_record.identity_blob,
-        position_blob: run_record.position_blob,
-        failure: run_record.failure,
-        updated_at: DateTime.utc_now()
-      ]
+      updates =
+        [
+          status: encode_status(run_record.status),
+          content_hash: run_record.content_hash,
+          identity_blob: run_record.identity_blob,
+          position_blob: run_record.position_blob,
+          failure: run_record.failure,
+          updated_at: DateTime.utc_now()
+        ] ++ outcome_update(Map.get(run_record, :outcome_blob))
 
       case repo(opts).update_all(query, set: updates) do
         {1, _returned} -> :ok
         {0, _returned} -> {:error, :run_not_found}
+      end
+    end
+
+    @spec outcome_update(binary() | nil) :: keyword()
+    defp outcome_update(nil), do: []
+    defp outcome_update(outcome_blob), do: [outcome_blob: outcome_blob]
+
+    @doc """
+    Declares outcome support (the optional
+    `c:StatifierPersistence.Storage.Adapter.supports_run_outcome?/1`):
+    this adapter stores a run's answer in the V03 `outcome_blob` column,
+    under the configured `:blob_type` like every other blob column.
+    """
+    @impl Adapter
+    @spec supports_run_outcome?(Adapter.opts()) :: boolean()
+    def supports_run_outcome?(_opts), do: true
+
+    @doc """
+    The indexed status projection over a metadata match (the optional
+    `c:StatifierPersistence.Storage.Adapter.list_run_states_by_metadata/2`).
+
+    The same `jsonb` containment predicate `list_runs_by_metadata/2`
+    issues - which V03's GIN `jsonb_path_ops` index serves - with a
+    three-column `select:` in place of the whole row. No blob column is
+    read, which is the point: a fan-out of N children asks this question N
+    times, and the listing would move N identity and position blobs each
+    time.
+
+    `child_index` is extracted from this package's own reserved linkage
+    namespace inside `metadata`, and is `nil` for a matched run carrying
+    no linkage.
+
+    Takes the same non-empty string-keyed map, with the same
+    `ArgumentError` for anything else.
+    """
+    @impl Adapter
+    @spec list_run_states_by_metadata(Adapter.opts(), Adapter.metadata()) ::
+            {:ok, [Adapter.run_state()]} | {:error, Adapter.error()}
+    def list_run_states_by_metadata(opts, metadata) do
+      validate_match!(metadata)
+
+      if json_representable?(metadata) do
+        reserved = Linkage.reserved_key()
+
+        rows =
+          repo(opts).all(
+            from(r in run_schema(opts),
+              where: fragment("? @> ?", r.metadata, type(^metadata, :map)),
+              select: %{
+                run_id: r.run_id,
+                status: r.status,
+                child_index: fragment("? -> ? ->> 'child_index'", r.metadata, ^reserved)
+              }
+            )
+          )
+
+        {:ok, Enum.map(rows, &to_run_state/1)}
+      else
+        {:error, :metadata_unsupported}
+      end
+    end
+
+    @spec to_run_state(map()) :: Adapter.run_state()
+    defp to_run_state(row) do
+      %{
+        run_id: row.run_id,
+        status: decode_status(row.status),
+        child_index: decode_child_index(row.child_index)
+      }
+    end
+
+    # `->>` yields text or NULL, never an integer, so the index comes back
+    # as a string for a linked run and `nil` for one with no linkage.
+    @spec decode_child_index(String.t() | nil) :: non_neg_integer() | nil
+    defp decode_child_index(nil), do: nil
+
+    defp decode_child_index(index) when is_binary(index) do
+      case Integer.parse(index) do
+        {parsed, ""} -> parsed
+        _not_an_integer -> nil
       end
     end
 
@@ -398,7 +485,8 @@ if Code.ensure_loaded?(Ecto) do
         identity_blob: row.identity_blob,
         position_blob: row.position_blob,
         failure: row.failure,
-        metadata: row.metadata || %{}
+        metadata: row.metadata || %{},
+        outcome_blob: row.outcome_blob
       }
     end
 

@@ -32,7 +32,8 @@ defmodule StatifierPersistence.Storage.EctoTest do
         identity_blob: <<1, 2, 3>>,
         position_blob: <<7, 8, 9>>,
         failure: nil,
-        metadata: %{}
+        metadata: %{},
+        outcome_blob: nil
       },
       overrides
     )

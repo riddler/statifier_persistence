@@ -291,4 +291,55 @@ defmodule StatifierPersistence.StorageTest do
       assert record.run_id == "run-child-delegate"
     end
   end
+
+  # -- The fan-out facade arms (sp-t57, rulings C3 and C5) ---------------
+
+  describe "the outcome payload and the status projection" do
+    # sabotage: in Storage.run_outcome_supported?/1, drop the
+    # function_exported?/3 check and always call the adapter -> red, the
+    # NoLockAdapter assertion raised UndefinedFunctionError instead of
+    # answering false. Verified red, reverted.
+    test "run_outcome_supported?/1 and run_states_supported?/1 answer both ways" do
+      {:ok, supporting_store} = Storage.new(InMemory, [])
+      {:ok, unsupporting_store} = Storage.new(NoLockAdapter, [])
+
+      assert Storage.run_outcome_supported?(supporting_store)
+      assert Storage.run_states_supported?(supporting_store)
+      refute Storage.run_outcome_supported?(unsupporting_store)
+      refute Storage.run_states_supported?(unsupporting_store)
+    end
+
+    # sabotage: in Storage.list_run_states_by_metadata/2, drop the
+    # run_states_supported?/1 branch and always delegate -> red, this call
+    # against NoLockAdapter raised UndefinedFunctionError instead of
+    # returning the refusal tuple. Verified red, reverted.
+    test "list_run_states_by_metadata/2 refuses an adapter that does not export the callback" do
+      {:ok, store} = Storage.new(NoLockAdapter, [])
+
+      assert {:error, :run_states_unsupported} =
+               Storage.list_run_states_by_metadata(store, %{"tenant_id" => "acct_conformance"})
+    end
+
+    # sabotage: in Storage.update_run_status/4, drop the outcome_blob key
+    # from the record it builds -> red, the fetched record's outcome_blob
+    # came back nil instead of the written payload. Verified red, reverted.
+    test "update_run_status/4 writes an outcome payload and a later status-only write keeps it" do
+      {:ok, store} = Storage.new(InMemory, [])
+      {_source, machine} = Charts.chart_a()
+      machine_state = MachineState.new(machine, session_id: "sess_outcome_write")
+
+      assert :ok = Storage.insert_run(store, "run-outcome-write", machine_state, :active)
+
+      assert :ok =
+               Storage.update_run_status(store, "run-outcome-write", :completed,
+                 outcome_blob: <<7, 7>>
+               )
+
+      assert {:ok, %{outcome_blob: <<7, 7>>}} = Storage.fetch_run(store, "run-outcome-write")
+
+      assert :ok = Storage.update_run(store, "run-outcome-write", machine_state, :completed)
+
+      assert {:ok, %{outcome_blob: <<7, 7>>}} = Storage.fetch_run(store, "run-outcome-write")
+    end
+  end
 end

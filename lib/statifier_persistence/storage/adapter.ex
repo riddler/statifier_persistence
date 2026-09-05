@@ -71,9 +71,18 @@ defmodule StatifierPersistence.Storage.Adapter do
   the content hash and identity envelope of the chart it runs, the opaque
   `position_blob` holding its current position - nullable, because a run
   that fails at creation has no quiescent position to store - a short
-  `failure` reason for a `:failed` run, `nil` otherwise, and the opaque
+  `failure` reason for a `:failed` run, `nil` otherwise, the opaque
   `metadata` map of host identities (ADR-0006 decision 1), `%{}` when the
-  caller supplied none.
+  caller supplied none, and the opaque `outcome_blob`.
+
+  `outcome_blob` is the run's own answer, written once when it reaches a
+  terminal status and `nil` for every run that has none - which is almost
+  all of them, since an ordinary run answers nobody. It is opaque in
+  `position_blob`'s strong sense: this layer does not decode it, does not
+  say what produced it, and never reads it to make a decision. It exists
+  because a stored record otherwise carries no trace of what a completed
+  run answered with, and a fan-out's settlement has to assemble N answers
+  it did not witness.
   """
   @type run_record :: %{
           run_id: run_id(),
@@ -82,7 +91,25 @@ defmodule StatifierPersistence.Storage.Adapter do
           identity_blob: binary(),
           position_blob: binary() | nil,
           failure: String.t() | nil,
-          metadata: metadata()
+          metadata: metadata(),
+          outcome_blob: binary() | nil
+        }
+
+  @typedoc """
+  One row of the indexed status projection
+  (`c:list_run_states_by_metadata/2`): a matched run's id, its status, and
+  the `child_index` from this package's own reserved linkage namespace -
+  `nil` for a matched run that carries no linkage.
+
+  Deliberately not a `run_record`: the projection exists so that "have all
+  N of this invocation's children settled?" can be answered without moving
+  N identity and position blobs, and a row carrying them would defeat the
+  reason the callback exists.
+  """
+  @type run_state :: %{
+          run_id: run_id(),
+          status: run_status(),
+          child_index: non_neg_integer() | nil
         }
 
   @typedoc """
@@ -116,8 +143,12 @@ defmodule StatifierPersistence.Storage.Adapter do
   instead of `nil` or a raise; `:run_exists` is `insert_run/2`'s refusal of
   a duplicate `run_id`; `:metadata_unsupported` is the refusal-at-open arm
   for a non-empty `metadata` map an adapter cannot store (ADR-0006
-  decision 3); `{:adapter, term()}` carries a backend failure (a
-  database down, a timeout) that is not this layer's to interpret further.
+  decision 3); `:run_outcome_unsupported` and `:run_states_unsupported`
+  are the refusal-at-open arms for an adapter that cannot store a run's
+  `outcome_blob` or cannot answer the indexed status projection, which
+  together are what a fan-out's settlement needs; `{:adapter, term()}`
+  carries a backend failure (a database down, a timeout) that is not this
+  layer's to interpret further.
   """
   @type error ::
           :chart_not_found
@@ -125,6 +156,8 @@ defmodule StatifierPersistence.Storage.Adapter do
           | :run_exists
           | :run_not_found
           | :metadata_unsupported
+          | :run_outcome_unsupported
+          | :run_states_unsupported
           | {:adapter, term()}
 
   @doc """
@@ -246,6 +279,16 @@ defmodule StatifierPersistence.Storage.Adapter do
   overwrote it would make the map mutable, which is the reopener ADR-0006's
   consequences name rather than a behaviour it grants.
 
+  `outcome_blob` is the second exception, and a narrower one: a record
+  whose `outcome_blob` is `nil` leaves the stored value untouched, and a
+  record carrying a binary sets it. The payload is written once, when the
+  run reaches a terminal status, and never cleared, so "nil means
+  unchanged" is total rather than a partial-update surface - there is no
+  writer that needs to set it back to `nil`. Without the carry-forward
+  every ordinary step of a run that had already answered would erase its
+  answer, since this callback is a full-record overwrite and the stepper
+  builds its record from a `MachineState` that has never seen one.
+
   Like the other run callbacks it decodes nothing,
   validates no status transition, and performs no identity check - the
   facade and the lifecycle own those (ADR-0003 decisions 1 and 2, ADR-0004
@@ -332,8 +375,54 @@ defmodule StatifierPersistence.Storage.Adapter do
   @callback list_runs_by_metadata(opts(), metadata()) ::
               {:ok, [StatifierPersistence.Storage.Adapter.run_record()]} | {:error, error()}
 
+  @doc """
+  Optional declaration that this adapter can store a run's `outcome_blob`
+  (sp-t57, ruling C3).
+
+  The same opt-in-by-export shape `supports_metadata?/1` uses. An adapter
+  that does not export it, or answers `false`, stores no outcome payload,
+  and `StatifierPersistence.Driver.start_child_at/6` refuses to start a
+  fan-out child on it at open with `{:refused, :run_outcome_unsupported}` -
+  a child whose answer could never be read back is a child whose
+  invocation could never be settled, the same posture
+  `:child_listing_unsupported` already takes for a child that could never
+  be cancelled.
+
+  Nothing else refuses on it. An ordinary run and a single-child durable
+  subchart need no outcome payload, so an adapter written before this
+  callback existed is conformant unchanged and sees no behaviour change.
+  """
+  @callback supports_run_outcome?(opts()) :: boolean()
+
+  @doc """
+  Optional indexed status projection over a metadata match (sp-t57,
+  ruling C5).
+
+  Answers the same match `list_runs_by_metadata/2` answers - equality on
+  every pair, recursively for a nested map - and returns
+  `t:run_state/0` rows instead of whole records: the run id, its status,
+  and its `child_index`.
+
+  It exists because the settlement of a fan-out asks "have all N of this
+  invocation's children reached a terminal status?" once per child, and
+  answering that with the listing would move N identity and position
+  blobs N times over one fan-out. An adapter implements this as a
+  projection its backend can serve from an index (the Ecto adapter selects
+  three columns under the `jsonb` containment predicate V03 indexes);
+  materialising records and mapping them down is a conformant but
+  pointless implementation, and defeats the callback's whole purpose.
+
+  Exporting it is how an adapter declares it can answer the question.
+  `StatifierPersistence.Driver.start_child_at/6` refuses at open with
+  `{:refused, :run_states_unsupported}` for an adapter that does not.
+  """
+  @callback list_run_states_by_metadata(opts(), metadata()) ::
+              {:ok, [StatifierPersistence.Storage.Adapter.run_state()]} | {:error, error()}
+
   @optional_callbacks isolate: 1,
                       lock_run: 3,
                       supports_metadata?: 1,
-                      list_runs_by_metadata: 2
+                      list_runs_by_metadata: 2,
+                      supports_run_outcome?: 1,
+                      list_run_states_by_metadata: 2
 end

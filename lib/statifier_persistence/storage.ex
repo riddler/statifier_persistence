@@ -53,6 +53,8 @@ defmodule StatifierPersistence.Storage do
           | :run_position_missing
           | :metadata_unsupported
           | :child_listing_unsupported
+          | :run_outcome_unsupported
+          | :run_states_unsupported
           | {:unsupported_format_version, term()}
           | {:identity_mismatch, Identity.t(), Identity.t() | nil}
 
@@ -69,11 +71,16 @@ defmodule StatifierPersistence.Storage do
     identities stored beside the run (ADR-0006 decision 1), defaulting to
     `%{}`. It is write-once - `update_run/5` and `update_run_status/4`
     carry the stored map forward and accept no `metadata:` of their own.
+  - `outcome_blob:` - `update_run_status/4` only: the run's own opaque
+    answer, written once when it reaches a terminal status. Defaults to
+    `nil`, which carries the stored value forward rather than clearing it,
+    so every other writer leaves an answer already recorded alone.
   """
   @type run_write_opt ::
           {:failure, String.t() | nil}
           | {:position, :persist | :skip}
           | {:metadata, Adapter.metadata()}
+          | {:outcome_blob, binary() | nil}
 
   @doc """
   Initializes `adapter` with `opts` and returns the handle every other
@@ -340,9 +347,15 @@ defmodule StatifierPersistence.Storage do
   `MachineState` in hand (`StatifierPersistence.Runs.fail/4`, ADR-0004
   decision 6): nothing is derived, decoded, or re-encoded, so the identity
   guard is preserved by construction - the stored `identity_blob` and
-  `position_blob` bytes never change. `opts` accepts `failure:` only
-  (default `nil`). Returns `{:error, :run_not_found}` when no run exists
-  for the id.
+  `position_blob` bytes never change. `opts` accepts `failure:` and
+  `outcome_blob:` (both default `nil`). Returns
+  `{:error, :run_not_found}` when no run exists for the id.
+
+  `outcome_blob:` is the one writer of a run's own answer, and this is the
+  right writer for it: an answer is recorded exactly when a run reaches a
+  terminal status, which is the transition this function exists for, and
+  nothing else about the record is touched. A `nil` (the default) carries
+  the stored blob forward, so a status-only update never erases an answer.
   """
   @spec update_run_status(
           store :: t(),
@@ -352,7 +365,13 @@ defmodule StatifierPersistence.Storage do
         ) :: :ok | {:error, error()}
   def update_run_status(%__MODULE__{} = store, run_id, status, opts \\ []) do
     with {:ok, run_record} <- fetch_run(store, run_id) do
-      updated = %{run_record | status: status, failure: Keyword.get(opts, :failure)}
+      updated = %{
+        run_record
+        | status: status,
+          failure: Keyword.get(opts, :failure),
+          outcome_blob: Keyword.get(opts, :outcome_blob)
+      }
+
       keys = [run_id: run_id, content_hash: run_record.content_hash]
       write(store, :update_run, keys, updated)
     end
@@ -406,6 +425,68 @@ defmodule StatifierPersistence.Storage do
   def child_listing_supported?(%__MODULE__{} = store) do
     Code.ensure_loaded?(store.adapter) and
       function_exported?(store.adapter, :list_runs_by_metadata, 2)
+  end
+
+  @doc """
+  Whether `store`'s adapter can store a run's own `outcome_blob` (sp-t57,
+  ruling C3).
+
+  True when the adapter exports the optional
+  `c:StatifierPersistence.Storage.Adapter.supports_run_outcome?/1` and it
+  answers `true` - the same shape `metadata_supported?/1` checks. This is
+  half of `StatifierPersistence.Driver.start_child_at/6`'s refusal at
+  open: a fan-out child whose answer could never be read back could never
+  settle its invocation.
+  """
+  @spec run_outcome_supported?(store :: t()) :: boolean()
+  def run_outcome_supported?(%__MODULE__{} = store) do
+    Code.ensure_loaded?(store.adapter) and
+      function_exported?(store.adapter, :supports_run_outcome?, 1) and
+      adapter_call(store.adapter, :supports_run_outcome?, [], fn ->
+        store.adapter.supports_run_outcome?(store.opts)
+      end) == true
+  end
+
+  @doc """
+  Whether `store`'s adapter can answer the indexed status projection
+  (sp-t57, ruling C5).
+
+  True when the adapter exports the optional
+  `c:StatifierPersistence.Storage.Adapter.list_run_states_by_metadata/2`,
+  the same `function_exported?/3` shape `child_listing_supported?/1`
+  checks. The other half of `start_child_at/6`'s refusal at open.
+  """
+  @spec run_states_supported?(store :: t()) :: boolean()
+  def run_states_supported?(%__MODULE__{} = store) do
+    Code.ensure_loaded?(store.adapter) and
+      function_exported?(store.adapter, :list_run_states_by_metadata, 2)
+  end
+
+  @doc """
+  The indexed status projection over the same match
+  `list_runs_by_metadata/2` takes (sp-t57, ruling C5).
+
+  Delegates to the adapter's optional
+  `c:StatifierPersistence.Storage.Adapter.list_run_states_by_metadata/2`
+  when `run_states_supported?/1` is true; returns
+  `{:error, :run_states_unsupported}` otherwise, without calling the
+  adapter at all.
+
+  This is the read a fan-out's settlement uses to ask whether every child
+  of an invocation has reached a terminal status. It exists so that
+  question does not cost N whole records - blobs included - once per
+  child.
+  """
+  @spec list_run_states_by_metadata(store :: t(), metadata :: Adapter.metadata()) ::
+          {:ok, [Adapter.run_state()]} | {:error, error()}
+  def list_run_states_by_metadata(%__MODULE__{} = store, metadata) do
+    if run_states_supported?(store) do
+      adapter_call(store.adapter, :list_run_states_by_metadata, [], fn ->
+        store.adapter.list_run_states_by_metadata(store.opts, metadata)
+      end)
+    else
+      {:error, :run_states_unsupported}
+    end
   end
 
   @doc """
@@ -498,7 +579,8 @@ defmodule StatifierPersistence.Storage do
       identity_blob: Identity.to_binary(identity),
       position_blob: position_blob,
       failure: Keyword.get(opts, :failure),
-      metadata: metadata
+      metadata: metadata,
+      outcome_blob: Keyword.get(opts, :outcome_blob)
     }
   end
 
