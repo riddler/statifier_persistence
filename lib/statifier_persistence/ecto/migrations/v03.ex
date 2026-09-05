@@ -44,6 +44,33 @@ if Code.ensure_loaded?(Ecto.Migration) do
     still adds its own - ADR-0006 decision 4's clause is narrowed by this
     migration, not withdrawn, and the record carries a dated Note saying
     so.
+
+    ## Adapters other than Postgres
+
+    `GIN` and `jsonb_path_ops` are Postgres spellings. `up/1` therefore
+    creates the index **only** when the migration's repo runs on
+    `Ecto.Adapters.Postgres`, and `down/1` drops it under the same
+    condition; on any other adapter both steps are skipped and the
+    migration otherwise runs to completion. Before that check existed the
+    whole of V03 rolled back on a SQLite repo - `ecto_sqlite3` raises
+    `ArgumentError` from `using:` - which took the `outcome_blob` column
+    with it and left such a host unable to run this package's DDL at all
+    (sp-11w).
+
+    The column is created on every adapter, because it is a nullable
+    binary column and every adapter has one. That is what keeps
+    `StatifierPersistence.Storage.Ecto.supports_run_outcome?/1` true
+    everywhere.
+
+    Skipping the index is not the same as the index not mattering. What
+    the index serves - the `jsonb` containment queries
+    `StatifierPersistence.Storage.Ecto.list_runs_by_metadata/2` and
+    `list_run_states_by_metadata/2` issue - is Postgres-only SQL in its
+    own right, so an adapter that cannot take the index cannot run the
+    queries either and says so: that adapter's metadata support is
+    declared false, and a durable subchart or fan-out over such a store is
+    refused at open rather than started and left unsettleable. sp-5lm
+    tracks the Ecto adapter's Postgres-only surface.
     """
 
     use Ecto.Migration
@@ -62,13 +89,15 @@ if Code.ensure_loaded?(Ecto.Migration) do
         add(:outcome_blob, :binary, null: true)
       end
 
-      create(
-        index(runs, ["metadata jsonb_path_ops"],
-          using: "GIN",
-          name: index_name(runs),
-          prefix: config.prefix
+      if postgres?() do
+        create(
+          index(runs, ["metadata jsonb_path_ops"],
+            using: "GIN",
+            name: index_name(runs),
+            prefix: config.prefix
+          )
         )
-      )
+      end
 
       :ok
     end
@@ -78,7 +107,9 @@ if Code.ensure_loaded?(Ecto.Migration) do
     def down(%Config{} = config) do
       runs = Config.table(config, :runs)
 
-      drop(index(runs, ["metadata"], name: index_name(runs), prefix: config.prefix))
+      if postgres?() do
+        drop(index(runs, ["metadata"], name: index_name(runs), prefix: config.prefix))
+      end
 
       alter table(runs, prefix: config.prefix) do
         remove(:outcome_blob)
@@ -93,5 +124,14 @@ if Code.ensure_loaded?(Ecto.Migration) do
     # something a reader of this module can check by eye.
     @spec index_name(String.t()) :: atom()
     defp index_name(runs), do: :"#{runs}_metadata_gin_index"
+
+    # `Ecto.Migration.repo/0` answers the repo the runner is migrating,
+    # and every `Ecto.Repo` exports `__adapter__/0`. An exact match on
+    # `Ecto.Adapters.Postgres` rather than a "does it look like Postgres"
+    # test: a wrapper adapter that speaks the same dialect is welcome to
+    # add the index in its own migration, and guessing on its behalf is
+    # how a migration ends up half-applied on a backend nobody tested.
+    @spec postgres?() :: boolean()
+    defp postgres?, do: repo().__adapter__() == Ecto.Adapters.Postgres
   end
 end

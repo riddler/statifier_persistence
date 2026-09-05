@@ -399,6 +399,30 @@ completion asks whether its N siblings are terminal with a `jsonb`
 containment query, and each one is a sequential scan of the whole runs
 table.
 
+**On an Ecto adapter that is not Postgres, the index is skipped.** `GIN`
+and `jsonb_path_ops` are Postgres spellings, so `up/1` creates the index
+only when the migration's repo runs on `Ecto.Adapters.Postgres`, and
+`down/1` drops it under the same condition. Everything else in V03 - the
+`outcome_blob` column included - is created on every adapter, which is
+what lets a SQLite host run this package's DDL at all. (In 0.7.0 it could
+not: the index raised, the whole migration rolled back, and the column
+went with it. Fixed in 0.7.1.)
+
+What is skipped with the index is what the index served. Both metadata
+queries this package issues -
+`StatifierPersistence.Storage.Ecto.list_runs_by_metadata/2` and the
+status projection `list_run_states_by_metadata/2` - are `jsonb`
+containment SQL, which a non-Postgres backend does not parse. So on such
+an adapter the Ecto adapter declares no metadata support: a `metadata:`
+map at create is refused with `{:error, :metadata_unsupported}`, the two
+listings refuse with `{:error, :child_listing_unsupported}` and
+`{:error, :run_states_unsupported}`, and a durable subchart or a fan-out
+over that store is **refused at open** rather than started and left with
+children nothing can settle. Storing, loading, stepping and resuming runs
+are unaffected. Per-run locking is a separate Postgres-only surface -
+`lock_run/3` is `pg_advisory_xact_lock` plus `SELECT ... FOR UPDATE` -
+and is tracked in `sp-5lm`.
+
 ### Listing runs by host scope
 
 A run record carries engine identities and opaque blobs. Nothing on it

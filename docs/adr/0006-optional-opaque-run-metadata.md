@@ -188,3 +188,56 @@ identities-only rule, and decision 3's refusal-at-open all stand as
 written; in particular the column is still not reached by `:blob_type`,
 which is why a fan-out child's outcome payload went to a blob column of
 its own rather than into this map.
+
+## Note (2026-09-05, sp-11w): the shipped index is Postgres-conditional, and so is this adapter's metadata support
+
+Recording what shipped, not a change of decision. This Note is an
+addition to the sp-t57 Note above, which it narrows in one place and
+contradicts nowhere.
+
+That Note said V03 creates the GIN `jsonb_path_ops` index and observed,
+in its last-but-one paragraph, that this is a Postgres-shaped commitment
+because "an Ecto adapter pointed at another backend cannot run V03 as
+written". It was more literally true than intended. On a SQLite repo
+`ecto_sqlite3` raises from the `using:` option, which rolled the whole of
+V03 back and took the `outcome_blob` column with it, so a host on that
+backend could not run this package's DDL at all - not V03, and not V02
+either, because the generated runs schema reads `outcome_blob`
+unconditionally (sp-11w).
+
+Two things are now conditional on the adapter, and one deliberately is
+not.
+
+**The index is created only on `Ecto.Adapters.Postgres`.** V03's `up/1`
+checks `repo().__adapter__()` and skips the `create` on anything else;
+`down/1` skips the matching `drop`. The exact-match test is deliberate: a
+wrapper adapter speaking the same dialect adds the index in its own
+migration rather than being guessed at.
+
+**The Ecto adapter declares metadata support only on Postgres.**
+`supports_metadata?/1` answers `repo().__adapter__() ==
+Ecto.Adapters.Postgres`. This is decision 3's refusal-at-open arm, used
+as written, not a new arm: the capability decision 3 defines is the
+column *and* the equality-match list helper, and the helper is
+`jsonb` containment SQL a non-Postgres backend does not parse. The
+consequence a host sees is the one decision 3 specifies - a non-empty
+`metadata:` map at create returns `{:error, :metadata_unsupported}` -
+plus the two listings refusing rather than raising, and a durable
+subchart or fan-out over such a store being refused at open rather than
+started and left unsettleable.
+
+**The `outcome_blob` column is created on every adapter**, because a
+nullable binary column needs no dialect. That is what keeps
+`supports_run_outcome?/1` true everywhere, and it is why capping a
+SQLite host at V02 is not the answer: the schema reads that column
+whatever the backend.
+
+What decision 4 grants is still unchanged in substance. A host that
+queries the column by pairs this package never touches still adds its own
+index; on a backend where this package ships none, that host adds
+whatever index its own backend spells. What the sp-t57 Note withdrew -
+the claim that this package ships no index - is withdrawn on Postgres
+only, which is where it ships one.
+
+The Postgres-only surface this widens the description of, not the extent
+of, is tracked on `sp-5lm`. Nothing in decisions 1, 2, 3 or 4 moves.

@@ -88,7 +88,12 @@ defmodule StatifierPersistence.MixProject do
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:excoveralls, "~> 0.18", only: :test},
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},
-      {:postgrex, "~> 0.19", only: :test}
+      {:postgrex, "~> 0.19", only: :test},
+      # Test-only, and only so the migration helper's non-Postgres path is
+      # exercised by a real adapter rather than asserted about (sp-11w).
+      # ADR-0005 decision 2's Postgres harness is untouched: every
+      # storage and conformance test still runs against Postgres.
+      {:ecto_sqlite3, "~> 0.21", only: :test}
     ]
   end
 

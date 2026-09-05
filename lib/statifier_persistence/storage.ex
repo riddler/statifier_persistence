@@ -413,18 +413,27 @@ defmodule StatifierPersistence.Storage do
   decision 5).
 
   True when the adapter exports the optional
-  `c:StatifierPersistence.Storage.Adapter.list_runs_by_metadata/2`, the
-  same `function_exported?/3` shape `metadata_supported?/1` checks. This is
-  the predicate `list_runs_by_metadata/2` consults for its own
-  refusal-at-open, exposed because a caller with work to do before the
-  query - such as `StatifierPersistence.Driver` refusing to start a child
-  it could never enumerate for cancellation - wants the answer before it
-  acts.
+  `c:StatifierPersistence.Storage.Adapter.list_runs_by_metadata/2` **and**
+  `metadata_supported?/1` holds for this store. This is the predicate
+  `list_runs_by_metadata/2` consults for its own refusal-at-open, exposed
+  because a caller with work to do before the query - such as
+  `StatifierPersistence.Driver` refusing to start a child it could never
+  enumerate for cancellation - wants the answer before it acts.
+
+  The metadata conjunct is not belt and braces. A metadata match is a
+  query over stored metadata, so an adapter that declares it cannot
+  support metadata (ADR-0006 decision 3) cannot answer one either, and an
+  adapter whose declaration is conditional - the shipped Ecto adapter says
+  `false` off Postgres, where the containment SQL does not parse - is
+  otherwise reported as able to list purely because the function is
+  compiled into it. Exported and able are different questions and this is
+  the one callers ask (sp-11w).
   """
   @spec child_listing_supported?(store :: t()) :: boolean()
   def child_listing_supported?(%__MODULE__{} = store) do
     Code.ensure_loaded?(store.adapter) and
-      function_exported?(store.adapter, :list_runs_by_metadata, 2)
+      function_exported?(store.adapter, :list_runs_by_metadata, 2) and
+      metadata_supported?(store)
   end
 
   @doc """
@@ -452,14 +461,17 @@ defmodule StatifierPersistence.Storage do
   (sp-t57, ruling C5).
 
   True when the adapter exports the optional
-  `c:StatifierPersistence.Storage.Adapter.list_run_states_by_metadata/2`,
-  the same `function_exported?/3` shape `child_listing_supported?/1`
-  checks. The other half of `start_child_at/6`'s refusal at open.
+  `c:StatifierPersistence.Storage.Adapter.list_run_states_by_metadata/2`
+  and `metadata_supported?/1` holds - the same pair
+  `child_listing_supported?/1` checks, and for the same reason: the
+  projection is the same metadata match, narrowed to three columns. The
+  other half of `start_child_at/6`'s refusal at open.
   """
   @spec run_states_supported?(store :: t()) :: boolean()
   def run_states_supported?(%__MODULE__{} = store) do
     Code.ensure_loaded?(store.adapter) and
-      function_exported?(store.adapter, :list_run_states_by_metadata, 2)
+      function_exported?(store.adapter, :list_run_states_by_metadata, 2) and
+      metadata_supported?(store)
   end
 
   @doc """

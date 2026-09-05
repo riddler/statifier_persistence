@@ -364,11 +364,24 @@ if Code.ensure_loaded?(Ecto) do
     Declares metadata support (the optional
     `c:StatifierPersistence.Storage.Adapter.supports_metadata?/1`): this
     adapter stores a run's metadata in the V02 `jsonb` column (ADR-0006
-    decision 3).
+    decision 3), **on a Postgres repo**.
+
+    On any other Ecto adapter this answers `false`, which is ADR-0006
+    decision 3's refusal-at-open arm rather than a new one. The capability
+    that record defines is the column *and* the equality-match list
+    helper, and the helper is Postgres-only SQL: both
+    `list_runs_by_metadata/2` and `list_run_states_by_metadata/2` are
+    `jsonb` containment (`@>`) with a `-> ... ->>` extraction, which a
+    non-Postgres backend does not parse. Declaring the capability true
+    there would trade a clean refusal for a raise from the driver, at the
+    far end of a durable subchart or a fan-out that had already started
+    children nothing could then settle (sp-11w). V03's `metadata` index is
+    skipped on the same adapters, for the same reason; sp-5lm tracks this
+    surface.
     """
     @impl Adapter
     @spec supports_metadata?(Adapter.opts()) :: boolean()
-    def supports_metadata?(_opts), do: true
+    def supports_metadata?(opts), do: repo(opts).__adapter__() == Ecto.Adapters.Postgres
 
     @doc """
     Lists the runs whose stored `metadata` contains **every** key/value
