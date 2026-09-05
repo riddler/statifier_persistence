@@ -27,3 +27,14 @@
 - The Ecto adapter's V03 migration adds the `outcome_blob` column and a
   GIN `jsonb_path_ops` index on `metadata`. A host already on V02 picks
   it up with `StatifierPersistence.Ecto.Migrations.up(for: MyApp, from: 3)`.
+- `StatifierPersistence.Driver` takes a `child_canceller:` option: how a
+  `:first_error` settlement asks the scheduler to cancel the start jobs of
+  a fan-out's not-yet-started children, which have no run record for the
+  cascade to reach.
+- A fan-out child's completion now settles instead of answering its
+  parent's door: its answer is stored on its own run record, and only the
+  settlement that finds all N indices terminal assembles the dense,
+  index-ordered list and answers the invocation once.
+  `StatifierPersistence.Driver.answer_parent/3` routes a fan-out child the
+  same way and returns `:ok` for it. A child with no `child_count` on its
+  linkage - every child created before this release - is unaffected.

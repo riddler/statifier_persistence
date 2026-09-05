@@ -175,6 +175,8 @@ defmodule StatifierPersistence.Driver do
   alias Statifier.Session.Invocations
   alias StatifierPersistence.{Executor, Run, Runs, Storage, Telemetry}
   alias StatifierPersistence.Run.Linkage
+  alias StatifierPersistence.Serialization.AdapterLock
+  alias StatifierPersistence.Storage.Adapter
 
   @typedoc """
   What `t:dispatch/0` receives as its third argument: the executor's own
@@ -265,6 +267,34 @@ defmodule StatifierPersistence.Driver do
   """
   @type chart_resolver :: (content_hash :: String.t() -> {:ok, Machine.t()} | :error)
 
+  @typedoc """
+  How this driver reaches the scheduler that holds a fan-out's not-yet-
+  started children (sp-t57, ruling C9; `sob-q3y` implements it).
+
+  `first_error` cancels the invocation's remaining children. The ones that
+  already have a run are this package's own to cancel, through
+  `StatifierPersistence.Runs.cascade_cancel/3`. The ones whose start job
+  has not run yet have no run record at all, so nothing here can see them,
+  let alone cancel them - only the scheduler that enqueued their jobs can.
+  This is the call that asks it to.
+
+  It receives the parent's run id, the invocation id, and the indices in
+  `0..child_count - 1` that produced no run record - the exact set of
+  start jobs to cancel, computed inside the settlement section under the
+  parent's exclusion. `{:error, reason}` fails the settlement rather than
+  answering a dense list whose cancelled entries it could not vouch for.
+
+  Defaults to `nil`, "this driver cancels no start jobs": a host with no
+  scheduler starts no fan-out, and a `:first_error` settlement over a
+  fully-started fan-out needs none either, since every index already has
+  a run for the cascade to reach.
+  """
+  @type child_canceller ::
+          (parent_run_id :: Runs.run_id(),
+           invoke_id :: String.t(),
+           unstarted_indices :: [non_neg_integer()] ->
+             :ok | {:error, term()})
+
   @enforce_keys [:store, :machine, :dispatch]
   defstruct [
     :store,
@@ -274,6 +304,7 @@ defmodule StatifierPersistence.Driver do
     :invoke_types,
     :serialization,
     :chart_resolver,
+    :child_canceller,
     max_turns: 1_000
   ]
 
@@ -285,6 +316,7 @@ defmodule StatifierPersistence.Driver do
           invoke_types: MachineState.invoke_types(),
           serialization: {module(), term()} | nil,
           chart_resolver: chart_resolver() | nil,
+          child_canceller: child_canceller() | nil,
           max_turns: pos_integer()
         }
 
@@ -333,6 +365,10 @@ defmodule StatifierPersistence.Driver do
     host without one calls `done_invocation/5` or `failed_invocation/5`
     itself, from `parent_link/2` and the drive's own `run.donedata` or
     `run.failure`.
+  - `child_canceller:` - `t:child_canceller/0`, how a `:first_error`
+    settlement reaches the scheduler holding the start jobs of a fan-out's
+    not-yet-started children. Defaults to `nil`, "this driver cancels no
+    start jobs".
   - `max_turns:` - the answer-fed steps one drive will take before
     refusing to take another. Defaults to 1000.
 
@@ -349,6 +385,7 @@ defmodule StatifierPersistence.Driver do
       invoke_types: Keyword.get(opts, :invoke_types),
       serialization: Keyword.get(opts, :serialization),
       chart_resolver: Keyword.get(opts, :chart_resolver),
+      child_canceller: Keyword.get(opts, :child_canceller),
       max_turns: Keyword.get(opts, :max_turns, 1_000)
     }
   end
@@ -501,6 +538,15 @@ defmodule StatifierPersistence.Driver do
   `:no_parent` is a no-op answering `:no_parent`, so this is safe to call
   on any run id, linked or not.
 
+  A child of a **fan-out** answers no parent here. Its linkage carries a
+  `child_count`, so this call settles instead - records the child's own
+  answer and, if it is the last, assembles the invocation's dense list and
+  answers the parent's door once - and returns `:ok`. The routing is here
+  and not only on the automatic path because a host driving the doors
+  itself must not be able to bypass a settlement by calling this function:
+  answering a fan-out's parent with one child's donedata would complete
+  the whole map block on the first child to finish.
+
   Public so a host with no `chart_resolver:` can call it explicitly with a
   driver built over the parent's own chart - the same construction the
   automatic path (wired into `create/3`, `send_event/4`, `done_invocation/5`
@@ -514,14 +560,17 @@ defmodule StatifierPersistence.Driver do
           driver :: t(),
           child_run_id :: Runs.run_id(),
           donedata_or_failure :: {:done, term()} | {:failed, keyword()}
-        ) :: result() | :no_parent | {:error, Storage.error()}
+        ) :: result() | :ok | :no_parent | {:error, Storage.error()}
   def answer_parent(%__MODULE__{} = driver, child_run_id, donedata_or_failure)
       when is_binary(child_run_id) do
     case parent_link(driver.store, child_run_id) do
-      {:ok, %Linkage{} = linkage} ->
+      {:ok, %Linkage{child_count: nil} = linkage} ->
         result = respond_to_parent(driver, linkage, donedata_or_failure)
         report_answered(child_run_id, linkage, donedata_or_failure)
         result
+
+      {:ok, %Linkage{} = linkage} ->
+        settle_child(driver, linkage, child_run_id, donedata_or_failure)
 
       :no_parent ->
         :no_parent
@@ -713,6 +762,265 @@ defmodule StatifierPersistence.Driver do
       _no_parent_or_error -> :ok
     end
   end
+
+  # -- Settlement (sp-t57, rulings C1, C3, C5, C9) ---------------------
+  #
+  # A fan-out child's completion is not an answer to the parent; it is one
+  # of N answers the invocation is collecting. `answer_parent/3` is the one
+  # place that decision is made - both the automatic path and the public
+  # door reach it - and it routes on the child's own linkage carrying a
+  # `child_count`. Three things then happen, in this order and for these
+  # reasons:
+  #
+  # 1. The child's own answer is persisted on the child's run record.
+  #    Nothing else keeps it: a stored record carries no donedata, so an
+  #    answer that stayed on the step that produced it could not be
+  #    assembled later by a node that never saw the child run.
+  # 2. A settlement section runs under the PARENT's exclusion and asks,
+  #    through the indexed status projection, whether every index has
+  #    reached a terminal status. Under the parent's exclusion because the
+  #    question and the answer that follows from it have to be one
+  #    decision; through the projection because the question is asked once
+  #    per child, and the listing would move N position blobs each time.
+  # 3. Only the settlement that finds them all terminal reads the N
+  #    payloads, assembles the dense index-ordered list, and answers the
+  #    parent's ordinary door once.
+  #
+  # `driver.machine` must be the PARENT's chart, exactly as
+  # `answer_parent/3` documents: the answer this delivers goes through the
+  # parent's door, under the parent's own identity guard. The automatic
+  # path arrives with the parent's chart already resolved, because
+  # `resolve_and_answer/4` swaps it in before calling `answer_parent/3`.
+  #
+  # Two racers can both find every index terminal - each writes its own
+  # status before either reads - and both will answer. The second is
+  # discarded by `late_answer/3`'s liveness read, the same mechanism this
+  # package already relies on for a late answer to a cancelled invocation.
+  # That discard is idempotent for a chart that transitions out of the
+  # invoking state on its answer, which the compiled fan-out block is.
+  @spec settle_child(t(), Linkage.t(), Runs.run_id(), {:done, term()} | {:failed, keyword()}) ::
+          :ok
+  defp settle_child(driver, %Linkage{} = linkage, child_run_id, payload) do
+    with :ok <- record_outcome(driver, child_run_id, payload),
+         {:ok, {:answer, donedata}} <- decide(driver, linkage) do
+      assembled = {:done, donedata}
+      respond_to_parent(driver, linkage, assembled)
+      report_answered(child_run_id, linkage, assembled)
+    end
+
+    :ok
+  end
+
+  # The child's status is already stored - its own step persisted it - so
+  # this writes the payload beside it and re-states the same status rather
+  # than deriving a new one. `update_run_status/4` is the writer that
+  # carries every other stored field, both blobs included, forward
+  # verbatim.
+  @spec record_outcome(t(), Runs.run_id(), {:done, term()} | {:failed, keyword()}) ::
+          :ok | {:error, Storage.error()}
+  defp record_outcome(driver, child_run_id, payload) do
+    {status, failure} = terminal_fields(payload)
+
+    Storage.update_run_status(driver.store, child_run_id, status,
+      failure: failure,
+      outcome_blob: encode_outcome(payload)
+    )
+  end
+
+  @spec terminal_fields({:done, term()} | {:failed, keyword()}) ::
+          {Adapter.run_status(), String.t() | nil}
+  defp terminal_fields({:done, _donedata}), do: {:completed, nil}
+
+  defp terminal_fields({:failed, failure}) do
+    case Keyword.get(failure, :reason) do
+      reason when is_binary(reason) -> {:failed, reason}
+      _absent_or_not_a_string -> {:failed, nil}
+    end
+  end
+
+  # The payload is an opaque blob to storage, exactly as a position is, and
+  # this module is the only party that encodes or decodes one. A donedata
+  # term is whatever the chart's author put in it, so the encoding has to
+  # be total over Elixir terms rather than JSON-shaped.
+  @spec encode_outcome({:done, term()} | {:failed, keyword()}) :: binary()
+  defp encode_outcome(payload), do: :erlang.term_to_binary(payload)
+
+  @spec decode_outcome(binary() | nil) :: {:done, term()} | {:failed, keyword()} | nil
+  defp decode_outcome(nil), do: nil
+  defp decode_outcome(blob) when is_binary(blob), do: :erlang.binary_to_term(blob)
+
+  # The settlement section. Everything from the projection read to the
+  # assembly runs inside the parent's own serialization strategy, so two
+  # children settling at once do not both read a half-written picture of
+  # the invocation.
+  @spec decide(t(), Linkage.t()) :: {:ok, {:answer, term()} | :not_yet} | {:error, term()}
+  defp decide(driver, %Linkage{} = linkage) do
+    {strategy, config} = settlement_strategy(driver)
+    match = Linkage.invocation_match(linkage.parent_run_id, linkage.invoke_id)
+
+    case strategy.with_run(config, linkage.parent_run_id, fn ->
+           settle(driver, linkage, match)
+         end) do
+      {:ok, result} -> result
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @spec settlement_strategy(t()) :: {module(), term()}
+  defp settlement_strategy(%__MODULE__{serialization: nil, store: store}),
+    do: {AdapterLock, store}
+
+  defp settlement_strategy(%__MODULE__{serialization: serialization}), do: serialization
+
+  @spec settle(t(), Linkage.t(), Adapter.metadata()) ::
+          {:ok, {:answer, term()} | :not_yet} | {:error, term()}
+  defp settle(driver, %Linkage{} = linkage, match) do
+    with {:ok, states} <- Storage.list_run_states_by_metadata(driver.store, match),
+         {:ok, states, cancelled?} <- maybe_cancel(driver, linkage, states, match) do
+      if settled?(states, linkage.child_count, cancelled?) do
+        assemble(driver, linkage, states, cancelled?)
+      else
+        {:ok, :not_yet}
+      end
+    end
+  end
+
+  # `first_error`'s cancel, and the whole of it: the live siblings through
+  # the cascade this package already has, the not-yet-started ones through
+  # the scheduler's seam. Both kinds read cancelled in the dense list that
+  # follows - the started ones from their own records, the unstarted ones
+  # from having none.
+  #
+  # It reads "any child failed" rather than "this child failed" on purpose:
+  # a re-driven settlement after a crash has to reach the same conclusion
+  # as the one that was interrupted.
+  @spec maybe_cancel(t(), Linkage.t(), [Adapter.run_state()], Adapter.metadata()) ::
+          {:ok, [Adapter.run_state()], boolean()} | {:error, term()}
+  defp maybe_cancel(driver, %Linkage{policy: :first_error} = linkage, states, match) do
+    if Enum.any?(states, &(&1.status == :failed)) do
+      with {:ok, _cancelled} <- Runs.cascade_cancel(driver.store, match, cascade_opts(driver)),
+           :ok <- cancel_unstarted(driver, linkage, states),
+           {:ok, states} <- Storage.list_run_states_by_metadata(driver.store, match) do
+        {:ok, states, true}
+      end
+    else
+      {:ok, states, false}
+    end
+  end
+
+  defp maybe_cancel(_driver, _linkage, states, _match), do: {:ok, states, false}
+
+  @spec cancel_unstarted(t(), Linkage.t(), [Adapter.run_state()]) :: :ok | {:error, term()}
+  defp cancel_unstarted(%__MODULE__{child_canceller: nil}, _linkage, _states), do: :ok
+
+  defp cancel_unstarted(driver, %Linkage{} = linkage, states) do
+    case unstarted_indices(states, linkage.child_count) do
+      [] ->
+        :ok
+
+      indices ->
+        case driver.child_canceller.(linkage.parent_run_id, linkage.invoke_id, indices) do
+          :ok -> :ok
+          {:error, reason} -> {:error, {:child_canceller, reason}}
+        end
+    end
+  end
+
+  @spec unstarted_indices([Adapter.run_state()], pos_integer()) :: [non_neg_integer()]
+  defp unstarted_indices(states, child_count) do
+    started = MapSet.new(states, & &1.child_index)
+
+    Enum.reject(0..(child_count - 1), &MapSet.member?(started, &1))
+  end
+
+  # Under `:all` every one of the N indices needs a run of its own in a
+  # terminal status - an index whose start job has not run yet is an answer
+  # still coming, not a missing one. Under a `first_error` cancel the
+  # indices with no run are the start jobs the scheduler was just asked to
+  # cancel, so they are settled too, and they have to be or the block could
+  # never answer at all.
+  @spec settled?([Adapter.run_state()], pos_integer(), boolean()) :: boolean()
+  defp settled?(states, child_count, cancelled?) do
+    terminal = Enum.count(states, &terminal?(&1.status))
+
+    if cancelled? do
+      terminal == length(states)
+    else
+      terminal == child_count
+    end
+  end
+
+  @spec terminal?(Adapter.run_status()) :: boolean()
+  defp terminal?(status), do: status in [:completed, :failed, :cancelled]
+
+  # The one materialising read of a fan-out, at its last settlement: N
+  # single-key fetches over the ids `Linkage.child_run_id/3` derives, which
+  # needs no second query. The list is dense and index-ordered, so a chart
+  # reads item `i`'s answer at position `i` whatever order the children
+  # finished in.
+  @spec assemble(t(), Linkage.t(), [Adapter.run_state()], boolean()) ::
+          {:ok, {:answer, [map()]}} | {:error, term()}
+  defp assemble(driver, %Linkage{} = linkage, states, cancelled?) do
+    by_index = Map.new(states, &{&1.child_index, &1})
+
+    0..(linkage.child_count - 1)
+    |> Enum.reduce_while({:ok, []}, fn index, {:ok, acc} ->
+      case entry(driver, linkage, Map.get(by_index, index), index, cancelled?) do
+        {:ok, entry} -> {:cont, {:ok, [entry | acc]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, entries} -> {:ok, {:answer, Enum.reverse(entries)}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @spec entry(t(), Linkage.t(), Adapter.run_state() | nil, non_neg_integer(), boolean()) ::
+          {:ok, map()} | {:error, term()}
+  defp entry(_driver, _linkage, nil, index, true), do: {:ok, cancelled_entry(index)}
+
+  defp entry(_driver, _linkage, %{status: :cancelled}, index, _cancelled?),
+    do: {:ok, cancelled_entry(index)}
+
+  defp entry(driver, %Linkage{} = linkage, %{status: status}, index, _cancelled?) do
+    child_run_id = Linkage.child_run_id(linkage.parent_run_id, linkage.invoke_id, index)
+
+    with {:ok, record} <- Storage.fetch_run(driver.store, child_run_id) do
+      {:ok, outcome_entry(index, status, decode_outcome(record.outcome_blob))}
+    end
+  end
+
+  # String keys, because this becomes the `done.invoke` event's data and
+  # every other chart-facing payload this module builds uses them
+  # (`answer_event/3`). A failed entry carries st-ADR-0068's own three
+  # keys, so an author reads a failed item exactly as they read a failed
+  # single invocation.
+  @spec outcome_entry(
+          non_neg_integer(),
+          Adapter.run_status(),
+          {:done, term()} | {:failed, keyword()} | nil
+        ) :: map()
+  defp outcome_entry(index, _status, {:done, donedata}),
+    do: %{"index" => index, "status" => "completed", "donedata" => donedata}
+
+  defp outcome_entry(index, _status, {:failed, failure}),
+    do: %{"index" => index, "status" => "failed", "failure" => failure_data(failure)}
+
+  defp outcome_entry(index, status, nil),
+    do: %{"index" => index, "status" => Atom.to_string(status), "donedata" => nil}
+
+  @spec failure_data(keyword()) :: map()
+  defp failure_data(failure) do
+    %{
+      "reason" => Keyword.get(failure, :reason, "unknown"),
+      "attempts" => Keyword.get(failure, :attempts, :undefined),
+      "detail" => Keyword.get(failure, :detail, :undefined)
+    }
+  end
+
+  @spec cancelled_entry(non_neg_integer()) :: map()
+  defp cancelled_entry(index), do: %{"index" => index, "status" => "cancelled"}
 
   # `parent_driver` is built exactly as a child's is (`create_child/5`): the
   # same store, the same `serialization:`, the same `effects` executor, the
