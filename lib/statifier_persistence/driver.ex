@@ -294,6 +294,11 @@ defmodule StatifierPersistence.Driver do
            {{non_neg_integer(), non_neg_integer()}, String.t(),
             {:done, term()} | {:failed, keyword()}}
 
+  # A child's place in a fan-out: its index, N, and the invocation's
+  # aggregation policy. `nil` is the ordinary single-child subchart, which
+  # records none of the three and answers its parent's door directly.
+  @typep fan_out :: {non_neg_integer(), pos_integer(), Linkage.policy()} | nil
+
   @doc """
   Builds a driver over `store` and `machine`.
 
@@ -523,6 +528,127 @@ defmodule StatifierPersistence.Driver do
 
       {:error, _reason} = error ->
         error
+    end
+  end
+
+  @doc """
+  Starts child `index` of `count` for `parent_run_id`'s `<invoke>` - the
+  public start-with-index door a scheduler drives a fan-out through
+  (sp-t57, ruling C4; mirrors `sob-q3y`).
+
+  The single-child durable-subchart path creates its child from inside the
+  parent's own step, because there is exactly one and the parent is
+  already exclusive. A fan-out cannot: N children created inside the
+  parent's step would hold the parent's exclusion for N creates. So the
+  parent's step enqueues the fan-out instead, and each child is created
+  later, from whatever job picks it up, through this function. That is the
+  reading of statifier_blocks ADR-0008 decision 4 the fan-out needs: what
+  happens under the parent's exclusion is the enqueue, and the children
+  are created afterwards, idempotently and resumably.
+
+  Idempotent, and that is what makes it resumable: the child's run id is
+  `StatifierPersistence.Run.Linkage.child_run_id/3` of the same three
+  values, so a re-delivered start job finds the child it already created
+  and adopts it rather than creating a second one - exactly as the
+  single-child path's at-least-once re-drive does.
+
+  ## Arguments
+
+  - `driver` - any driver over the right store. Its `machine` is not read:
+    the child's chart comes from `effect`, and the parent's comes from the
+    `chart_resolver:` when the settlement answers.
+  - `parent_run_id` - the run whose `<invoke>` this fans out.
+  - `effect` - the resolved `t:Statifier.Effect.Invoke.t/0`, or the whole
+    `{:start_child, resolved, {:invoke, invoke}}` instruction a subchart
+    handler answers with. The invocation id is read off it, so a caller
+    passes no id separately.
+  - `index` - the child's 0-based position in the list being mapped over.
+  - `count` - N, recorded on every child so a settlement knows how many to
+    wait for.
+  - `opts` - `policy:` (`:all`, the default, or `:first_error`).
+
+  `index` outside `0..count - 1` raises `ArgumentError` - a caller bug,
+  not a storage event. The check is
+  `StatifierPersistence.Run.Linkage.new/6`'s, which is the one definition
+  site of the linkage's own shape; this function does not repeat it.
+
+  ## Refusals
+
+  `{:refused, reason}`, the same shape and the same telemetry the
+  single-child path's refusal at open uses, with three added arms. An
+  adapter that cannot enumerate children refuses `:child_listing_unsupported`
+  as it always has; one that cannot store a run's outcome payload refuses
+  `:run_outcome_unsupported`, and one that cannot answer the indexed
+  status projection refuses `:run_states_unsupported`. All three are the
+  same principle: a child whose invocation could never be settled is not
+  started. A `parent_run_id` naming no stored run refuses `:run_not_found`.
+  """
+  @spec start_child_at(
+          driver :: t(),
+          parent_run_id :: Runs.run_id(),
+          effect :: Invoke.t() | {:start_child, Invoke.t(), {:invoke, Invoke.t()}},
+          index :: non_neg_integer(),
+          count :: pos_integer(),
+          opts :: [policy: Linkage.policy()]
+        ) :: :ok | {:refused, term()}
+  def start_child_at(%__MODULE__{} = driver, parent_run_id, effect, index, count, opts \\ [])
+      when is_binary(parent_run_id) and is_integer(index) and index >= 0 and
+             is_integer(count) and count > 0 do
+    resolved = resolved_invoke(effect)
+    policy = Keyword.get(opts, :policy, :all)
+
+    with {:ok, context} <- start_context(driver, parent_run_id, resolved) do
+      result = settleable(driver, context, resolved, {index, count, policy})
+      report_refusal(result, context)
+    end
+  end
+
+  @spec resolved_invoke(Invoke.t() | {:start_child, Invoke.t(), {:invoke, Invoke.t()}}) ::
+          Invoke.t()
+  defp resolved_invoke(%Invoke{} = resolved), do: resolved
+  defp resolved_invoke({:start_child, %Invoke{} = resolved, {:invoke, %Invoke{}}}), do: resolved
+
+  # The parent's own record supplies the `content_hash` a
+  # `t:dispatch_context/0` carries, and reading it doubles as the check
+  # that the parent exists at all: creating a child of a run that is not
+  # there would leave a linked orphan nothing ever settles.
+  @spec start_context(t(), Runs.run_id(), Invoke.t()) ::
+          {:ok, dispatch_context()} | {:refused, term()}
+  defp start_context(driver, parent_run_id, %Invoke{} = resolved) do
+    case Storage.fetch_run(driver.store, parent_run_id) do
+      {:ok, parent_record} ->
+        {:ok,
+         %{
+           run_id: parent_run_id,
+           content_hash: parent_record.content_hash,
+           invoke_id: resolved.invoke_id,
+           invoke: resolved
+         }}
+
+      {:error, reason} ->
+        {:refused, reason}
+    end
+  end
+
+  # The fan-out counterpart of `start_child/3`'s refusal at open, with the
+  # two settlement capabilities added to the enumeration one. Kept as a
+  # single expression so every arm still funnels through one
+  # `report_refusal/2` return, which is what keeps the refusal event to
+  # one emission site.
+  @spec settleable(t(), dispatch_context(), Invoke.t(), fan_out()) :: :ok | {:refused, term()}
+  defp settleable(driver, context, resolved, fan_out) do
+    cond do
+      not Storage.child_listing_supported?(driver.store) ->
+        {:refused, :child_listing_unsupported}
+
+      not Storage.run_outcome_supported?(driver.store) ->
+        {:refused, :run_outcome_unsupported}
+
+      not Storage.run_states_supported?(driver.store) ->
+        {:refused, :run_states_unsupported}
+
+      true ->
+        resolve_child(driver, resolved, context, fan_out)
     end
   end
 
@@ -853,7 +979,7 @@ defmodule StatifierPersistence.Driver do
   defp start_child(driver, %Invoke{} = resolved, context) do
     result =
       if Storage.child_listing_supported?(driver.store) do
-        resolve_child(driver, resolved, context)
+        resolve_child(driver, resolved, context, nil)
       else
         {:refused, :child_listing_unsupported}
       end
@@ -877,10 +1003,11 @@ defmodule StatifierPersistence.Driver do
   # `invoke.content` is SCXML markup, and `Source.resolve/2` compiles it
   # (`Statifier.Invoke.Source`) - the durable path resolves a child exactly
   # as `Statifier.Session` does, rather than compiling it itself.
-  @spec resolve_child(t(), Invoke.t(), dispatch_context()) :: :ok | {:refused, term()}
-  defp resolve_child(driver, resolved, context) do
+  @spec resolve_child(t(), Invoke.t(), dispatch_context(), fan_out()) ::
+          :ok | {:refused, term()}
+  defp resolve_child(driver, resolved, context, fan_out) do
     case Source.resolve(resolved, []) do
-      {:ok, child_machine} -> identify_child(driver, resolved, context, child_machine)
+      {:ok, child_machine} -> identify_child(driver, resolved, context, child_machine, fan_out)
       {:error, reason} -> {:refused, reason}
     end
   end
@@ -888,15 +1015,15 @@ defmodule StatifierPersistence.Driver do
   # The pin is mandatory (ADR-0008 decision 2): a chart with no identity
   # cannot be guarded on reload, so a child that resolves to one is refused
   # rather than started unpinned.
-  @spec identify_child(t(), Invoke.t(), dispatch_context(), Machine.t()) ::
+  @spec identify_child(t(), Invoke.t(), dispatch_context(), Machine.t(), fan_out()) ::
           :ok | {:refused, term()}
-  defp identify_child(driver, resolved, context, child_machine) do
+  defp identify_child(driver, resolved, context, child_machine, fan_out) do
     case Machine.identity(child_machine) do
       nil ->
         {:refused, :unidentified_chart}
 
       %Identity{content_hash: content_hash} ->
-        create_child(driver, resolved, context, child_machine, content_hash)
+        create_child(driver, resolved, context, child_machine, content_hash, fan_out)
     end
   end
 
@@ -910,11 +1037,10 @@ defmodule StatifierPersistence.Driver do
   # machine - through this module's own `create/3`, so a child whose own
   # initialization invokes gets the same treatment (decision 6's nesting,
   # with no extra code).
-  @spec create_child(t(), Invoke.t(), dispatch_context(), Machine.t(), String.t()) ::
+  @spec create_child(t(), Invoke.t(), dispatch_context(), Machine.t(), String.t(), fan_out()) ::
           :ok | {:refused, term()}
-  defp create_child(driver, resolved, context, child_machine, content_hash) do
-    child_index = 0
-    linkage = Linkage.new(context.run_id, context.invoke_id, child_index, content_hash)
+  defp create_child(driver, resolved, context, child_machine, content_hash, fan_out) do
+    {child_index, linkage} = child_linkage(context, content_hash, fan_out)
     child_run_id = Linkage.child_run_id(context.run_id, context.invoke_id, child_index)
     child_driver = %{driver | machine: child_machine}
     datamodel = Invocations.seed_datamodel(resolved.params, child_machine)
@@ -932,6 +1058,19 @@ defmodule StatifierPersistence.Driver do
       {:discarded, _run} ->
         {:refused, :run_exists}
     end
+  end
+
+  # `nil` is an ordinary durable subchart: index `0`, no `child_count`,
+  # no policy, and a stored metadata map byte-identical to the one this
+  # path has always written. A tuple is one child of a fan-out.
+  @spec child_linkage(dispatch_context(), String.t(), fan_out()) ::
+          {non_neg_integer(), Linkage.t()}
+  defp child_linkage(context, content_hash, nil) do
+    {0, Linkage.new(context.run_id, context.invoke_id, 0, content_hash)}
+  end
+
+  defp child_linkage(context, content_hash, {index, count, policy}) do
+    {index, Linkage.new(context.run_id, context.invoke_id, index, content_hash, count, policy)}
   end
 
   # `[:statifier_persistence, :child, :started]`. Every field comes from

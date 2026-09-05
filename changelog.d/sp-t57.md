@@ -1,6 +1,14 @@
 ### Added
 
-- `StatifierPersistence.Run.Linkage.new/6` and `fan_out?/1`: a child's
+- `StatifierPersistence.Driver.start_child_at/6`: the public
+  start-with-index door a scheduler drives a Tier A fan-out through.
+  Starts child `i` of `N` for a parent's `<invoke>`, records the count and
+  the aggregation policy (`:all` or `:first_error`) on the child's
+  linkage, and is idempotent on the derived child run id, so a
+  re-delivered start adopts rather than duplicating. Refuses at open on a
+  store that could not settle the invocation afterwards.
+- `StatifierPersistence.Run.Linkage.new/6`
+ and `fan_out?/1`: a child's
   linkage can now carry its invocation's `child_count` and aggregation
   policy (`:all` or `:first_error`), which is what marks it as one of a
   fan-out's N rather than an ordinary durable subchart.
