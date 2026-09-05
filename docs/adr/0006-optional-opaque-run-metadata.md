@@ -146,3 +146,45 @@ three.
   store whose type system has no jsonb equivalent (decision 3's Ecto
   clause); or an encrypted-and-queryable requirement, which would reopen
   the disclosure argument in Context rather than only decision 2.
+
+## Note (2026-09-05, sp-t57): decision 4's "no index" is narrowed - V03 ships a GIN `jsonb_path_ops` index on the column
+
+Recording a change in what this package ships, not a change of decision.
+
+Decision 4 said the migration adds the column with **no index**, and gave
+the reason: which key/value pairs a host queries by, and therefore which
+index it wants, is the host's call and not something this package can
+guess. That reasoning held while every query against the column was the
+host's own. It stopped holding when this package began issuing one.
+
+Two queries this package issues are now containment predicates against
+`metadata`. The cascading cancel of ADR-0008 decision 5 walks
+`Storage.list_runs_by_metadata/2` over a linkage match, and Tier A
+fan-out settlement (sp-t57) asks "has every child of this invocation
+reached a terminal status?" once per child, through the indexed status
+projection over the same match. One fan-out of N children therefore
+issues N of them. On a runs table of any size, unindexed, that is N
+sequential scans - a cost the host did not choose, cannot see coming, and
+would discover in production.
+
+So V03 creates a GIN index on `metadata` with the `jsonb_path_ops`
+operator class. `jsonb_path_ops` rather than the default `jsonb_ops`
+because containment (`@>`) is the only operator either query uses, and
+that opclass serves exactly it, in a smaller index.
+
+What decision 4 grants is unchanged in substance: a host that queries the
+column by pairs this package never touches still adds its own index, in
+its own migration, and this one does not interfere. What is withdrawn is
+only the claim that this package ships none - it now ships the one its
+own queries need, because it now has some.
+
+This is a Postgres-shaped commitment, and it is noted as such on `sp-5lm`,
+which tracks the Ecto adapter's Postgres-only surface: `GIN` and
+`jsonb_path_ops` are Postgres spellings, and an Ecto adapter pointed at
+another backend cannot run V03 as written.
+
+Nothing else in this record moves. Decision 1's opacity, decision 2's
+identities-only rule, and decision 3's refusal-at-open all stand as
+written; in particular the column is still not reached by `:blob_type`,
+which is why a fan-out child's outcome payload went to a blob column of
+its own rather than into this map.

@@ -223,6 +223,52 @@ An answer whose invocation the chart has since cancelled is dropped, per
 spec 6.4.3, and a chart whose answer re-arms its own call is bounded by
 `max_turns:` rather than driven forever.
 
+### Fanning one invocation out over N children
+
+A durable subchart is one child per `<invoke>`, created inside the
+parent's own step. An `<invoke>` that maps over a list is N of them, and N
+creates cannot hold the parent's exclusion, so the children are started
+afterwards - one call per child, from whatever job picks it up:
+
+```elixir
+StatifierPersistence.Driver.start_child_at(driver, parent_run_id, effect, index, count,
+  policy: :all
+)
+```
+
+`effect` is the resolved `Statifier.Effect.Invoke` (or the whole
+`{:start_child, resolved, {:invoke, invoke}}` instruction), `index` is the
+child's 0-based position, and `count` is N. The call is idempotent on the
+child's derived run id, so a re-delivered start adopts the child it
+already created instead of making a second one. Scheduling those calls is
+a job runner's business, not this package's.
+
+Each child then runs as an ordinary run. When one reaches a terminal
+status its answer is stored on its own run record, and a settlement
+section under the **parent's** exclusion asks - through an indexed status
+projection, never a listing of whole records - whether all N have. Only
+the settlement that finds them all terminal assembles the dense,
+index-ordered list and answers the parent's ordinary door, once:
+
+```elixir
+[
+  %{"index" => 0, "status" => "completed", "donedata" => %{"id" => "acct_1"}},
+  %{"index" => 1, "status" => "failed", "failure" => %{"reason" => "declined", ...}},
+  %{"index" => 2, "status" => "cancelled"}
+]
+```
+
+`policy: :first_error` cancels the rest as soon as one child fails: the
+started siblings through the cascading cancel, and the ones whose start
+job has not run yet through the `child_canceller:` seam, which is handed
+the parent run id, the invocation id, and the indices with no run. Both
+kinds read `"cancelled"` at their index in the same list.
+
+An adapter that cannot store a child's answer, or cannot answer the
+status projection, is refused at open - a child whose invocation could
+never be settled is not started. On the Ecto adapter both arrive with the
+V03 migration.
+
 ## Status
 
 Early, under active development, and the API is not frozen before 1.0.
