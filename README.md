@@ -466,7 +466,10 @@ containment SQL, which a non-Postgres backend does not parse. So on such
 an adapter the Ecto adapter declares no metadata support: a `metadata:`
 map at create is refused with `{:error, :metadata_unsupported}`, the two
 listings refuse with `{:error, :child_listing_unsupported}` and
-`{:error, :run_states_unsupported}`, and a durable subchart or a fan-out
+`{:error, :run_states_unsupported}` - and the two raw adapter callbacks
+behind them answer `{:error, :metadata_unsupported}` rather than issuing
+SQL the backend cannot parse, for a host that reaches them directly - and
+a durable subchart or a fan-out
 over that store is **refused at open** rather than started and left with
 children nothing can settle. Storing, loading, stepping and resuming runs
 are unaffected. Per-run locking is a separate Postgres-only surface -
