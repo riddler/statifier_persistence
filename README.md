@@ -24,7 +24,7 @@ crash semantics. This package is that loop, packaged.
 ```elixir
 def deps do
   [
-    {:statifier_persistence, "~> 0.7"},
+    {:statifier_persistence, "~> 0.8"},
     # Optional, for the Postgres adapter:
     {:ecto_sql, "~> 3.10"}
   ]
@@ -434,8 +434,10 @@ table takes - which, for a host stepping runs durably, means every step
 of every run.
 
 How long that is depends on the row count, the width of the `metadata`
-maps, and the server, so measure rather than guess (`sp-461` is this
-package's own measurement issue if you want a number to compare against).
+maps, and the server, so measure rather than guess. (`sp-461` is a
+separate measurement issue and not a number for this build: it measures
+the settlement read cost against a GIN-indexed `metadata` column at
+increasing fan-out widths.)
 The concurrent build is what a host with a large runs table wants, and
 0.8.0 ships it as V04 - see below.
 

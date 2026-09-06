@@ -10,6 +10,60 @@ fragment in [`changelog.d/`](changelog.d/README.md); the fragments are assembled
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
 
+## [0.8.0] 2026-09-06
+
+Feature release: a chart can now report that its own run failed, and the
+Ecto adapter gains room to move on large and on non-Postgres hosts. A
+top-level `<final>` whose `<donedata>` sets `run_status` to `"failed"`
+persists the run as `:failed` so `:first_error` settlement fires (the
+ADR-0008 amendment, accepted). V04 of the DDL rebuilds V03's `metadata`
+GIN index with `CREATE INDEX CONCURRENTLY` - `@current_version` is now 4,
+and a host runs V04 as a migration of its own carrying
+`@disable_ddl_transaction true` and `@disable_migration_lock true`. A host
+that is not on Postgres has a documented opt-out: decline `lock_run/3`
+with its own `serialization:` strategy and run the conformance suite with
+`--exclude postgres`. And `Migrations.down/1` takes `from:`, the ceiling a
+capped migration needs to roll all the way back.
+
+### Added
+
+- A chart can now fail its own run: settling in a top-level `<final>` whose
+  `<donedata>` carries `statifier_persistence:run_status` set to `"failed"`
+  persists the run as `:failed` with the `failure` string `"failed_final"`,
+  so a `:first_error` fan-out cancels the failed child's siblings with no
+  host-side translation.
+- `docs/non-postgres-backends.md`: the supported way to run the Ecto adapter
+  on a backend that is not Postgres - decline `lock_run/3` with your own
+  `serialization:` strategy, what declining costs, and how to verify it.
+- `StatifierPersistence.Ecto.Migrations.down/1` takes `from:`, the version it
+  starts rolling back from (default: the newest this package knows), so a
+  migration capped with `up(version: 2)` caps its rollback with
+  `down(from: 2)`.
+- V04 of the Ecto DDL rebuilds V03's `metadata` GIN index with `CREATE INDEX
+  CONCURRENTLY`, so a host with a large runs table gets the index without the
+  `SHARE` lock a plain build holds. Give it a migration of its own carrying
+  `@disable_ddl_transaction true` and `@disable_migration_lock true` - Ecto
+  reads those from your module, not from the helper - and call
+  `StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, from: 4)`.
+  Called from an ordinary transactional migration it leaves V03's index in
+  place instead of raising, warning when the runs table already holds rows.
+  It is a no-op off `Ecto.Adapters.Postgres`, where V03 creates no index.
+
+### Changed
+
+- The conformance suite tags its four Postgres-only cases `@tag :postgres` -
+  the two `lock_run/3` cases and the two metadata-listing cases - so a host
+  running `Storage.Ecto` on another Ecto backend runs it green with
+  `mix test --exclude postgres` instead of forking the suite.
+
+### Fixed
+
+- `mix ecto.rollback --all` no longer fails for a host that caps one
+  migration and takes a later version in another: without a ceiling every
+  `down/1` started at the newest version, so the capped migration rolled the
+  later one's versions back a second time and failed on DDL that was already
+  gone. Cap the rollback with `from:` as above.
+
 ## [0.7.2] 2026-09-06
 
 Patch release: a fan-out whose children settle at the same time assembles
