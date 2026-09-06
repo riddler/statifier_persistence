@@ -326,6 +326,13 @@ rather than re-running the first:
       def down, do: StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence, version: 2)
     end
 
+`from:` says where a call starts and `version:` where it ends, in both
+directions, so a migration's two calls always cover the same span: `up`
+from `from:` (default V01) up to `version:` (default the newest), `down`
+from `from:` (default the newest) back to `version:` (default V01). A
+migration that caps one end caps the other to match - see "Upgrading to
+V03 before deploying 0.7.0" below for the case that bites.
+
 then build the guarded store the rest of the package works through:
 
     {:ok, store} =
@@ -387,6 +394,25 @@ A host already on V02 picks V03 up with an ordinary migration of its own:
       def up, do: StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, from: 3)
       def down, do: StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence, version: 3)
     end
+
+A host whose *first* migration is capped - `up(for: MyApp.Persistence,
+version: 2)`, which is what keeps a fresh clone and an already-migrated
+database on the same sequence of steps - caps its rollback the same way,
+with `from: 2`:
+
+    defmodule MyApp.Repo.Migrations.AddStatifierPersistence do
+      use Ecto.Migration
+
+      def up, do: StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, version: 2)
+      def down, do: StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence, from: 2)
+    end
+
+Leaving that `down` uncapped is the failure this ceiling exists to
+prevent: Ecto rolls migrations back newest first, so `mix ecto.rollback
+--all` runs the V03 migration's `down` and then this one's, which without
+`from:` starts at V03 again and fails on a column that is already gone
+(`no such column: outcome_blob`). Rolling back a single step is
+unaffected either way.
 
 V03 does two things, and only one of them is cheap.
 

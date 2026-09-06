@@ -48,6 +48,34 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     def down, do: Migrations.down(@opts)
   end
 
+  # The README's capped recipe, as two ordinary host migrations: the first
+  # stops at V02 in both directions, the second carries V03 alone (sp-8qq).
+  defmodule MigrateKxCappedV02 do
+    use Ecto.Migration
+
+    @opts [
+      repo: StatifierPersistence.TestRepo,
+      key: :uxid,
+      table_prefix: "kx_cap_"
+    ]
+
+    def up, do: Migrations.up(@opts ++ [version: 2])
+    def down, do: Migrations.down(@opts ++ [from: 2])
+  end
+
+  defmodule MigrateKxCappedV03 do
+    use Ecto.Migration
+
+    @opts [
+      repo: StatifierPersistence.TestRepo,
+      key: :uxid,
+      table_prefix: "kx_cap_"
+    ]
+
+    def up, do: Migrations.up(@opts ++ [from: 3])
+    def down, do: Migrations.down(@opts ++ [version: 3])
+  end
+
   @host_migrations [
     {20_260_822_000_001, MigrateKxUxid},
     {20_260_822_000_002, MigrateKxUuid},
@@ -55,6 +83,8 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
   ]
 
   @literal_version 20_260_822_000_009
+
+  @capped_versions [20_260_822_000_010, 20_260_822_000_011]
 
   @key_prefixes ["kx_uxid_", "kx_uuid_", "kx_big_"]
 
@@ -322,6 +352,43 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     end
   end
 
+  describe "the capped recipe from the README" do
+    # sabotage: dropped down/1's `from:` ceiling (back to the unconditional
+    # @current_version start) -> red, and red for the bead's reason: the
+    # second rollback re-ran V03.down, which here reaches the metadata index
+    # first - `** (Postgrex.Error) ERROR 42704 (undefined_object) index
+    # "kx_cap_runs_metadata_gin_index" does not exist`. Verified red,
+    # reverted.
+    test "a V01-V02 migration and a V03 migration roll all the way back" do
+      [capped_version, v03_version] = @capped_versions
+
+      on_exit(fn ->
+        SQL.query!(TestRepo, ~s(DROP TABLE IF EXISTS "kx_cap_runs"), [])
+        SQL.query!(TestRepo, ~s(DROP TABLE IF EXISTS "kx_cap_positions"), [])
+        SQL.query!(TestRepo, ~s(DROP TABLE IF EXISTS "kx_cap_charts"), [])
+
+        SQL.query!(TestRepo, "DELETE FROM schema_migrations WHERE version = ANY($1)", [
+          @capped_versions
+        ])
+      end)
+
+      :ok = migrate(:up, capped_version, MigrateKxCappedV02)
+      :ok = migrate(:up, v03_version, MigrateKxCappedV03)
+
+      assert tables_in_schema("public", "kx_cap_") ==
+               ["kx_cap_charts", "kx_cap_positions", "kx_cap_runs"]
+
+      assert identity_columns("kx_cap_runs", ["outcome_blob"]) ==
+               [["outcome_blob", "bytea", "YES"]]
+
+      # Newest first, which is the order `mix ecto.rollback --all` uses.
+      :ok = migrate(:down, v03_version, MigrateKxCappedV03)
+      :ok = migrate(:down, capped_version, MigrateKxCappedV02)
+
+      assert tables_in_schema("public", "kx_cap_") == []
+    end
+  end
+
   describe "option validation" do
     # sabotage: skipped parse!'s version validation -> red (KeyError, not ArgumentError)
     test "an unknown version raises before any DDL" do
@@ -343,12 +410,41 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
       end
     end
 
+    # sabotage: dropped down/1's validate_version!(from, "from") call -> red
+    # (KeyError from the @migrations fetch, not ArgumentError). Verified
+    # red, reverted.
+    test "an unknown down from: raises before any DDL" do
+      assert_raise ArgumentError, ~r/unknown migration from/, fn ->
+        Migrations.down(for: KxUxid, from: 4)
+      end
+    end
+
+    # sabotage: dropped down/1's from < target guard -> red, nothing raised
+    # and the empty ascending range rolled nothing back, so a migration
+    # whose bounds are the wrong way round would silently leave its DDL in
+    # place. Verified red, reverted.
+    test "a down from: below the target version raises rather than silently doing nothing" do
+      assert_raise ArgumentError, ~r/does not migrate up/, fn ->
+        Migrations.down(for: KxUxid, from: 1, version: 2)
+      end
+    end
+
     # sabotage: dropped up/1's from > target guard -> red, nothing raised
     # and the empty descending range ran no migration at all, which would
     # silently skip DDL a host believes it applied. Verified red, reverted.
     test "a from: above the target version raises rather than silently doing nothing" do
       assert_raise ArgumentError, ~r/does not roll back/, fn ->
         Migrations.up(for: KxUxid, from: 2, version: 1)
+      end
+    end
+
+    # sabotage: moved down/1's `:from` pop below `parse!` -> red, and red on
+    # the spelling the moduledoc documents: `for:` with `from:` raised
+    # `for: cannot be combined with literal options; got [:from]` instead of
+    # reaching the host. Verified red, reverted.
+    test "down from: is a bound, not a literal option, so it combines with for:" do
+      assert_raise ArgumentError, ~r/does not use StatifierPersistence.Ecto/, fn ->
+        Migrations.down(for: Enum, from: 2)
       end
     end
 
