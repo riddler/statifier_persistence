@@ -264,6 +264,29 @@ job has not run yet through the `child_canceller:` seam, which is handed
 the parent run id, the invocation id, and the indices with no run. Both
 kinds read `"cancelled"` at their index in the same list.
 
+A child fails on its own word, with no host in the loop, by settling in a
+**failure-classed final** - a top-level `<final>` whose `<donedata>`
+carries the reserved key `statifier_persistence:run_status` set to
+`"failed"`:
+
+```xml
+<final id="declined">
+  <donedata>
+    <param name="statifier_persistence:run_status" expr="'failed'"/>
+    <param name="reason" expr="decline_reason"/>
+  </donedata>
+</final>
+```
+
+That step is an ordinary successful one; the run record takes `:failed`
+with the `failure` string `"failed_final"`, and the whole `<donedata>` -
+tag included, alongside whatever else the final carries - reaches the
+parent's list verbatim. Macrostep-budget exhaustion is the other route to
+`:failed`, and the `failure` string is what tells the two apart. An
+unhandled `error.*` event is not a route: a chart that cannot continue
+stays `:active` until its author routes the error to a final.
+See `StatifierPersistence.Runs` for the full rule.
+
 An adapter that cannot store a child's answer, or cannot answer the
 status projection, is refused at open - a child whose invocation could
 never be settled is not started. On the Ecto adapter both arrive with the

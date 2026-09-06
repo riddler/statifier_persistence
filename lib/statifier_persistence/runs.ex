@@ -20,6 +20,45 @@ defmodule StatifierPersistence.Runs do
   run is discarded with a typed `{:discarded, run}` result, never an
   exception and never a silent step.
 
+  ## A chart says its own run failed
+
+  Two routes reach `:failed`, and both are the chart's own word rather than
+  the host's - `fail/4` is the host-driven one (ADR-0004 decision 6).
+
+  The first is macrostep-budget exhaustion, which also returns
+  `{:error, {:budget_exhausted, payload}}` after the record is durable.
+
+  The second (ADR-0008's 2026-09-06 amendment) is a **failure-classed
+  final**: a top-level `<final>` whose `<donedata>` carries the reserved
+  key `statifier_persistence:run_status` with the value `"failed"`.
+
+      <final id="ended_badly">
+        <donedata>
+          <param name="statifier_persistence:run_status" expr="'failed'"/>
+        </donedata>
+      </final>
+
+  Settling there is an ordinary successful step - it returns
+  `{:ok, %StatifierPersistence.Run{status: :failed}, machine_state}`, not
+  the budget route's error tuple, because a chart that says it failed has
+  not malfunctioned, it has finished. The run's `failure` string is
+  `"failed_final"`, the same string the
+  `[:statifier_persistence, :run, :terminated]` event reports as `reason`
+  and `StatifierPersistence.Driver` sends a durable parent as
+  `{:failed, reason: ...}`, so a `:first_error` fan-out cancels the failed
+  child's siblings through the cascade ADR-0008 decision 5 already built.
+  The resolved `<donedata>` reaches the parent verbatim, tag included -
+  nothing is stripped.
+
+  The value set is closed at `"failed"`: any other value is ignored and the
+  run takes the status it would have taken with no key at all, so a chart
+  cannot claim a `:completed` it did not reach or a `:cancelled` that is
+  the parent's word. An unhandled `error.communication` or
+  `error.execution` is **not** a route: a chart that raises an error it
+  does not catch stays `:active`, which is a chart bug its author fixes
+  with a transition to a failure-classed final, not a status this package
+  infers on the author's behalf (amendment decision 4).
+
   Executor failures on actionable effects re-enter the chart as
   `error.communication` events through `Statifier.Interpreter.deliver_internal/5`
   (st-ADR-0039's seam), per st-ADR-0051's failed-communication row: the core
@@ -741,6 +780,15 @@ defmodule StatifierPersistence.Runs do
   # chart-driven terminal state (ADR-0004 decision 6), so the repaired
   # status is `:completed`. `position: :skip` carries the stored blob
   # forward untouched - nothing stepped.
+  #
+  # The failure-classed tag is deliberately not consulted here, and cannot
+  # be: ADR-0008's 2026-09-06 amendment reads it on the step that produced
+  # the `{:done, _}` effect, and this path has no such step - it loaded a
+  # position that was already terminal and produced no effects at all. A
+  # record repaired here is `:completed` even if the chart settled in a
+  # failure-classed final. That is a narrow window - it needs a step whose
+  # position write landed while its status write did not - and widening the
+  # tag to a stored position is a later record's business, not this one's.
   @spec repair_terminal(Storage.t(), run_id(), MachineState.t(), entry()) ::
           {:discarded, Run.t()} | {:error, error()}
   defp repair_terminal(store, run_id, machine_state, entry) do
@@ -976,9 +1024,14 @@ defmodule StatifierPersistence.Runs do
     )
   end
 
-  # The stop half's `outcome`, read off exactly what `run_status/2` reads
-  # off - so a span that reports `:done` and a record that persists
-  # `:completed` can never disagree. `:cancelled` is upstream's fourth
+  # The stop half's `outcome`: what the *macrostep* did, read off the same
+  # two facts `run_status/2` reads off, so a span and a record can never
+  # disagree about which of them happened. It deliberately does not carry
+  # `run_status/2`'s third arm: a failure-classed final is still a `:done`
+  # macrostep (ADR-0008's 2026-09-06 amendment, decision 2 - "a chart that
+  # says it failed has not malfunctioned, it has finished"), and the
+  # `status` field beside this one on the same span already carries the
+  # `:failed` the tag produced. `:cancelled` is upstream's fourth
   # value and is unreachable here: this package never calls
   # `Interpreter.cancel/1`, and `cancel/3` is a host decision about the run
   # record that reaches no interpreter at all (ADR-0004 decision 6).
@@ -1047,13 +1100,20 @@ defmodule StatifierPersistence.Runs do
         ) :: {:ok, Run.t(), MachineState.t()} | {:error, error()}
   defp tail_result(run_id, status, identity, lifecycle, machine_state) do
     case budget_effect(lifecycle) do
-      nil -> {:ok, run(run_id, status, identity, done_effect(lifecycle)), machine_state}
-      %BudgetExhausted{} = payload -> {:error, {:budget_exhausted, payload}}
+      nil ->
+        {:ok, run(run_id, status, identity, done_effect(lifecycle), failure_string(lifecycle)),
+         machine_state}
+
+      %BudgetExhausted{} = payload ->
+        {:error, {:budget_exhausted, payload}}
     end
   end
 
-  # `{:done, %Done{donedata: donedata}}` is consumed into `:completed` status
-  # (ADR-0004 decision 6) and, from ADR-0008 decision 3, also surfaced: a
+  # `{:done, %Done{donedata: donedata}}` is consumed into a terminal status
+  # - `:completed`, or `:failed` where the donedata carries the
+  # failure-classed tag `failure_classed_final?/1` reads (ADR-0004 decision
+  # 6 and its 2026-09-06 note) - and, from ADR-0008 decision 3, also
+  # surfaced verbatim, tag included: a
   # durable subchart's parent is answered with its child's donedata, and this
   # is the only moment it exists. It is deliberately not persisted - a
   # position that has reached a final state has no configuration left to
@@ -1285,13 +1345,19 @@ defmodule StatifierPersistence.Runs do
   defp executor_name(executor) when is_atom(executor), do: executor
   defp executor_name(_executor), do: :fun
 
-  # `:done` is the only path to `:completed` (ADR-0004 decision 6);
-  # `:budget_exhausted` - from the primary pass or from a re-entry wave -
-  # is the only chart-driven path to `:failed`.
+  # `:done` is the only path to `:completed` (ADR-0004 decision 6, and its
+  # 2026-09-06 note: one-directional, so a `:done` effect no longer always
+  # completes). Two routes reach `:failed`, and the arm order here is the
+  # whole of the difference between them (ADR-0008's 2026-09-06 amendment,
+  # decision 2): `:budget_exhausted` - from the primary pass or from a
+  # re-entry wave - first, then a failure-classed final, then `:done`. Both
+  # middle conditions hold on the same step, because a failure-classed
+  # final *is* a top-level final, and the tag is the tie-break.
   @spec run_status(MachineState.t(), [Statifier.Effect.t()]) :: Adapter.run_status()
   defp run_status(machine_state, lifecycle_effects) do
     cond do
       budget_exhausted?(lifecycle_effects) -> :failed
+      failure_classed_final?(lifecycle_effects) -> :failed
       machine_state.status == :done -> :completed
       true -> :active
     end
@@ -1301,15 +1367,45 @@ defmodule StatifierPersistence.Runs do
   defp budget_exhausted?(lifecycle_effects),
     do: Enum.any?(lifecycle_effects, &match?({:budget_exhausted, _payload}, &1))
 
+  # ADR-0008's 2026-09-06 amendment decision 1: a chart says its run failed
+  # by settling in a final whose `<donedata>` carries the reserved
+  # package-owned key below with the value `"failed"`. The value set is
+  # closed at that one string - any other value, and any donedata that is
+  # not a map, is ignored, and the run takes the status it would have taken
+  # with no key at all. The colon separator is deliberate: it is not a
+  # predicator identifier character, so the reserved key can be written by
+  # any chart and pathed into by none.
+  #
+  # The key is never stripped. `done_effect/1` hands the resolved
+  # `<donedata>` on verbatim, tag included, because the tag's second reader
+  # is the parent's collect over a failed child (the same posture ADR-0006
+  # decision 1 takes toward metadata).
+  @run_status_key "statifier_persistence:run_status"
+  @failed_run_status "failed"
+
+  @spec failure_classed_final?([Statifier.Effect.t()]) :: boolean()
+  defp failure_classed_final?(lifecycle_effects) do
+    match?(%{@run_status_key => @failed_run_status}, done_effect(lifecycle_effects))
+  end
+
   # The run record's short `failure` string - psql-console readable, not
   # an inspect dump (ADR-0004 decision 1) - and the same string
-  # `[:statifier_persistence, :run, :terminated]` reports as `reason`, so
-  # the event and the row can never disagree.
+  # `[:statifier_persistence, :run, :terminated]` reports as `reason` and
+  # `Driver.maybe_answer_parent/3` sends the parent as `{:failed, reason:
+  # ...}`, so the event, the row and the answer can never disagree.
+  #
+  # Its arms mirror `run_status/2`'s, budget first: a run that exhausted
+  # its macrostep budget and one that reached a failure-classed final are
+  # both `:failed`, and this string is what tells a reader which
+  # (amendment decision 4).
   @spec failure_string([Statifier.Effect.t()]) :: String.t() | nil
   defp failure_string(lifecycle_effects) do
     case budget_effect(lifecycle_effects) do
-      nil -> nil
-      %BudgetExhausted{budget: budget} -> "budget_exhausted: #{budget} rounds"
+      %BudgetExhausted{budget: budget} ->
+        "budget_exhausted: #{budget} rounds"
+
+      nil ->
+        if failure_classed_final?(lifecycle_effects), do: "failed_final"
     end
   end
 
@@ -1361,13 +1457,22 @@ defmodule StatifierPersistence.Runs do
     end
   end
 
-  @spec run(run_id(), Adapter.run_status(), Identity.t(), term()) :: Run.t()
-  defp run(run_id, status, identity, donedata \\ nil) do
+  # `failure` carries the same string `write_run/6` persisted and
+  # `report_termination/5` reported, so the struct a step hands back and
+  # the row it just wrote agree. It matters beyond tidiness:
+  # `StatifierPersistence.Driver`'s automatic answer reads `run.failure`
+  # off exactly this struct to tell a durable parent *why* its child
+  # failed, and before ADR-0008's 2026-09-06 amendment no drive could
+  # produce a `:failed` here at all - budget exhaustion returns an error
+  # tuple instead of a run - so the field had nothing to carry and was
+  # hardcoded `nil`.
+  @spec run(run_id(), Adapter.run_status(), Identity.t(), term(), String.t() | nil) :: Run.t()
+  defp run(run_id, status, identity, donedata \\ nil, failure \\ nil) do
     %Run{
       run_id: run_id,
       status: status,
       content_hash: identity.content_hash,
-      failure: nil,
+      failure: failure,
       donedata: donedata
     }
   end
