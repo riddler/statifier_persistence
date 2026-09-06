@@ -102,7 +102,7 @@ defmodule StatifierPersistence.Runs do
   # implementation of a 27-name contract.
   alias Statifier.Telemetry, as: CoreTelemetry
 
-  alias StatifierPersistence.{Executor, Run, Storage, Telemetry}
+  alias StatifierPersistence.{Driver, Executor, Run, Storage, Telemetry}
   alias StatifierPersistence.Run.Linkage
   alias StatifierPersistence.Serialization.AdapterLock
   alias StatifierPersistence.Storage.Adapter
@@ -416,16 +416,77 @@ defmodule StatifierPersistence.Runs do
   `reason` is the short string stored as the run's `failure` - keep it a
   prefixed, console-readable reason, not an inspect dump.
 
-  `opts` accepts `serialization:` only - the same `{module, config}`
-  strategy `create/4` and `step/5` take, with the same default.
+  `opts` accepts `serialization:` - the same `{module, config}` strategy
+  `create/4` and `step/5` take, with the same default - and `driver:`.
+
+  ## `driver:` and a linked child (ADR-0008's outside-fail note)
+
+  A run failed here is failed from *outside* the interpreter, so nothing in
+  this call steps a chart and nothing in it reaches the parent of a durable
+  subchart child (ADR-0008 decision 2's linkage). Left there, a child a
+  host abandons this way holds its parent's `<invoke>` `:pending` forever:
+  every path that answers a parent hangs off a drive of the child, and an
+  outside fail is the one terminal transition that has no drive.
+
+  `driver:` is that answer. Given a `t:StatifierPersistence.Driver.t/0`,
+  a run that carried linkage and actually reached `:failed` here answers
+  its parent with `{:failed, reason: reason}` - the ADR-0008 spelling, the
+  same payload the automatic path builds from a run's stored `failure` -
+  through `StatifierPersistence.Driver.resolve_and_answer_parent/3`, the
+  same write site the stepped path uses. A fan-out child settles rather
+  than answering, because that routing lives in
+  `StatifierPersistence.Driver.answer_parent/3` and both paths reach it.
+
+  The driver must be able to answer the parent: either its
+  `chart_resolver:` resolves the parent's chart, or its `machine` already
+  *is* the parent's chart. Its `store` is what the answer reads and writes
+  through, so it is normally a driver over this same store.
+
+  Two boundaries this option does not cross. The answer happens **after**
+  this run's own serialization section commits, not inside it - the same
+  order `create/3` and `send_event/4` answer in, and the reason a nested
+  exclusion is never taken here. And the answer's own outcome does not
+  change this function's: a parent that has already cancelled the
+  invocation, or that cannot be resolved, leaves `{:ok, run}` exactly as it
+  is. What that window costs, and what closes it, is
+  `docs/adr/0008-durable-subchart-child-runs.md`'s note.
+
+  Without `driver:` nothing about this call changes, for a linked run or an
+  unlinked one: no linkage is read and no parent is answered.
   """
   @spec fail(store :: Storage.t(), run_id :: run_id(), reason :: String.t(), opts :: keyword()) ::
           {:ok, Run.t()} | {:discarded, Run.t()} | {:error, error()}
   def fail(%Storage{} = store, run_id, reason, opts \\ []) when is_binary(reason) do
-    serialized(store, run_id, :fail, opts, fn ->
-      fail_tail(store, run_id, reason)
-    end)
+    store
+    |> serialized(run_id, :fail, opts, fn -> fail_tail(store, run_id, reason) end)
+    |> answer_parent_of_failed(run_id, reason, opts)
   end
+
+  # The answer is deliberately outside `serialized/5` above: it takes the
+  # *parent's* exclusion, and taking it from inside the child's would nest
+  # two run locks in an order nothing else in this package takes them in.
+  # `create/3` and `send_event/4` answer in this same order - after their
+  # own drive returns - so the outside fail's window is the stepped path's
+  # window and not a new one.
+  @spec answer_parent_of_failed(
+          {:ok, Run.t()} | {:discarded, Run.t()} | {:error, error()},
+          run_id(),
+          String.t(),
+          keyword()
+        ) :: {:ok, Run.t()} | {:discarded, Run.t()} | {:error, error()}
+  defp answer_parent_of_failed({:ok, %Run{status: :failed}} = result, run_id, reason, opts) do
+    case Keyword.get(opts, :driver) do
+      nil ->
+        result
+
+      driver ->
+        Driver.resolve_and_answer_parent(driver, run_id, {:failed, reason: reason})
+
+        result
+    end
+  end
+
+  defp answer_parent_of_failed(result, _run_id, _reason, _opts), do: result
 
   @spec fail_tail(Storage.t(), run_id(), String.t()) ::
           {:ok, Run.t()} | {:discarded, Run.t()} | {:error, error()}
@@ -457,7 +518,9 @@ defmodule StatifierPersistence.Runs do
   discarded with `{:discarded, run}`, which is what makes re-running a
   cascade over an already-cancelled subtree a no-op.
 
-  `opts` accepts `serialization:` only, exactly as `fail/4` does.
+  `opts` accepts `serialization:` only - `fail/4`'s `serialization:`,
+  without its `driver:`: no chart is stepped by a cancel, on either side of
+  a linkage.
   """
   @spec cancel(store :: Storage.t(), run_id :: run_id(), opts :: keyword()) ::
           {:ok, Run.t()} | {:discarded, Run.t()} | {:error, error()}

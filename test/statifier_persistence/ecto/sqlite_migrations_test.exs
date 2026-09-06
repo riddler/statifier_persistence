@@ -28,7 +28,7 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
   alias Statifier.Event
   alias Statifier.Invoke.Types, as: InvokeTypes
   alias Statifier.MachineState
-  alias StatifierPersistence.{Driver, Storage}
+  alias StatifierPersistence.{Driver, Runs, Storage}
   alias StatifierPersistence.Ecto.Migrations
   alias StatifierPersistence.Run.Linkage
   alias StatifierPersistence.SqliteTestRepo
@@ -320,6 +320,56 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
     # reverted.
     test "run outcome support is still declared: outcome_blob exists here" do
       assert Storage.run_outcome_supported?(sqlite_store())
+    end
+  end
+
+  # sp-y7n / RQ-SF035-9, the SQLite half of the pair whose Postgres half is
+  # `StatifierPersistence.DriverSubchartEctoTest`. It asserts something
+  # different from that half, because this backend can hold no linkage at
+  # all: ADR-0008 decision 2 puts a child's parent in run `metadata`, and
+  # `Storage.Ecto` declares metadata support only on Postgres, so the
+  # refusal that stops a fan-out at open stops a single durable subchart
+  # child at open too. What `driver:` therefore has to be here is inert -
+  # an outside fail behaves exactly as it did before the option existed.
+  describe "an outside fail on this adapter" do
+    # `serialization:` is the host's here for the same reason the rest of
+    # this module's driving is: `AdapterLock` issues
+    # `pg_advisory_xact_lock`, which this backend has no function for.
+    #
+    # sabotage: replaced `Driver.resolve_and_answer_parent/3`'s whole
+    # `case` with a bare `{:ok, linkage} = parent_link(...)` match -> red,
+    # this case and its in-memory sibling in `DriverSubchartTest`, with
+    # `** (MatchError) no match of right hand side value: :no_parent`. The
+    # read reaches `:no_parent` rather than the metadata refusal: the row
+    # is fetched fine, it simply carries no metadata on this backend.
+    # Verified red, reverted.
+    test "no linkage can be stored here, so a fail with driver: answers nobody" do
+      store = sqlite_store()
+      driver = start_parent(store, "run_sqlite_fail_parent")
+
+      {:ok, machine} = Statifier.compile(@child_source)
+      machine_state = MachineState.new(machine, session_id: "sess_sqlite_fail")
+
+      linkage = Linkage.new("run_sqlite_fail_parent", "call", 0, "sha256:whatever")
+
+      assert {:error, :metadata_unsupported} =
+               Storage.insert_run(store, "run_sqlite_fail_child", machine_state, :active,
+                 metadata: Linkage.to_metadata(linkage)
+               )
+
+      :ok = Storage.insert_run(store, "run_sqlite_fail_child", machine_state, :active)
+
+      assert {:ok, run} =
+               Runs.fail(store, "run_sqlite_fail_child", "boom",
+                 driver: driver,
+                 serialization: {PassThroughSerialization, nil}
+               )
+
+      assert run.status == :failed
+      assert run.failure == "boom"
+
+      assert {:ok, parent_record} = Storage.fetch_run(store, "run_sqlite_fail_parent")
+      assert parent_record.status == :active
     end
   end
 

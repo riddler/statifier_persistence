@@ -644,3 +644,111 @@ not be read as saying is that the declared floor guarantees it: a host
 that pins `statifier` lower within the declared range checks that itself.
 
 Nothing else in the amendment or in this record moves.
+
+## Note (2026-09-06, sp-y7n): decision 3's answer reaches an outside fail too, through `Runs.fail/4`'s `driver:`
+
+Decision 3 says a child answers its parent when it finishes, and every path
+that does so hangs off a *drive of the child*: the automatic one runs after
+`create/3`, `send_event/4` and `reenter/5` return, and the explicit one is
+`Driver.answer_parent/3`, which a host calls when it has just driven the
+child itself. `Runs.fail/4` is neither. It is ADR-0004 decision 6's
+host-driven terminal transition - the host deciding *about* the run rather
+than the chart deciding - so no interpreter runs, no drive returns, and
+nothing looked at the child's linkage at all.
+
+For an ordinary run that is exactly right. For a linked child it left the
+parent's `<invoke>` `:pending` with nothing that would ever answer it, and
+0.7.2's settlement made that permanent: an invocation now waits for every
+child's recorded answer, and a child failed this way records none. This
+note states the seam and what closes it, per the operator's campaign-SF035
+ruling `RQ-SF035-9`. No decision above is edited.
+
+**What was added.** `Runs.fail/4`'s `opts` gains `driver:`. Given one, a
+run that carried linkage and actually reached `:failed` answers its parent
+`{:failed, reason: reason}` - decision 3's spelling, the same payload the
+automatic path builds from a run's stored `failure`. The alternative shape,
+a `fail` door on `Driver` wrapping `Runs.fail/4`, was rejected for one
+reason: it leaves the documented status-writing door still silently
+orphaning parents, and a host that is already calling it would have no
+signal to move. The option puts the fix where the defect is.
+
+The answer itself is not new machinery. It goes through
+`Driver.resolve_and_answer_parent/3`, the *only* new public function here
+and one the mechanism forces: what the automatic path does is resolve the
+parent's chart through `chart_resolver:` and then call
+`Driver.answer_parent/3` with a driver over that chart, and a caller with
+no drive to hang that off needs those two steps under one name. The
+automatic path now calls it too, so there is one such site rather than two.
+A driver with no `chart_resolver:` answers through `answer_parent/3`
+directly, on its own `machine` - that function's existing contract, where
+the host built the driver over the parent's chart. Nothing returns a wider
+type than it did, and no callback was added to the storage-adapter
+behaviour.
+
+Because the answer goes through `answer_parent/3`, a fan-out child settles
+rather than answering: the routing decision decision 3's amendment put in
+that function serves both paths, and an outside fail on one child of N does
+not complete the invocation.
+
+**Where the exclusions sit.** The adapter behaviour has `lock_run/3` and no
+general transaction callback, so "in the same transaction" is not something
+this package can ask an adapter for. What it can do is take the two
+exclusions in the order everything else here takes them: the child's status
+write commits inside `Runs.fail/4`'s own serialization section, and the
+parent's answer opens its own afterwards, sequentially. That is precisely
+what `create/3` and `send_event/4` already do - they answer after their
+drive returns - and it is why the answer is deliberately *outside* the
+child's section: taking the parent's lock from inside the child's would
+nest two run locks in an order nothing else in this package nests them in.
+Decision 5 does not speak to lock order - it is explicit that a cascade is
+idempotent and resumable rather than atomic, without cross-run locking - so
+what the sequential shape keeps is not a rule stated there but the audited
+one: every nested exclusion in this package is taken on a strict descendant
+of the one already held (`sp-oq4`).
+
+**The window this does not close.** Two writes in sequence have a gap
+between them. A node that dies after the child's `:failed` commits and
+before the parent is answered leaves exactly the state this note is about -
+a settled child and a pending parent - and nothing in `Runs.fail/4`
+retries. That is not a new window: it is the same one the stepped path has
+carried since decision 3, because the automatic answer is a second write
+after the child's own drive committed. Naming it is all this note does. The
+thing that would close it is a recorded intent - the child's terminal write
+persisting *that its parent is owed an answer*, and a sweeper resolving
+what it finds - and that is a design with a cost (a second write on every
+child's completion, or a scan) which no bead has yet paid for. A host that
+needs the guarantee today gets it the same way it gets any at-least-once
+guarantee: re-drive the fail. It is idempotent by construction - the second
+call finds a terminal run and is `{:discarded, run}`, which answers nobody,
+so a host whose crash happened *before* the answer re-drives it by calling
+`Driver.answer_parent/3` (or `resolve_and_answer_parent/3`) on the child
+directly, which a settled or cancelled invocation discards.
+
+**What "on both backends" turned out to mean.** The conformance pair is
+`DriverSubchartEctoTest` on real Postgres and `Ecto.SqliteMigrationsTest`
+on SQLite, not a case in
+`StatifierPersistence.Testing.StorageConformance`: that suite generates
+adapter-level cases that go through `Storage` and the adapter callbacks,
+and this behaviour is the driver's, over a chart. The two halves assert
+different things, and the difference is a finding worth recording.
+Linkage is run `metadata` (decision 2), `Storage.Ecto` declares metadata
+support on Postgres only, and `insert_run/5` refuses metadata an adapter
+does not support - so **a durable subchart child cannot be stored on SQLite
+at all**. It is the same root cause that stops a fan-out at open, the
+metadata conjunct inside `Storage.child_listing_supported?/1`, reached by
+two doors and answered with two different refusals:
+`{:error, :metadata_unsupported}` from the child's own insert, and
+`{:refused, :child_listing_unsupported}` from `start_child_at/6`.
+The SQLite case
+therefore asserts what `driver:` has to be there: inert. An outside fail
+reads `:no_parent`, answers nobody, and behaves exactly as it did before
+the option existed. Whether decision 2's linkage should have a non-metadata
+home for such a backend is a question this note opens and does not answer.
+
+**Accepted 2026-09-06 (campaign-SF035, `sp-y7n`), and implemented.** In the
+posture the sp-n8g amendment above records, inverted: that section carried
+no `lib/` change and waited for one, and this one ships with its own. The
+`driver:` option, `resolve_and_answer_parent/3` and both halves of the
+conformance pair land in the same pull request as this section, so there is
+no window in which the note describes something that is not on `main` - and
+that is what lets the acceptance be recorded here rather than separately.
