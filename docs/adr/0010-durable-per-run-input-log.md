@@ -60,10 +60,11 @@ Facts about this package that bound the answer:
   transitions that involve no interpreter at all (ADR-0009 decision 3).
 - **The package already stores host-opaque terms as blobs.** `outcome_blob`
   is `:erlang.term_to_binary/1` of a `donedata` payload, encoded above the
-  adapter (`driver.ex`'s `encode_outcome/1`). ADR-0003 decision 1 says an
-  adapter stores binaries, engine identity strings and one opaque map, and
-  nothing else; the encode-above-the-adapter shape is how a term reaches
-  storage without widening that.
+  adapter (`driver.ex`'s `encode_outcome/1`). ADR-0003 decision 1 says every data-bearing
+  callback takes and returns binaries plus engine identity strings, and its
+  2026-08-29 amendment admits one optional opaque metadata map beside them;
+  the encode-above-the-adapter shape is how a term reaches storage without
+  widening either.
 - **`:blob_type` reaches exactly three columns** - `identity_blob`,
   `chart_blob`, `position_blob` - and deliberately does not reach the
   `metadata` map, which ADR-0006 decision 2 therefore restricts to host
@@ -379,8 +380,9 @@ changing anything decided above.
 `StatifierPersistence.Storage.Ecto` exports all three callbacks and answers
 `true`. The table is a fourth key in `t:StatifierPersistence.Ecto.KeyGenerator.table/0`
 (`:charts | :positions | :runs` today), named through `Config.table/2`'s prefix and `:tables` override like
-every other table (ADR-0002 decision 1) - no table name is hard-coded and
-none is a surrogate this layer invents.
+every other table (ADR-0002 decision 4, whose per-table override map is the
+escape hatch) - no table name is hard-coded and none is a surrogate this
+layer invents.
 
 It ships as **V05** - `ecto/migrations/v05.ex`, beside `v01..v04`, reached by
 the existing `up(for: ..., from: 5)` / `down(for: ..., version: 5)` spelling
@@ -422,8 +424,9 @@ logs never see each other's entries.
   the host's own values, and now it is at rest. Decision 4 puts it inside
   `:blob_type` and decision 6 lets a host bound how much of it accumulates,
   but the honest summary is that turning this log on is a data-retention
-  decision a host makes, not a debugging switch it flips. `docs/persistence.md`
-  and the adapter's moduledoc say so where a host will read it.
+  decision a host makes, not a debugging switch it flips. the adapter's moduledoc
+  and this package's README say so where a host will read it, which is
+  `sp-80g`'s to write.
 - A log costs one insert per step on the hottest path in the package, inside
   the exclusion. It is the only per-step write that grows without bound in
   the run's lifetime, which is what decision 6's cap is for.
