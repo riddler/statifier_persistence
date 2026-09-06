@@ -42,6 +42,31 @@ defmodule StatifierPersistence.Testing.StorageConformance do
   concurrent bodies, release after a raising fun); when it does not, they
   are not generated at all - exporting the callback is what opts an
   adapter into its contract.
+
+  Opting out by not exporting is the whole story for an adapter written
+  from scratch. It is not the whole story for
+  `StatifierPersistence.Storage.Ecto`, which exports `lock_run/3`,
+  `list_runs_by_metadata/2` and `list_run_states_by_metadata/2` for every
+  Ecto backend but implements all three in Postgres-only SQL
+  (`pg_advisory_xact_lock` plus `FOR UPDATE`; `jsonb` containment). Point
+  that adapter at a backend that is not Postgres and the four cases those
+  three callbacks generate are generated and fail on SQL the backend does
+  not parse.
+
+  So those four carry `@tag :postgres`, and such a host excludes them by
+  tag rather than forking the suite:
+
+      mix test --exclude postgres
+
+  Nothing else in the suite is tagged: every remaining case runs, and a
+  green run with four excluded is the honest report of what that backend
+  supports. It is honest only alongside actually declining what the tag
+  excludes - `serialization:` pointed at the host's own strategy rather
+  than the adapter's `lock_run/3`, and no reliance on the child listings.
+  Excluding the tag while still routing serialization through a lock the
+  backend cannot honor hides a failure instead of opting out of a
+  contract. `docs/non-postgres-backends.md` in this package is the guide:
+  what declining costs, and how to verify.
   """
 
   use ExUnit.CaseTemplate
@@ -414,6 +439,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # red, the nested-match assertion below found no runs instead of
         # the one whose nested map contains the given pair. Verified red on
         # the InMemory conformance suite, reverted.
+        @tag :postgres
         test "adapter: list_runs_by_metadata/2 matches a nested map by containment and excludes the rest",
              %{store: store} do
           linked = %{
@@ -524,6 +550,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # the InMemory conformance suite, reverted. Also verified on the
         # Ecto side: replace the child_index fragment with NULL::text ->
         # red the same way.
+        @tag :postgres
         test "adapter: list_run_states_by_metadata/2 projects id, status and index without blobs",
              %{store: store} do
           child = fn index, status ->
@@ -694,6 +721,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # breaks the paired pattern. Verified red (together with
         # RunsTest's concurrent-step test under this one mutation),
         # reverted.
+        @tag :postgres
         test "adapter: lock_run/3 never overlaps two bodies for one run_id", %{store: store} do
           {:ok, events} = Agent.start_link(fn -> [] end)
 
@@ -725,6 +753,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # {:ok, fun.()}) -> red, the raise leaks the lock and the
         # reacquisition below times out (Task.yield returns nil). Verified
         # red, reverted.
+        @tag :postgres
         test "adapter: lock_run/3 releases the lock after a raising fun", %{store: store} do
           assert_raise RuntimeError, "lock body boom", fn ->
             @conformance_adapter.lock_run(store.opts, "run-conformance-lock-raise", fn ->

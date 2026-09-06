@@ -50,7 +50,8 @@ defmodule StatifierPersistence.MixProject do
       extras: [
         "README.md",
         "CHANGELOG.md",
-        "docs/restart-demo.md"
+        "docs/restart-demo.md",
+        "docs/non-postgres-backends.md"
       ],
       groups_for_extras: [
         Guides: ~r{docs/}

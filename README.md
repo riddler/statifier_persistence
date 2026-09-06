@@ -168,7 +168,7 @@ state
 | Module | Role |
 |---|---|
 | `StatifierPersistence.Storage` | The identity-guarded facade: charts, positions, run records. Every load is guarded; there is no unguarded path |
-| `StatifierPersistence.Storage.Adapter` | The behaviour a backing store implements. `Storage.InMemory` is the reference one, `Storage.Ecto` the Postgres one |
+| `StatifierPersistence.Storage.Adapter` | The behaviour a backing store implements. `Storage.InMemory` is the reference one, `Storage.Ecto` the Postgres one (on [another backend](docs/non-postgres-backends.md), minus the lock and the listings) |
 | `StatifierPersistence.Runs` | The lifecycle: `create/4`, `step/5`, `fail/4`, in ADR-0004's fixed order |
 | `StatifierPersistence.Driver` | Run-to-quiescence over `Runs`: performs the chart's `<invoke>` calls and steps each answer back in |
 | `StatifierPersistence.Executor` | The seam every effect crosses on its way to your host |
@@ -341,6 +341,34 @@ identities verbatim, and implements the optional per-run `lock_run/3`
 as a transaction-scoped advisory-plus-row lock (ADR-0004 as amended).
 In your test suite, pass `sandbox: true` so each test runs in its own
 `Ecto.Adapters.SQL.Sandbox` checkout via the adapter's `isolate/1`.
+
+### Running on a backend that is not Postgres
+
+The adapter is written against Postgres and this package's gate runs
+against a real Postgres server, but only three of its callbacks are
+actually Postgres SQL: `lock_run/3` (advisory lock plus `FOR UPDATE`) and
+the two metadata listings (`jsonb` containment). Everything else - charts,
+positions, run records, the identity guard, the executor seam, resume,
+and the versioned migrations, V03's Postgres-only index included - runs
+on any Ecto backend.
+
+A host on SQLite or another backend therefore **declines the lock
+callback** rather than getting a portable imitation of it: pass your own
+`serialization: {module, config}` strategy, backed by an exclusion the
+host already owns (a job queue keyed per run id, a single consumer) or by
+a pass-through when the deployment is single-writer by construction. What
+you must not do is leave the default in place, which reaches the
+Postgres-only `lock_run/3` and raises mid-run.
+
+The four conformance cases those three callbacks generate carry
+`@tag :postgres`, so such a host runs the shipped suite green and honest:
+
+    mix test --exclude postgres   #=> 31 tests, 0 failures, 4 excluded
+
+[Running on a backend that is not Postgres](docs/non-postgres-backends.md)
+is the full guide: what is Postgres-only and why, how to write the
+strategy, what declining costs (durable subcharts and the run listings
+refuse rather than break), and how to verify your own setup.
 
 ### Upgrading to V03 before deploying 0.7.0
 
