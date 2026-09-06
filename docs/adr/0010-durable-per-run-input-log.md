@@ -1,7 +1,8 @@
 # ADR-0010: The durable per-run input log: two optional adapter callbacks, a verbatim event stamped with its door and its ordinal, a host-declared cap, one log per run
 
-Status: proposed (2026-09-06, sp-o1b, campaign-034 ruling RQ-034-3; the
-implementing bead is sp-80g and the flip to accepted is sp-t12)
+Status: accepted (2026-09-06, sp-t12; proposed the same day as sp-o1b under
+campaign-034 ruling RQ-034-3, flipped once sp-80g landed - the Note below
+names the merge and the four places the code diverged from this text)
 
 ## Context
 
@@ -85,6 +86,18 @@ implementation on Postgres and SQLite, the write at every door, the cap and
 the conformance cases - is `sp-80g`, and this record is the specification it
 is written against.
 
+**Note (2026-09-06, `sp-t12`):** `sp-80g` has landed - `27a7a15` on `main`,
+PR 76 - and this record is accepted as of that merge. Every claim above and
+below was re-read against `main` at `27a7a15` before the flip, and it holds
+as written except in four places, each of which carries its own dated Note
+where it stands rather than being edited into the text: the public
+capability predicate's spelling (decision 1), the column count
+`input_blob` joins (decision 4), where in the step the append actually
+happens (decision 5), and two shapes the record left to the implementer
+that are worth naming now they exist (decision 9). None of the four changes
+what was decided; they record what the decided thing is called and where it
+sits.
+
 ## Decision
 
 ### 1. The input log is a storage-adapter seam in this package, optional by export
@@ -113,6 +126,19 @@ and refusing to run a chart because the log cannot be kept would let a
 diagnostic facility break the run it is diagnosing. A host that needs to know
 asks `StatifierPersistence.Storage.supports_input_log?/1`, which is public
 for that purpose.
+
+**Note (2026-09-06, `sp-t12`):** that public predicate shipped as
+`StatifierPersistence.Storage.input_log_supported?/1`, not
+`supports_input_log?/1`. The shape this paragraph holds up as the model has
+two sides, and `supports_metadata?/1` is only the adapter's: the facade
+side of it is `Storage.metadata_supported?/1`, the passive spelling
+`storage.ex` already uses for the question a host asks. `sp-80g` matched
+both sides rather than putting a second facade spelling one function away
+from the first. The
+*callback* keeps this record's name: an adapter still opts in by exporting
+`c:StatifierPersistence.Storage.Adapter.supports_input_log?/1` and
+answering `true`. Everything decided here - public, checked with
+`function_exported?/3`, refusing at no door - is what shipped.
 
 ### 2. Two callbacks and one capability question, named
 
@@ -225,6 +251,16 @@ change this record makes to encryption. `run_id`, `seq` and `door` are
 identity and lookup columns and never reach it, which is the same line
 `ecto.ex` already draws.
 
+**Note (2026-09-06, `sp-t12`):** the count above is wrong, and so is the
+Context bullet it was taken from. `:blob_type` already reached *four*
+columns when this record was written - `ecto.ex`'s `@blob_columns` carried
+`outcome_blob` beside `identity_blob`, `chart_blob` and `position_blob`
+before ADR-0010 - so `input_blob` is the fifth entry, not the fourth, and
+the Context's "reaches exactly three columns" is short by one for the same
+reason. Nothing decided here moves: `input_blob` is a `:blob_type` column
+and `run_id`, `seq` and `door` are not, which is what `sp-80g` shipped.
+ADR-0006's own list is corrected under `sp-a4x`, not here.
+
 A host that cannot encrypt at rest and cannot accept plaintext payloads has
 the decision-1 answer available to it: an adapter that does not export
 `supports_input_log?/1` keeps no log at all.
@@ -255,6 +291,17 @@ single point where a resolved event is about to reach the interpreter -
 never in `Driver`, which has no exclusion of its own. That is what makes the
 log's order the run's order, and what makes `seq` assignment safe: the run's
 exclusion is already held.
+
+**Note (2026-09-06, `sp-t12`):** "about to reach the interpreter" is the
+wrong side of the call, and `sp-80g` put the append on the right one: it
+runs in `runs.ex`'s `stepped/6`, in the `{:ok, stepped_state, effects}`
+branch of `Interpreter.handle_event/2`, so an event the interpreter
+refused with `{:error, :not_running}` is never logged. That is the
+paragraph below - "only inputs the interpreter saw" - and the two
+sentences cannot both be satisfied on the same side of the call. Everything
+the paragraph above is actually about holds unchanged: one write site,
+inside the serialized unit, never in `Driver`, with the exclusion held when
+the adapter assigns `seq`.
 
 **Only inputs the interpreter saw are appended.** A delivery discarded before
 the interpreter - a terminal run, an invocation the chart has since cancelled
@@ -410,6 +457,21 @@ admits `n - 1` inputs and then a closed marker, and every later append is
 `{:error, :input_log_full}` with the run still steppable; and two runs'
 logs never see each other's entries.
 
+**Note (2026-09-06, `sp-t12`):** two shapes this section left open have
+answers now, and neither reopens the decision. First, the lost race: this
+section says only that the unique index fails the write, and `sp-80g`
+spelled that failure `{:adapter, :seq_conflict}`, the adapter-error arm
+`Storage.Ecto` returns off the V05 `(run_id, seq)` constraint. Second,
+"both backends, on the same conformance suite" is true of the cases and
+not of the module: `StatifierPersistence.Testing.StorageConformance` gained
+them and Postgres runs them through it, while the SQLite backend - which
+runs no `StorageConformance` module in this repository, before ADR-0010 or
+after - carries the same cases mirrored in
+`test/statifier_persistence/ecto/sqlite_migrations_test.exs`, where every
+other SQLite case already lives. SQLite is still not a lesser tier: append
+and list, denseness from zero, run isolation, the cap and its marker, and
+the verbatim event round-trip are all asserted against it.
+
 ## Consequences
 
 - A persisted run becomes replayable for the first time. That is `sp-2sg`'s
@@ -427,6 +489,14 @@ logs never see each other's entries.
   decision a host makes, not a debugging switch it flips. the adapter's moduledoc
   and this package's README say so where a host will read it, which is
   `sp-80g`'s to write.
+
+  **Note (2026-09-06, `sp-t12`):** two small things about that bullet. Its
+  third sentence starts lowercase - read it as "The adapter's moduledoc";
+  a word is a word, so it is corrected here rather than edited in place. And
+  it is written: `sp-80g` put the retention paragraph under its own heading
+  in `Storage.Adapter`'s moduledoc ("The input log is a data-retention
+  decision, not a debugging switch") and in the README, both on `main` at
+  `27a7a15`.
 - A log costs one insert per step on the hottest path in the package, inside
   the exclusion. It is the only per-step write that grows without bound in
   the run's lifetime, which is what decision 6's cap is for.
