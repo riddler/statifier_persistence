@@ -16,6 +16,15 @@ defmodule StatifierPersistence.RunsTest do
     end
   end
 
+  # A module capture rather than an anonymous fun: :telemetry logs a
+  # performance warning for a local handler, which is noise in the suite
+  # output (the same shape `telemetry_test.exs` uses).
+  @spec forward_terminated([atom()], map(), map(), %{pid: pid()}) :: :ok
+  def forward_terminated(_name, _measurements, metadata, %{pid: pid}) do
+    send(pid, {:terminated, metadata})
+    :ok
+  end
+
   alias Statifier.Effect.{BudgetExhausted, Log, SendDelayed}
   alias Statifier.Event
   alias Statifier.Invoke.Types, as: InvokeTypes
@@ -77,6 +86,35 @@ defmodule StatifierPersistence.RunsTest do
       </state>
       <final id="done">
           <donedata><content expr="undeclared_var"/></donedata>
+      </final>
+  </scxml>
+  """
+
+  # ADR-0008's 2026-09-06 amendment: "ok" reaches an ordinary final,
+  # "bad" reaches one tagged failure-classed in its own <donedata>, and
+  # "shrug" reaches one carrying the reserved key with a value outside the
+  # closed set. One chart, so the three arms of run_status/2 are exercised
+  # over the same compile.
+  @failure_classed_final_source """
+  <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="a">
+      <state id="a">
+          <transition event="ok" target="finished_well"/>
+          <transition event="bad" target="ended_badly"/>
+          <transition event="shrug" target="ended_vaguely"/>
+      </state>
+      <final id="finished_well">
+          <donedata><param name="detail" expr="'all good'"/></donedata>
+      </final>
+      <final id="ended_badly">
+          <donedata>
+              <param name="statifier_persistence:run_status" expr="'failed'"/>
+              <param name="detail" expr="'declined'"/>
+          </donedata>
+      </final>
+      <final id="ended_vaguely">
+          <donedata>
+              <param name="statifier_persistence:run_status" expr="'cancelled'"/>
+          </donedata>
       </final>
   </scxml>
   """
@@ -669,6 +707,130 @@ defmodule StatifierPersistence.RunsTest do
 
       assert {:error, :run_position_missing} =
                Storage.load_run_position(store, "run-1", machine)
+    end
+  end
+
+  describe "failure-classed final (ADR-0008's 2026-09-06 amendment)" do
+    # sabotage: drop run_status/2's failure_classed_final?/1 arm -> red,
+    # the run completed. Verified red, reverted.
+    test "the tagged final fails the run on an ordinary successful step", %{store: store} do
+      machine = compile!(@failure_classed_final_source)
+      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+
+      assert {:ok, %Run{status: :failed, failure: "failed_final"} = run,
+              %MachineState{status: :done}} =
+               Runs.step(store, "run-1", machine, Event.external("bad"),
+                 executor: RecordingExecutor
+               )
+
+      # Verbatim, tag included: the parent's collect over a failed child
+      # reads the tag off the answer it is given.
+      assert run.donedata == %{
+               "statifier_persistence:run_status" => "failed",
+               "detail" => "declined"
+             }
+
+      assert {:ok, %{status: :failed, failure: "failed_final"}} =
+               Storage.fetch_run(store, "run-1")
+    end
+
+    # The other side of the closed set: a final that carries <donedata>
+    # but not the tag is exactly as completed as one that carries none.
+    #
+    # sabotage: failure_classed_final?/1 reads is_map/1 rather than the
+    # key and the value -> red, this run failed on an untagged final.
+    # Verified red, reverted.
+    test "an untagged final still completes the run", %{store: store} do
+      machine = compile!(@failure_classed_final_source)
+      {:ok, _run, _ms} = Runs.create(store, "run-2", machine, executor: RecordingExecutor)
+
+      assert {:ok, %Run{status: :completed, failure: nil, donedata: %{"detail" => "all good"}},
+              %MachineState{status: :done}} =
+               Runs.step(store, "run-2", machine, Event.external("ok"),
+                 executor: RecordingExecutor
+               )
+
+      assert {:ok, %{status: :completed, failure: nil}} = Storage.fetch_run(store, "run-2")
+    end
+
+    # The value set is closed at "failed": a chart cannot claim a
+    # :cancelled that is the parent's word, and the key with any other
+    # value leaves the run exactly where it would have been with no key.
+    #
+    # sabotage: failure_classed_final?/1 matches the key alone
+    # (`%{@run_status_key => _any}`) -> red, "cancelled" failed the run.
+    # Verified red, reverted.
+    test "the reserved key with any other value is ignored", %{store: store} do
+      machine = compile!(@failure_classed_final_source)
+      {:ok, _run, _ms} = Runs.create(store, "run-3", machine, executor: RecordingExecutor)
+
+      assert {:ok, %Run{status: :completed, failure: nil} = run, %MachineState{status: :done}} =
+               Runs.step(store, "run-3", machine, Event.external("shrug"),
+                 executor: RecordingExecutor
+               )
+
+      # Ignored, not stripped - this package does not edit chart-authored
+      # data on its way past.
+      assert run.donedata == %{"statifier_persistence:run_status" => "cancelled"}
+      assert {:ok, %{status: :completed, failure: nil}} = Storage.fetch_run(store, "run-3")
+    end
+
+    # The `[..., :run, :terminated]` event and the row can never disagree
+    # (`reason` is the same failure_string/1).
+    #
+    # Amendment decision 4, the half the operator ruled explicitly: an
+    # unhandled error.* is not a route to :failed. Whether a chart that
+    # cannot continue has *failed* is the author's judgement, stated by
+    # transitioning to a failure-classed final, not something the stepper
+    # infers from an event nobody handled. @send_chart_source's "b" has no
+    # error.communication transition, so the re-entry lands nowhere.
+    #
+    # sabotage: persist_tail/6 takes :failed whenever the step collected
+    # an executor failure (crash-as-failed, the shape the record refuses)
+    # -> red here and on four sibling re-entry cases. Verified red,
+    # reverted.
+    test "an unhandled error.communication leaves the run active", %{store: store} do
+      machine = compile!(@send_chart_source)
+      executor = failing_executor([:send])
+
+      {:ok, _run, _ms} = Runs.create(store, "run-5", machine, executor: executor)
+
+      assert {:ok, %Run{status: :active, failure: nil}, stepped} =
+               Runs.step(store, "run-5", machine, Event.external("go"),
+                 executor: executor,
+                 routes: Routes.new(parent?: true)
+               )
+
+      assert active_ids(stepped) == ["b"]
+      assert {:ok, %{status: :active, failure: nil}} = Storage.fetch_run(store, "run-5")
+    end
+
+    # sabotage: failure_string/1's failure-classed arm returns nil -> red
+    # here and on the two record assertions above, which is the point:
+    # one string feeds the event, the row and the parent's answer.
+    # Verified red, reverted.
+    test "reports the terminated event with the same reason string", %{store: store} do
+      machine = compile!(@failure_classed_final_source)
+      {:ok, _run, _ms} = Runs.create(store, "run-4", machine, executor: RecordingExecutor)
+
+      handler_id = "sp-hia-#{System.unique_integer([:positive])}"
+
+      :ok =
+        :telemetry.attach(
+          handler_id,
+          [:statifier_persistence, :run, :terminated],
+          &__MODULE__.forward_terminated/4,
+          %{pid: self()}
+        )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      assert {:ok, %Run{status: :failed}, _ms} =
+               Runs.step(store, "run-4", machine, Event.external("bad"),
+                 executor: RecordingExecutor
+               )
+
+      assert_received {:terminated, %{status: :failed, reason: "failed_final", driven_by: :chart}}
     end
   end
 

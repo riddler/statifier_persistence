@@ -44,14 +44,28 @@ defmodule StatifierPersistence.DriverFanoutTest do
   # A child that completes on "go" with the item it was seeded with as
   # its donedata: the fan-out's assembled list has to be a function of the
   # index, so each child has to answer something different.
+  #
+  # On "refuse" it instead reaches a failure-classed final - a <final>
+  # whose <donedata> carries the reserved `statifier_persistence:run_status`
+  # key set to "failed" (ADR-0008's 2026-09-06 amendment). That is the
+  # chart saying *this one finished badly* in its own words, with no host
+  # translation: the child's own drive takes the run to :failed, and the
+  # automatic answer carries it into the settlement.
   @child_source """
   <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="idle">
       <datamodel><data id="item"/></datamodel>
       <state id="idle">
           <transition event="go" target="done"/>
+          <transition event="refuse" target="refused"/>
       </state>
       <final id="done">
           <donedata><content expr="item"/></donedata>
+      </final>
+      <final id="refused">
+          <donedata>
+              <param name="statifier_persistence:run_status" expr="'failed'"/>
+              <param name="item" expr="item"/>
+          </donedata>
       </final>
   </scxml>
   """
@@ -405,6 +419,40 @@ defmodule StatifierPersistence.DriverFanoutTest do
       assert record.status == :cancelled
     end
 
+    # The seam ADR-0008's 2026-09-06 amendment closes, end to end: no
+    # Runs.fail/4, no Driver.answer_parent/3, no host in the loop at all.
+    # The child's own drive reads the tag off its final's <donedata>,
+    # persists :failed with "failed_final", and the driver's automatic
+    # path answers the parent - which is what makes first_error fire.
+    # Campaign 031's fan-out proof had to translate this host-side; that
+    # translation is what this case makes unnecessary.
+    #
+    # sabotage: in Runs.run_status/2, drop the failure_classed_final?/1
+    # arm -> red, child 1 completed, the settlement waited for child 2,
+    # and the parent stayed in "calling". Verified red, reverted.
+    test "a chart-authored failure cancels a live sibling with no host translation",
+         %{store: store} do
+      parent = start_parent(store)
+      start_children(parent, 3, policy: :first_error)
+
+      finish_child(store, 0)
+      assert leaves(reload_parent(store)) == ["calling"]
+
+      refuse_child(store, 1)
+
+      assert leaves(reload_parent(store)) == ["approved"]
+
+      assert [first, second, third] = answered(store)
+      assert first == %{"index" => 0, "status" => "completed", "donedata" => "item-0"}
+      assert second["status"] == "failed"
+      assert second["failure"]["reason"] == "failed_final"
+      assert third == %{"index" => 2, "status" => "cancelled"}
+
+      assert {:ok, record} = Storage.fetch_run(store, Linkage.child_run_id("run_1", "call", 1))
+      assert record.status == :failed
+      assert record.failure == "failed_final"
+    end
+
     # sabotage: in Driver.unstarted_indices/2, build the started set from
     # 0..child_count - 1 rather than from the projection -> red, the
     # canceller was handed [] and this assert_received timed out. Verified
@@ -561,6 +609,18 @@ defmodule StatifierPersistence.DriverFanoutTest do
              Driver.send_event(resolverless, child_run_id, Event.external("go"))
 
     assert run.status == :completed
+
+    :ok
+  end
+
+  # Drives child `index` to its failure-classed final. Deliberately the
+  # same shape as `finish_child/3` and nothing more: the whole point of
+  # the amendment is that a chart-authored failure needs no second call.
+  defp refuse_child(store, index, opts \\ []) do
+    child_run_id = Linkage.child_run_id("run_1", "call", index)
+
+    assert {:ok, %{status: :failed, failure: "failed_final"}, _machine_state} =
+             Driver.send_event(child_driver(store, opts), child_run_id, Event.external("refuse"))
 
     :ok
   end
