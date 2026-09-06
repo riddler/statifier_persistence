@@ -717,17 +717,16 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
   end
 
   describe "the version this package expects" do
-    # sabotage: pointed expected_version/0 at @initial_version -> red at
-    # the first assertion (left 1, right 5), this case and its SQLite twin
-    # alone ("45 tests, 2 failures"). Verified red, reverted.
+    # This case moves with the map because @current_version is derived from
+    # it: a V06 entry moves expected_version/0 to 6 and this literal red,
+    # which is the whole point of asserting the number rather than the
+    # derivation.
+    #
+    # sabotage: pointed expected_version/0 at @initial_version -> red (left
+    # 1, right 5), this case and its SQLite twin alone ("45 tests, 2
+    # failures"). Verified red, reverted.
     test "expected_version/0 is the newest version the migration map holds" do
       assert Migrations.expected_version() == 5
-
-      # Moves with the map: a V06 added without moving expected_version/0
-      # leaves this call valid and this case red.
-      assert_raise ArgumentError, ~r/unknown migration version/, fn ->
-        Migrations.up(for: KxUxid, version: Migrations.expected_version() + 1)
-      end
     end
   end
 

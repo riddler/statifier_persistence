@@ -106,7 +106,6 @@ if Code.ensure_loaded?(Ecto.Migration) do
     alias StatifierPersistence.Ecto.Config
 
     @initial_version 1
-    @current_version 5
 
     @migrations %{
       1 => StatifierPersistence.Ecto.Migrations.V01,
@@ -115,6 +114,11 @@ if Code.ensure_loaded?(Ecto.Migration) do
       4 => StatifierPersistence.Ecto.Migrations.V04,
       5 => StatifierPersistence.Ecto.Migrations.V05
     }
+
+    # Read off the map rather than written beside it: a version this module
+    # cannot reach is not a version this package knows, and the two drifting
+    # apart is the defect the derivation removes.
+    @current_version @migrations |> Map.keys() |> Enum.max()
 
     @doc """
     Migrates the tables from `from:` (default: V01) up through `version:`
@@ -166,8 +170,9 @@ if Code.ensure_loaded?(Ecto.Migration) do
     end
 
     @doc """
-    The newest migration version this package knows - the version an
-    up-to-date schema has run through, and `up/1`'s default target.
+    The newest migration version this package knows - the newest key of the
+    version map, the version an up-to-date schema has run through, and
+    `up/1`'s default target.
 
     It exists for the host whose schema is **not** a delegated migration.
     A host that writes `up(for: MyApp.Persistence)` never needs the number:
