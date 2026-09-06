@@ -18,6 +18,19 @@ defmodule StatifierPersistence.Storage.Adapter do
   (ADR-0004 decision 2). All are opaque strings to this layer: no callback
   here accepts or returns a surrogate key, a table name, or a prefix
   (ADR-0002 decision 1, ADR-0003 decision 3).
+
+  ## The input log is a data-retention decision, not a debugging switch
+
+  An adapter that exports `supports_input_log?/1` and answers `true`
+  stores every input the interpreter saw, verbatim, for the life of the
+  run (ADR-0010). Chart blobs, position blobs and identity blobs are
+  engine-shaped; an event's `data` is the host's own values - a signup's
+  email address, a capture's card number - and turning the log on puts
+  them at rest. `:blob_type` reaches `input_blob` for exactly that reason
+  (ADR-0010 decision 4), and `input_log_cap:` bounds how much of it
+  accumulates (decision 6), but a host that cannot encrypt at rest and
+  cannot accept plaintext payloads declines the whole facility by not
+  exporting the callback. Nothing in this package refuses a run over it.
   """
 
   @typedoc """
@@ -113,6 +126,36 @@ defmodule StatifierPersistence.Storage.Adapter do
         }
 
   @typedoc """
+  A run's input log ordinal: dense, zero-based, per run, assigned by the
+  adapter. Not a position blob (ADR-0010 decision 3).
+  """
+  @type seq :: non_neg_integer()
+
+  @typedoc """
+  The public door an input entered by (`t:StatifierPersistence.Runs.entry/0`),
+  as a string.
+  """
+  @type door :: String.t()
+
+  @typedoc """
+  One stored input (ADR-0010 decision 2): the run it belongs to, its
+  ordinal, the door it entered by, and the opaque `input_blob` the facade
+  encoded above this layer. A `nil` `input_blob` is the closed marker of
+  decision 6 and nothing else.
+
+  `append_input/3` is handed a record whose `seq` it must ignore - the
+  adapter assigns the ordinal, because denseness is a property only the
+  store can compute atomically - and returns the value it assigned.
+  `list_inputs/2` returns records whose `seq` is authoritative.
+  """
+  @type input_record :: %{
+          run_id: run_id(),
+          seq: seq(),
+          door: door(),
+          input_blob: binary() | nil
+        }
+
+  @typedoc """
   A stored chart: its content hash, its identity envelope
   (`Statifier.Machine.Identity.to_binary/1`), and an opaque `chart_blob`
   this layer does not decode, inspect, or say what produced (ADR-0003
@@ -146,9 +189,12 @@ defmodule StatifierPersistence.Storage.Adapter do
   decision 3); `:run_outcome_unsupported` and `:run_states_unsupported`
   are the refusal-at-open arms for an adapter that cannot store a run's
   `outcome_blob` or cannot answer the indexed status projection, which
-  together are what a fan-out's settlement needs; `{:adapter, term()}`
-  carries a backend failure (a database down, a timeout) that is not this
-  layer's to interpret further.
+  together are what a fan-out's settlement needs; `:input_log_full` is
+  `append_input/3`'s refusal past the host-declared cap, after the log has
+  closed itself with a marker (ADR-0010 decision 6) - it refuses the
+  append and never the step; `{:adapter, term()}` carries a backend
+  failure (a database down, a timeout) that is not this layer's to
+  interpret further.
   """
   @type error ::
           :chart_not_found
@@ -158,6 +204,7 @@ defmodule StatifierPersistence.Storage.Adapter do
           | :metadata_unsupported
           | :run_outcome_unsupported
           | :run_states_unsupported
+          | :input_log_full
           | {:adapter, term()}
 
   @doc """
@@ -419,10 +466,73 @@ defmodule StatifierPersistence.Storage.Adapter do
   @callback list_run_states_by_metadata(opts(), metadata()) ::
               {:ok, [StatifierPersistence.Storage.Adapter.run_state()]} | {:error, error()}
 
+  @doc """
+  Optional declaration that this adapter keeps a run's input log
+  (ADR-0010 decision 1).
+
+  The same opt-in-by-export shape `supports_metadata?/1` and
+  `supports_run_outcome?/1` use: an adapter exports it and answers `true`,
+  the facade checks with `function_exported?/3`, and an adapter that does
+  not export it stores no inputs and sees no behaviour change.
+  `StatifierPersistence.Storage.InMemory` and every adapter written before
+  ADR-0010 stay conformant without a line of change.
+
+  **No run-lifecycle call refuses on it**, and that is the deliberate
+  departure from `supports_metadata?/1`'s refusal at open. Those refuse
+  because something the host *asked for* would otherwise be silently
+  dropped; the input log is a derived record of inputs the host is
+  supplying anyway, and refusing to run a chart because the log cannot be
+  kept would let a diagnostic facility break the run it is diagnosing. A
+  host that needs to know asks
+  `StatifierPersistence.Storage.input_log_supported?/1`.
+  """
+  @callback supports_input_log?(opts()) :: boolean()
+
+  @doc """
+  Optional append of one input to `run_id`'s log (ADR-0010 decision 2).
+
+  The adapter assigns the ordinal and returns it: the `seq` on the given
+  record is ignored on the way in and authoritative on the way out,
+  because denseness from zero is a property only the store can compute
+  atomically. A lost race must fail the write rather than duplicate an
+  ordinal - a gap in a log is a defect, not a reading.
+
+  `input_blob` is opaque here in `position_blob`'s strong sense: the
+  facade above every adapter encodes the `%Statifier.Event{}` the
+  interpreter saw (ADR-0010 decision 3), and nothing in this layer decodes
+  it, inspects it, or says what produced it. `run_id`, `seq` and `door`
+  are identity and lookup values and are stored beside it, not inside it.
+
+  Past the cap the host declared at `init/1` (`input_log_cap:`), the
+  append returns `{:error, :input_log_full}` and the log is **closed**:
+  the cap's last slot is written as a record with a `nil` `input_blob`,
+  and no later append to that run ever succeeds (ADR-0010 decision 6). A
+  truncated log that looks complete is worse than no log, so the
+  truncation is a value in the log rather than an absence.
+  """
+  @callback append_input(opts(), run_id(), input_record()) ::
+              {:ok, seq()} | {:error, error()}
+
+  @doc """
+  Optional listing of `run_id`'s whole input log, in ascending `seq`
+  (ADR-0010 decision 2).
+
+  The whole log, always - no filter, no range, no limit, no reverse. The
+  whole log is what a replay consumes, and the cap is what bounds it. A
+  run with no inputs is `{:ok, []}`; a run that does not exist is
+  `{:error, :run_not_found}`, the not-found arm this layer already
+  requires instead of `nil` or a raise.
+  """
+  @callback list_inputs(opts(), run_id()) ::
+              {:ok, [input_record()]} | {:error, error()}
+
   @optional_callbacks isolate: 1,
                       lock_run: 3,
                       supports_metadata?: 1,
                       list_runs_by_metadata: 2,
                       supports_run_outcome?: 1,
-                      list_run_states_by_metadata: 2
+                      list_run_states_by_metadata: 2,
+                      supports_input_log?: 1,
+                      append_input: 3,
+                      list_inputs: 2
 end

@@ -108,8 +108,13 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
       table_prefix: "kx_con_"
     ]
 
-    def up, do: Migrations.up(@opts ++ [from: 4])
-    def down, do: Migrations.down(@opts ++ [version: 4])
+    # Pinned at V04 in both directions. Without the ceiling this module
+    # would drift forward on every version this package gains, and a
+    # migration about the concurrent index rebuild would silently carry
+    # V05's input log table too (the reason the bootstrap's own
+    # per-version migrations pin their target).
+    def up, do: Migrations.up(@opts ++ [from: 4, version: 4])
+    def down, do: Migrations.down(@opts ++ [from: 4, version: 4])
   end
 
   # The same V04 call from an ordinary transactional migration - the
@@ -123,8 +128,13 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
       table_prefix: "kx_con_"
     ]
 
-    def up, do: Migrations.up(@opts ++ [from: 4])
-    def down, do: Migrations.down(@opts ++ [version: 4])
+    # Pinned at V04 in both directions. Without the ceiling this module
+    # would drift forward on every version this package gains, and a
+    # migration about the concurrent index rebuild would silently carry
+    # V05's input log table too (the reason the bootstrap's own
+    # per-version migrations pin their target).
+    def up, do: Migrations.up(@opts ++ [from: 4, version: 4])
+    def down, do: Migrations.down(@opts ++ [from: 4, version: 4])
   end
 
   @host_migrations [
@@ -139,7 +149,26 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
 
   @concurrent_versions [20_260_906_000_401, 20_260_906_000_402, 20_260_906_000_403]
 
+  @input_log_version 20_260_906_000_501
+
   @key_prefixes ["kx_uxid_", "kx_uuid_", "kx_big_"]
+
+  # V05's own up/down cycle, on tables nothing else in this module owns.
+  defmodule MigrateKxV05 do
+    @moduledoc false
+    use Ecto.Migration
+
+    alias StatifierPersistence.Ecto.Migrations
+
+    @opts [
+      repo: StatifierPersistence.TestRepo,
+      key: :uxid,
+      table_prefix: "kx_v05_"
+    ]
+
+    def up, do: Migrations.up(@opts)
+    def down, do: Migrations.down(@opts)
+  end
 
   setup_all do
     Sandbox.mode(TestRepo, :auto)
@@ -340,6 +369,75 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     end
   end
 
+  describe "V05: the input log table" do
+    # sabotage: removed V05's add(:door, :text, null: false) -> red here on
+    # the column list, and red on the duplicate-index case below with
+    # `** (Postgrex.Error) ERROR 42703 (undefined_column) column "door" of
+    # relation "kx_uxid_inputs" does not exist`, since the generated inputs
+    # schema declares the field regardless. Verified red, reverted.
+    test "carries run_id, seq, door and a nullable input_blob, across every key configuration" do
+      for prefix <- @key_prefixes do
+        assert identity_columns(prefix <> "inputs", ["run_id", "seq", "door", "input_blob"]) ==
+                 [
+                   ["door", "text", "NO"],
+                   ["input_blob", "bytea", "YES"],
+                   ["run_id", "text", "NO"],
+                   ["seq", "bigint", "NO"]
+                 ]
+      end
+    end
+
+    # sabotage: removed V05's create(unique_index(...)) -> red here, the
+    # unique index list came back empty for every key configuration, and
+    # red on the duplicate-insert case below, which stored the duplicate
+    # ordinal instead of refusing it. Verified red, reverted.
+    test "carries the unique (run_id, seq) index denseness rests on" do
+      for prefix <- @key_prefixes do
+        assert unique_index_columns(prefix <> "inputs") == [["run_id", "seq"]]
+      end
+    end
+
+    # sabotage: replaced V05's unique_index/3 with a plain index/3 -> red,
+    # the duplicate insert below succeeded instead of raising, and red on
+    # the index-shape case above. Verified red, reverted.
+    test "a duplicate (run_id, seq) insert violates the unique index" do
+      TestRepo.insert!(%KxUxid.Input{run_id: "run-mig-input-dup", seq: 0, door: "step"})
+
+      assert_raise Ecto.ConstraintError, ~r/run_id_seq/, fn ->
+        TestRepo.insert!(%KxUxid.Input{run_id: "run-mig-input-dup", seq: 0, door: "step"})
+      end
+    end
+
+    # sabotage: made V05.down/1 a no-op -> red here (the table survived the
+    # rollback and the second assertion still found it) and red in the
+    # literal-options and capped-recipe cases, whose own rollbacks then
+    # left an inputs table behind. Verified red, reverted.
+    test "up and down round-trip: the table arrives, rolls back, and comes back" do
+      version = @input_log_version
+
+      on_exit(fn ->
+        SQL.query!(TestRepo, "DROP TABLE IF EXISTS kx_v05_inputs", [])
+        SQL.query!(TestRepo, "DROP TABLE IF EXISTS kx_v05_runs", [])
+        SQL.query!(TestRepo, "DROP TABLE IF EXISTS kx_v05_positions", [])
+        SQL.query!(TestRepo, "DROP TABLE IF EXISTS kx_v05_charts", [])
+        SQL.query!(TestRepo, "DELETE FROM schema_migrations WHERE version = $1", [version])
+      end)
+
+      :ok = migrate(:up, version, MigrateKxV05)
+
+      assert tables_in_schema("public", "kx_v05_") ==
+               ["kx_v05_charts", "kx_v05_inputs", "kx_v05_positions", "kx_v05_runs"]
+
+      :ok = migrate(:down, version, MigrateKxV05)
+
+      assert tables_in_schema("public", "kx_v05_") == []
+
+      :ok = migrate(:up, version, MigrateKxV05)
+
+      assert "kx_v05_inputs" in tables_in_schema("public", "kx_v05_")
+    end
+  end
+
   describe "unique indexes enforced" do
     # sabotage: removed V01's charts unique_index -> duplicate insert red
     test "a duplicate content_hash insert violates the charts unique index" do
@@ -392,7 +490,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
       :ok = migrate(:up, @literal_version, MigrateKxLiteral)
 
       assert tables_in_schema("kx_schema", "kx_lit_") ==
-               ["kx_lit_charts", "kx_lit_positions", "kx_lit_runs"]
+               ["kx_lit_charts", "kx_lit_inputs", "kx_lit_positions", "kx_lit_runs"]
 
       assert unique_index_columns("kx_lit_runs", "kx_schema") == [["run_id"]]
 
@@ -416,6 +514,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
       [capped_version, v03_version] = @capped_versions
 
       on_exit(fn ->
+        SQL.query!(TestRepo, ~s(DROP TABLE IF EXISTS "kx_cap_inputs"), [])
         SQL.query!(TestRepo, ~s(DROP TABLE IF EXISTS "kx_cap_runs"), [])
         SQL.query!(TestRepo, ~s(DROP TABLE IF EXISTS "kx_cap_positions"), [])
         SQL.query!(TestRepo, ~s(DROP TABLE IF EXISTS "kx_cap_charts"), [])
@@ -429,7 +528,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
       :ok = migrate(:up, v03_version, MigrateKxCappedV03)
 
       assert tables_in_schema("public", "kx_cap_") ==
-               ["kx_cap_charts", "kx_cap_positions", "kx_cap_runs"]
+               ["kx_cap_charts", "kx_cap_inputs", "kx_cap_positions", "kx_cap_runs"]
 
       assert identity_columns("kx_cap_runs", ["outcome_blob"]) ==
                [["outcome_blob", "bytea", "YES"]]
@@ -447,6 +546,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
       [v03_version, concurrent_version, transactional_version] = @concurrent_versions
 
       on_exit(fn ->
+        SQL.query!(TestRepo, ~s(DROP TABLE IF EXISTS "kx_con_inputs"), [])
         SQL.query!(TestRepo, ~s(DROP TABLE IF EXISTS "kx_con_runs"), [])
         SQL.query!(TestRepo, ~s(DROP TABLE IF EXISTS "kx_con_positions"), [])
         SQL.query!(TestRepo, ~s(DROP TABLE IF EXISTS "kx_con_charts"), [])
@@ -546,7 +646,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     # sabotage: skipped parse!'s version validation -> red (KeyError, not ArgumentError)
     test "an unknown version raises before any DDL" do
       assert_raise ArgumentError, ~r/unknown migration version/, fn ->
-        Migrations.up(for: KxUxid, version: 5)
+        Migrations.up(for: KxUxid, version: 6)
       end
 
       assert_raise ArgumentError, ~r/unknown migration version/, fn ->
@@ -568,7 +668,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     # red, reverted.
     test "an unknown down from: raises before any DDL" do
       assert_raise ArgumentError, ~r/unknown migration from/, fn ->
-        Migrations.down(for: KxUxid, from: 5)
+        Migrations.down(for: KxUxid, from: 6)
       end
     end
 

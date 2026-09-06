@@ -22,6 +22,12 @@ if Code.ensure_loaded?(Ecto) do
         `use StatifierPersistence.Ecto`. The repo, the schema modules,
         and the table names all come from its resolved configuration,
         so this adapter adds no knobs of its own (ADR-0002 decision 3).
+      * `:input_log_cap` - the per-run cap on ADR-0010's input log:
+        `:infinity` (the default, no cap) or a positive integer. It
+        counts entries, and past it `append_input/3` refuses and closes
+        the run's log with a marker (decision 6). It has no bounded
+        default, because one would be this package silently truncating a
+        host's log.
       * `:sandbox` - when `true`, `isolate/1` checks out an
         `Ecto.Adapters.SQL.Sandbox` connection: the hook a test suite
         (this package's conformance suite included) uses to wrap each
@@ -74,6 +80,7 @@ if Code.ensure_loaded?(Ecto) do
 
       if persistence_host?(host) do
         config = host.__statifier_persistence__(:config)
+        cap = validate_cap!(Keyword.get(opts, :input_log_cap, :infinity))
 
         {:ok,
          Keyword.merge(opts,
@@ -81,7 +88,10 @@ if Code.ensure_loaded?(Ecto) do
            chart_schema: Module.concat(host, Chart),
            position_schema: Module.concat(host, Position),
            run_schema: Module.concat(host, Run),
-           runs_table: Config.table(config, :runs)
+           input_schema: Module.concat(host, Input),
+           runs_table: Config.table(config, :runs),
+           inputs_table: Config.table(config, :inputs),
+           input_log_cap: cap
          )}
       else
         {:error, {:adapter, {:not_a_persistence_host, host}}}
@@ -430,6 +440,76 @@ if Code.ensure_loaded?(Ecto) do
     end
 
     @doc """
+    Declares input log support (the optional
+    `c:StatifierPersistence.Storage.Adapter.supports_input_log?/1`): this
+    adapter keeps ADR-0010's log in the V05 inputs table, on every Ecto
+    backend.
+
+    Unconditional, unlike `supports_metadata?/1`, which answers `false`
+    off Postgres because the containment SQL its listings issue does not
+    parse there. Nothing in the input log needs a Postgres-only feature -
+    a table, four columns and a unique index (ADR-0010 decision 9) - so
+    there is nothing here for a backend to decline.
+    """
+    @impl Adapter
+    @spec supports_input_log?(Adapter.opts()) :: boolean()
+    def supports_input_log?(_opts), do: true
+
+    @doc """
+    Appends one input at the run's next ordinal (the optional
+    `c:StatifierPersistence.Storage.Adapter.append_input/3`).
+
+    The ordinal is the run's current maximum plus one, read and written
+    inside the exclusion the caller already holds
+    (`StatifierPersistence.Runs`' serialized unit). The V05 unique index
+    on `(run_id, seq)`, not the read, is what makes denseness true: a
+    lost race fails the write with `{:adapter, :seq_conflict}` rather
+    than duplicating an ordinal.
+
+    Past the configured `input_log_cap:` the log closes itself. The cap's
+    last slot is written as a row with a `nil` `input_blob` - decision
+    6's marker - and this call and every later one for that run return
+    `{:error, :input_log_full}`. The step that produced the input is not
+    failed by it: the log records its own truncation instead
+    (ADR-0010 decision 5).
+    """
+    @impl Adapter
+    @spec append_input(Adapter.opts(), Adapter.run_id(), Adapter.input_record()) ::
+            {:ok, Adapter.seq()} | {:error, Adapter.error()}
+    def append_input(opts, run_id, %{door: door, input_blob: input_blob}) do
+      case next_slot(opts, run_id) do
+        {:closed, _seq} ->
+          {:error, :input_log_full}
+
+        {:marker, seq} ->
+          with :ok <- insert_input(opts, run_id, seq, door, nil), do: {:error, :input_log_full}
+
+        {:open, seq} ->
+          with :ok <- insert_input(opts, run_id, seq, door, input_blob), do: {:ok, seq}
+      end
+    end
+
+    @doc """
+    Lists a run's whole log in ascending `seq` (the optional
+    `c:StatifierPersistence.Storage.Adapter.list_inputs/2`), or
+    `:run_not_found` for a run this adapter does not hold.
+
+    One index-ordered read of the V05 unique index. No filter, no range,
+    no limit: the whole log is what a replay consumes and the cap is what
+    bounds it (ADR-0010 decision 2).
+    """
+    @impl Adapter
+    @spec list_inputs(Adapter.opts(), Adapter.run_id()) ::
+            {:ok, [Adapter.input_record()]} | {:error, Adapter.error()}
+    def list_inputs(opts, run_id) do
+      if run_exists?(opts, run_id) do
+        {:ok, Enum.map(input_rows(opts, run_id), &to_input_record/1)}
+      else
+        {:error, :run_not_found}
+      end
+    end
+
+    @doc """
     Per-test isolation (the optional
     `c:StatifierPersistence.Storage.Adapter.isolate/1`): checks out an
     `Ecto.Adapters.SQL.Sandbox` connection when this handle was built
@@ -551,6 +631,92 @@ if Code.ensure_loaded?(Ecto) do
 
     defp json_representable?(_other), do: false
 
+    # The three states the next append can be in: the log already carries
+    # a closed marker in its last slot, this append IS the last slot the
+    # cap admits, or there is room. One read of the tail row answers all
+    # three, since seq is dense.
+    @spec next_slot(Adapter.opts(), Adapter.run_id()) ::
+            {:closed | :marker | :open, Adapter.seq()}
+    defp next_slot(opts, run_id) do
+      cap = Keyword.fetch!(opts, :input_log_cap)
+
+      last =
+        repo(opts).one(
+          from(i in input_schema(opts),
+            where: i.run_id == ^run_id,
+            order_by: [desc: i.seq],
+            limit: 1,
+            select: %{seq: i.seq, input_blob: i.input_blob}
+          )
+        )
+
+      seq =
+        case last do
+          nil -> 0
+          %{seq: seq} -> seq + 1
+        end
+
+      cond do
+        match?(%{input_blob: nil}, last) -> {:closed, seq}
+        cap == :infinity -> {:open, seq}
+        seq >= cap - 1 -> {:marker, seq}
+        true -> {:open, seq}
+      end
+    end
+
+    @spec insert_input(
+            Adapter.opts(),
+            Adapter.run_id(),
+            Adapter.seq(),
+            Adapter.door(),
+            binary() | nil
+          ) :: :ok | {:error, Adapter.error()}
+    defp insert_input(opts, run_id, seq, door, input_blob) do
+      changeset =
+        input_schema(opts)
+        |> struct(%{run_id: run_id, seq: seq, door: door, input_blob: input_blob})
+        |> Changeset.change()
+        |> Changeset.unique_constraint([:run_id, :seq],
+          name: "#{Keyword.fetch!(opts, :inputs_table)}_run_id_seq_index"
+        )
+
+      case repo(opts).insert(changeset) do
+        {:ok, _row} -> :ok
+        {:error, %Changeset{}} -> {:error, {:adapter, :seq_conflict}}
+      end
+    end
+
+    @spec input_rows(Adapter.opts(), Adapter.run_id()) :: [map()]
+    defp input_rows(opts, run_id) do
+      repo(opts).all(
+        from(i in input_schema(opts),
+          where: i.run_id == ^run_id,
+          order_by: [asc: i.seq],
+          select: %{run_id: i.run_id, seq: i.seq, door: i.door, input_blob: i.input_blob}
+        )
+      )
+    end
+
+    @spec run_exists?(Adapter.opts(), Adapter.run_id()) :: boolean()
+    defp run_exists?(opts, run_id) do
+      repo(opts).exists?(from(r in run_schema(opts), where: r.run_id == ^run_id))
+    end
+
+    @spec to_input_record(map()) :: Adapter.input_record()
+    defp to_input_record(row) do
+      %{run_id: row.run_id, seq: row.seq, door: row.door, input_blob: row.input_blob}
+    end
+
+    @spec validate_cap!(term()) :: pos_integer() | :infinity
+    defp validate_cap!(:infinity), do: :infinity
+    defp validate_cap!(cap) when is_integer(cap) and cap > 0, do: cap
+
+    defp validate_cap!(other) do
+      raise ArgumentError,
+            "the :input_log_cap option must be a positive integer or :infinity, " <>
+              "got: #{inspect(other)}"
+    end
+
     @spec repo(Adapter.opts()) :: module()
     defp repo(opts), do: Keyword.fetch!(opts, :repo)
 
@@ -562,6 +728,9 @@ if Code.ensure_loaded?(Ecto) do
 
     @spec run_schema(Adapter.opts()) :: module()
     defp run_schema(opts), do: Keyword.fetch!(opts, :run_schema)
+
+    @spec input_schema(Adapter.opts()) :: module()
+    defp input_schema(opts), do: Keyword.fetch!(opts, :input_schema)
 
     @spec persistence_host?(term()) :: boolean()
     defp persistence_host?(host) do

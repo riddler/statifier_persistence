@@ -31,7 +31,7 @@ defmodule StatifierPersistence.Storage do
   contract.
   """
 
-  alias Statifier.{Machine, MachineState, Position}
+  alias Statifier.{Event, Machine, MachineState, Position}
   alias Statifier.Machine.Identity
   alias StatifierPersistence.Storage.Adapter
   alias StatifierPersistence.Telemetry
@@ -57,6 +57,23 @@ defmodule StatifierPersistence.Storage do
           | :run_states_unsupported
           | {:unsupported_format_version, term()}
           | {:identity_mismatch, Identity.t(), Identity.t() | nil}
+
+  @typedoc """
+  One decoded input log entry (ADR-0010 decision 2), as `list_inputs/2`
+  returns it: the adapter's stored record with its opaque `input_blob`
+  decoded back into the `%Statifier.Event{}` the interpreter saw.
+
+  A `nil` `event` is the closed marker the cap wrote (decision 6) and
+  nothing else. `door` is one of `t:StatifierPersistence.Runs.entry/0`'s
+  seven atoms, as its string - the key decision 8's replay mapping is
+  written against.
+  """
+  @type input :: %{
+          run_id: Adapter.run_id(),
+          seq: Adapter.seq(),
+          door: Adapter.door(),
+          event: Event.t() | nil
+        }
 
   @typedoc """
   Options the run writers (`insert_run/5`, `update_run/5`) accept:
@@ -521,6 +538,115 @@ defmodule StatifierPersistence.Storage do
     else
       {:error, :child_listing_unsupported}
     end
+  end
+
+  @doc """
+  Whether `store`'s adapter keeps a run's input log (ADR-0010 decision 1).
+
+  True when the adapter exports the optional
+  `c:StatifierPersistence.Storage.Adapter.supports_input_log?/1` and it
+  answers `true` - the same shape `metadata_supported?/1` checks. Nothing
+  refuses on it: an adapter that keeps no log runs every chart exactly as
+  it did before ADR-0010, and this predicate is public so a host that
+  needs a replayable run can find out whether it will get one *before* it
+  drives one.
+  """
+  @spec input_log_supported?(store :: t()) :: boolean()
+  def input_log_supported?(%__MODULE__{} = store) do
+    Code.ensure_loaded?(store.adapter) and
+      function_exported?(store.adapter, :supports_input_log?, 1) and
+      adapter_call(store.adapter, :supports_input_log?, [], fn ->
+        store.adapter.supports_input_log?(store.opts)
+      end) == true
+  end
+
+  @doc """
+  Appends `event` to `run_id`'s input log at `door`, returning the ordinal
+  the adapter assigned (ADR-0010 decisions 2 and 3).
+
+  This is the encode site: the `%Statifier.Event{}` the interpreter was
+  handed crosses the adapter seam as an opaque `input_blob`, encoded here
+  with `:erlang.term_to_binary/1` in exactly `outcome_blob`'s established
+  shape. ADR-0003 decision 1 therefore stays true word for word - an
+  adapter sees binaries, strings and an ordinal, never a `Statifier`
+  struct - and this package mints no serialization format of its own.
+
+  `:not_supported` for an adapter that keeps no log, without calling the
+  adapter at all. `{:error, :input_log_full}` once the run's log has
+  closed itself at the host's cap (decision 6): that arm refuses the
+  append and never the step, and the caller carries on.
+
+  `door` is a `t:StatifierPersistence.Runs.entry/0` atom - the fixed
+  vocabulary of public doors, stored as its string.
+  """
+  @spec append_input(
+          store :: t(),
+          run_id :: Adapter.run_id(),
+          door :: atom(),
+          event :: Event.t()
+        ) :: {:ok, Adapter.seq()} | :not_supported | {:error, error()}
+  def append_input(%__MODULE__{} = store, run_id, door, %Event{} = event) when is_atom(door) do
+    if input_log_supported?(store) do
+      record = %{
+        run_id: run_id,
+        seq: 0,
+        door: Atom.to_string(door),
+        input_blob: :erlang.term_to_binary(event)
+      }
+
+      adapter_call(store.adapter, :append_input, [run_id: run_id], fn ->
+        store.adapter.append_input(store.opts, run_id, record)
+      end)
+    else
+      :not_supported
+    end
+  end
+
+  @doc """
+  Lists `run_id`'s whole input log in ascending `seq`, decoded (ADR-0010
+  decision 2).
+
+  The decode half of `append_input/4`: each stored `input_blob` comes back
+  as the `%Statifier.Event{}` that was delivered, equal to the one the
+  interpreter saw, `caller_context` and all. An entry whose `event` is
+  `nil` is the closed marker the cap wrote (decision 6) and nothing else -
+  a reader that maps this log onto a replay refuses on it rather than
+  replaying a run that never happened.
+
+  `:not_supported` for an adapter that keeps no log;
+  `{:error, :run_not_found}` for a run that does not exist; `{:ok, []}`
+  for a run with no inputs.
+  """
+  @spec list_inputs(store :: t(), run_id :: Adapter.run_id()) ::
+          {:ok, [input()]} | :not_supported | {:error, error()}
+  def list_inputs(%__MODULE__{} = store, run_id) do
+    if input_log_supported?(store) do
+      store.adapter
+      |> adapter_call(:list_inputs, [run_id: run_id], fn ->
+        store.adapter.list_inputs(store.opts, run_id)
+      end)
+      |> decode_inputs()
+    else
+      :not_supported
+    end
+  end
+
+  @spec decode_inputs({:ok, [Adapter.input_record()]} | {:error, error()}) ::
+          {:ok, [input()]} | {:error, error()}
+  defp decode_inputs({:ok, records}), do: {:ok, Enum.map(records, &decode_input/1)}
+  defp decode_inputs({:error, _reason} = error), do: error
+
+  @spec decode_input(Adapter.input_record()) :: input()
+  defp decode_input(%{input_blob: nil} = record),
+    do: %{run_id: record.run_id, seq: record.seq, door: record.door, event: nil}
+
+  defp decode_input(record) do
+    %{
+      run_id: record.run_id,
+      seq: record.seq,
+      door: record.door,
+      event: :erlang.binary_to_term(record.input_blob)
+    }
   end
 
   @doc """

@@ -25,7 +25,9 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
   alias Ecto.Adapters.SQL
   alias Ecto.Migrator
   alias Statifier.Effect.Invoke
+  alias Statifier.Event
   alias Statifier.Invoke.Types, as: InvokeTypes
+  alias Statifier.MachineState
   alias StatifierPersistence.{Driver, Storage}
   alias StatifierPersistence.Ecto.Migrations
   alias StatifierPersistence.Run.Linkage
@@ -97,8 +99,13 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
     @disable_ddl_transaction true
     @disable_migration_lock true
 
-    def up, do: Migrations.up(for: StatifierPersistence.SqliteTestRepo.Host, from: 4)
-    def down, do: Migrations.down(for: StatifierPersistence.SqliteTestRepo.Host, version: 4)
+    # Pinned at V04 in both directions: without the ceiling this module
+    # drifts forward on every version the package gains, and setup_all
+    # has already created V05's table.
+    def up, do: Migrations.up(for: StatifierPersistence.SqliteTestRepo.Host, from: 4, version: 4)
+
+    def down,
+      do: Migrations.down(for: StatifierPersistence.SqliteTestRepo.Host, from: 4, version: 4)
   end
 
   @migration_version 20_260_905_000_201
@@ -153,8 +160,8 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
     # run ended "6 tests, 0 failures, 6 invalid" - the rolled-back
     # migration left no tables for any case in this module. Verified red,
     # reverted.
-    test "V01 through V04 apply, and the runs table carries every column" do
-      assert tables() == ["sq_charts", "sq_positions", "sq_runs"]
+    test "V01 through V05 apply, and the runs table carries every column" do
+      assert tables() == ["sq_charts", "sq_inputs", "sq_positions", "sq_runs"]
 
       columns = columns("sq_runs")
 
@@ -192,7 +199,7 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
       :ok = migrate_capped(:down, @concurrent_version, MigrateSqliteConcurrentV04)
 
       refute Enum.any?(indexes("sq_runs"), &String.contains?(&1, "metadata"))
-      assert tables() == ["sq_charts", "sq_positions", "sq_runs"]
+      assert tables() == ["sq_charts", "sq_inputs", "sq_positions", "sq_runs"]
     end
 
     # sabotage: replaced V03.down/1's postgres?() guard with `true`, so
@@ -207,7 +214,7 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
 
       :ok = migrate(:up)
 
-      assert tables() == ["sq_charts", "sq_positions", "sq_runs"]
+      assert tables() == ["sq_charts", "sq_inputs", "sq_positions", "sq_runs"]
     end
   end
 
@@ -221,6 +228,7 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
       [capped_version, v03_version] = @capped_versions
 
       on_exit(fn ->
+        SQL.query!(SqliteTestRepo, "DROP TABLE IF EXISTS sq_cap_inputs", [])
         SQL.query!(SqliteTestRepo, "DROP TABLE IF EXISTS sq_cap_runs", [])
         SQL.query!(SqliteTestRepo, "DROP TABLE IF EXISTS sq_cap_positions", [])
         SQL.query!(SqliteTestRepo, "DROP TABLE IF EXISTS sq_cap_charts", [])
@@ -237,7 +245,9 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
       :ok = migrate_capped(:up, capped_version, MigrateSqliteCappedV02)
       :ok = migrate_capped(:up, v03_version, MigrateSqliteCappedV03)
 
-      assert capped_tables() == ["sq_cap_charts", "sq_cap_positions", "sq_cap_runs"]
+      assert capped_tables() ==
+               ["sq_cap_charts", "sq_cap_inputs", "sq_cap_positions", "sq_cap_runs"]
+
       assert "outcome_blob" in columns("sq_cap_runs")
 
       # Newest first, which is the order `mix ecto.rollback --all` uses.
@@ -294,6 +304,131 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
     test "run outcome support is still declared: outcome_blob exists here" do
       assert Storage.run_outcome_supported?(sqlite_store())
     end
+  end
+
+  describe "V05's input log on this adapter" do
+    # These mirror, case for case, the input-log cases
+    # `StatifierPersistence.Testing.StorageConformance` generates and the
+    # Ecto adapter passes against Postgres. They are written out here
+    # rather than generated because this module owns its own repo, its own
+    # file-backed database and no sandbox, so the case template's per-test
+    # `init/1` and `isolate/1` setup does not apply. ADR-0010 decision 9
+    # makes SQLite no lesser tier: nothing in the design needs a
+    # Postgres-only feature, and this is where that is checked.
+
+    # sabotage: made Storage.Ecto.append_input/3 take its ordinal from a
+    # constant 0 rather than next_slot/2 -> red here on the second append,
+    # which came back {:adapter, :seq_conflict} off the V05 unique index -
+    # SQLite enforcing exactly what Postgres does, and red on the Postgres
+    # conformance cases in the same run. Verified red, reverted.
+    test "append_input/3 assigns dense ordinals from zero and lists them in order" do
+      store = sqlite_store()
+      run_id = logged_run(store, "run_sqlite_log_order")
+
+      for {door, index} <- Enum.with_index(["step", "done_invocation", "answer_parent"]) do
+        assert {:ok, ^index} =
+                 Storage.Ecto.append_input(store.opts, run_id, %{
+                   run_id: run_id,
+                   seq: 0,
+                   door: door,
+                   input_blob: <<index>>
+                 })
+      end
+
+      assert {:ok, entries} = Storage.Ecto.list_inputs(store.opts, run_id)
+
+      assert Enum.map(entries, &{&1.seq, &1.door, &1.input_blob}) == [
+               {0, "step", <<0>>},
+               {1, "done_invocation", <<1>>},
+               {2, "answer_parent", <<2>>}
+             ]
+    end
+
+    # sabotage: dropped Storage.Ecto.list_inputs/2's run_exists?/2 check ->
+    # red, this case got {:ok, []} where it asserted :run_not_found.
+    # Verified red, reverted.
+    test "list_inputs/2 reports :run_not_found for an unknown run_id" do
+      store = sqlite_store()
+
+      assert {:error, :run_not_found} =
+               Storage.Ecto.list_inputs(store.opts, "run_sqlite_log_absent")
+    end
+
+    # sabotage: dropped the run_id filter from Storage.Ecto.input_rows/2 ->
+    # red, the second run's log came back carrying the first run's entries.
+    # Verified red, reverted.
+    test "two runs' logs never see each other's entries" do
+      store = sqlite_store()
+      mine = logged_run(store, "run_sqlite_log_mine")
+      theirs = logged_run(store, "run_sqlite_log_theirs")
+
+      assert {:ok, 0} = Storage.append_input(store, mine, :step, event("go"))
+      assert {:ok, 1} = Storage.append_input(store, mine, :step, event("go"))
+
+      assert {:ok, 0} =
+               Storage.append_input(store, theirs, :answer_parent, event("done.invoke.call"))
+
+      assert {:ok, ours} = Storage.list_inputs(store, mine)
+      assert {:ok, others} = Storage.list_inputs(store, theirs)
+
+      assert Enum.map(ours, & &1.seq) == [0, 1]
+      assert Enum.map(others, &{&1.seq, &1.door}) == [{0, "answer_parent"}]
+    end
+
+    # sabotage: returned {:error, :input_log_full} from the `:marker` arm
+    # of Storage.Ecto.append_input/3 without inserting the marker row ->
+    # red, the log came back two entries long and its last entry was a
+    # real input rather than the nil-blob marker. Verified red, reverted.
+    test "a cap of n admits n - 1 inputs, then closes the log with a marker" do
+      {:ok, capped} = Storage.new(Storage.Ecto, persistence: Host, input_log_cap: 3)
+      run_id = logged_run(capped, "run_sqlite_log_cap")
+
+      assert {:ok, 0} = Storage.append_input(capped, run_id, :step, event("go"))
+      assert {:ok, 1} = Storage.append_input(capped, run_id, :step, event("go"))
+      assert {:error, :input_log_full} = Storage.append_input(capped, run_id, :step, event("go"))
+      assert {:error, :input_log_full} = Storage.append_input(capped, run_id, :step, event("go"))
+
+      assert {:ok, entries} = Storage.list_inputs(capped, run_id)
+      assert Enum.map(entries, & &1.seq) == [0, 1, 2]
+      assert Enum.map(entries, & &1.event) |> List.last() == nil
+
+      # The refusal is the log's, never the run's.
+      assert {:ok, %{status: :active}} = Storage.fetch_run(capped, run_id)
+    end
+
+    # sabotage: encoded only the event's name in Storage.append_input/4 ->
+    # red, the decoded entry was a binary rather than the equal
+    # %Statifier.Event{}, caller_context and all. Verified red, reverted.
+    test "an event round-trips through the log equal to what was delivered" do
+      store = sqlite_store()
+      run_id = logged_run(store, "run_sqlite_log_roundtrip")
+
+      delivered = %Event{
+        name: "done.invoke.call",
+        type: :internal,
+        data: %{"email" => "buyer@example.com"},
+        invokeid: "call",
+        caller_context: %{"tenant" => "acme"}
+      }
+
+      assert Storage.input_log_supported?(store)
+      assert {:ok, 0} = Storage.append_input(store, run_id, :done_invocation, delivered)
+
+      assert {:ok, [entry]} = Storage.list_inputs(store, run_id)
+      assert entry.door == "done_invocation"
+      assert entry.event == delivered
+    end
+  end
+
+  defp event(name), do: %Event{name: name, type: :external}
+
+  defp logged_run(store, run_id) do
+    {:ok, machine} = Statifier.compile(@child_source)
+    machine_state = MachineState.new(machine, session_id: "sess_" <> run_id)
+
+    :ok = Storage.insert_run(store, run_id, machine_state, :active)
+
+    run_id
   end
 
   defp sqlite_store do

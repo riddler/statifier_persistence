@@ -11,10 +11,12 @@ if Code.ensure_loaded?(Ecto) do
 
     and gets, with zero further options: the resolved configuration
     readable via `MyApp.Persistence.__statifier_persistence__/1`, and
-    three Ecto schema modules - `MyApp.Persistence.Chart`,
-    `MyApp.Persistence.Position`, `MyApp.Persistence.Run` - over the
-    `statifier_charts` / `statifier_positions` / `statifier_runs` tables
-    with UXID string primary keys (`chart_` / `pos_` / `run_` prefixes).
+    four Ecto schema modules - `MyApp.Persistence.Chart`,
+    `MyApp.Persistence.Position`, `MyApp.Persistence.Run`,
+    `MyApp.Persistence.Input` - over the `statifier_charts` /
+    `statifier_positions` / `statifier_runs` / `statifier_inputs` tables
+    with UXID string primary keys (`chart_` / `pos_` / `run_` / `input_`
+    prefixes).
 
     Every knob is compile-time, on this `use`, never in application env
     (ADR-0002 decision 3), and the migrations helper consumes the same
@@ -32,25 +34,46 @@ if Code.ensure_loaded?(Ecto) do
     `:blob_type` does not reach it, so anything filed there is at rest in
     the clear no matter how the blob columns are configured.
 
-    `:blob_type` reaches exactly three columns - `identity_blob`,
-    `chart_blob`, `position_blob` - and nothing else: a host wanting
-    encryption at rest for those payload columns passes a custom
+    `:blob_type` reaches the payload columns and nothing else:
+    `identity_blob`, `chart_blob`, `position_blob`, `outcome_blob`, and
+    `input_blob` on the inputs table (ADR-0010 decision 4). A host
+    wanting encryption at rest for those columns passes a custom
     `Ecto.Type` or `Ecto.ParameterizedType` there and gets it applied
     with zero further wiring. The identity and lookup columns
-    (`content_hash`, `session_id`, `run_id`, `status`, `failure`) stay
-    plain text regardless - the identity guard and the unique indexes
+    (`content_hash`, `session_id`, `run_id`, `status`, `failure`, and
+    the input log's `seq` and `door`) stay plain regardless - the identity guard and the unique indexes
     depend on reading them back verbatim, and `metadata` stays `jsonb`
     regardless for the same reason: it is the column a host queries
     (ADR-0006 decision 3).
+
+    The inputs table is ADR-0010's per-run input log: one row per input
+    the interpreter saw, carrying the run it belongs to, its dense
+    zero-based `seq`, the public `door` it entered by, and the opaque
+    `input_blob`. A `nil` `input_blob` is decision 6's closed marker. The
+    log holds document payload - an event's `data` is the host's own
+    values - which is why `:blob_type` reaches `input_blob` and why
+    turning the log on is a data-retention decision rather than a
+    debugging switch (`StatifierPersistence.Storage.Adapter`'s moduledoc).
     """
 
     alias StatifierPersistence.Ecto.Config
 
-    @schema_modules [{Chart, :charts}, {Position, :positions}, {Run, :runs}]
+    @schema_modules [
+      {Chart, :charts},
+      {Position, :positions},
+      {Run, :runs},
+      {Input, :inputs}
+    ]
 
     # The columns :blob_type reaches - identity/lookup columns never do
     # (moduledoc, Config's :blob_type option).
-    @blob_columns [:identity_blob, :chart_blob, :position_blob, :outcome_blob]
+    @blob_columns [
+      :identity_blob,
+      :chart_blob,
+      :position_blob,
+      :outcome_blob,
+      :input_blob
+    ]
 
     # The storage contract's field set is the column list (ADR-0003
     # decision 3); the migrations helper's V01 DDL mirrors these exactly.
@@ -74,6 +97,12 @@ if Code.ensure_loaded?(Ecto) do
         session_id: :string,
         metadata: :map,
         outcome_blob: :binary
+      ],
+      inputs: [
+        run_id: :string,
+        seq: :integer,
+        door: :string,
+        input_blob: :binary
       ]
     }
 

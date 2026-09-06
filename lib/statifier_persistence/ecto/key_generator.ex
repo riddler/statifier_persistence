@@ -25,7 +25,7 @@ defmodule StatifierPersistence.Ecto.KeyGenerator do
   """
 
   @typedoc "The tables whose rows carry a generated surrogate key."
-  @type table :: :charts | :positions | :runs
+  @type table :: :charts | :positions | :runs | :inputs
 
   @typedoc "ADR-0002's key option spellings."
   @type spelling :: :uxid | :uuid | :bigserial | {module(), keyword()}

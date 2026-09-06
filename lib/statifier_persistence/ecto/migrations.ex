@@ -88,6 +88,11 @@ if Code.ensure_loaded?(Ecto.Migration) do
     already holds rows. `StatifierPersistence.Ecto.Migrations.V04`
     records the whole of it.
 
+    V05 needs no recipe of its own: it creates ADR-0010's input log table
+    and its unique `(run_id, seq)` index, on every backend, inside an
+    ordinary transaction. A host already running V04 picks it up with
+    `up(for: MyApp.Persistence, from: 5)`.
+
     When `prefix:` names a Postgres schema, `up/1` creates the schema if it
     does not exist; `down/1` leaves the schema in place (dropping a schema
     the host may share is not this package's call).
@@ -96,13 +101,14 @@ if Code.ensure_loaded?(Ecto.Migration) do
     alias StatifierPersistence.Ecto.Config
 
     @initial_version 1
-    @current_version 4
+    @current_version 5
 
     @migrations %{
       1 => StatifierPersistence.Ecto.Migrations.V01,
       2 => StatifierPersistence.Ecto.Migrations.V02,
       3 => StatifierPersistence.Ecto.Migrations.V03,
-      4 => StatifierPersistence.Ecto.Migrations.V04
+      4 => StatifierPersistence.Ecto.Migrations.V04,
+      5 => StatifierPersistence.Ecto.Migrations.V05
     }
 
     @doc """
