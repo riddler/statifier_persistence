@@ -10,6 +10,79 @@ fragment in [`changelog.d/`](changelog.d/README.md); the fragments are assembled
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
 
+## [0.9.0] 2026-09-06
+
+Feature release: a durably stepped run can now keep a verbatim log of every
+input its interpreter saw, and a fan-out's settlement is visible in
+telemetry. The storage-adapter behaviour gains three optional input-log
+callbacks (`supports_input_log?/1`, `append_input/3`, `list_inputs/2`) and
+`StatifierPersistence.Runs.inputs/2` reads the log back; `Storage.Ecto`
+implements them on Postgres and SQLite alike through migration V05, with an
+`input_log_cap:` bound and no log at all for an adapter that does not export
+the callbacks (ADR-0010, accepted). Two new events,
+`[:statifier_persistence, :child, :recorded]` and `:settled`, surface the
+per-child answers and the settlement decision that reach no door, and
+`child.answered`'s `outcome` is now the invocation's rather than the door's,
+so a fan-out that failed no longer reports `:done`. And
+`Storage.Ecto.list_runs_by_metadata/2` and `list_run_states_by_metadata/2`
+refuse cleanly with `{:error, :metadata_unsupported}` off Postgres instead
+of raising from the driver.
+
+### Added
+
+- Adds an optional per-run input log to the storage-adapter behaviour
+  (`supports_input_log?/1`, `append_input/3`, `list_inputs/2`): an adapter
+  that exports them records every input a run's interpreter saw - the
+  verbatim `%Statifier.Event{}`, the public door it entered by, and a
+  dense zero-based ordinal - which is what an offline replay of a durably
+  stepped run needs (ADR-0010).
+- Adds `StatifierPersistence.Runs.inputs/2` and
+  `StatifierPersistence.Storage.input_log_supported?/1`,
+  `append_input/4` and `list_inputs/2` for reading and writing that log.
+- Adds migration V05, the input log table, on Postgres and SQLite alike;
+  `StatifierPersistence.Storage.Ecto` implements all three callbacks and
+  takes an `input_log_cap:` option that bounds a run's log and closes it
+  with a marker entry rather than truncating it silently. The default is
+  `:infinity`.
+- `:blob_type` now reaches the new `input_blob` column. An event's `data`
+  is host payload, so turning the log on is a data-retention decision:
+  an adapter that does not export `supports_input_log?/1` keeps no log
+  and behaves exactly as it did before.
+- Adds `[:statifier_persistence, :child, :recorded]`, once per fan-out
+  child answer written under the parent's settlement exclusion. Every
+  index but the settling one records an answer that reaches no door, so
+  this is the only surface those answers appear on (ADR-0009's sp-8wv
+  amendment).
+- Adds `[:statifier_persistence, :child, :settled]`, once per settlement
+  decision, carrying the invocation's `policy`, the `:answer` /
+  `:not_yet` decision, and the completed / failed / cancelled / unstarted
+  tallies it was decided from.
+- `[:statifier_persistence, :run, :step, :stop]` now carries `invoke_id`
+  and `child_count`, `nil` on an ordinary drive and set on the
+  `entry: :answer_parent` step, so the step span that delivers a whole
+  fan-out's assembled answer is recognisable as that one.
+
+### Changed
+
+- `[:statifier_persistence, :child, :answered]`'s `outcome` is now the
+  **invocation's** for a fan-out, not the door's: `:failed` when any index
+  failed. A fan-out always answers its parent through `done_invocation/5`
+  - the failure shape is inside each entry - so the event previously said
+  `outcome: :done` for a settlement that had failed. It also gains
+  `child_count` and `failed_count`, both `nil` for a single-child
+  subchart, which is not an invocation with a width. A consumer counting
+  `outcome` across fan-outs will see failures it did not see before.
+- `StatifierPersistence.Storage.Ecto.list_runs_by_metadata/2` and
+  `list_run_states_by_metadata/2` now return
+  `{:error, :metadata_unsupported}` on a backend that is not Postgres,
+  where they previously raised from the driver on `jsonb` containment SQL
+  it cannot parse. Both consult `supports_metadata?/1` before issuing
+  anything, so a host calling the raw adapter callback gets the same clean
+  refusal `StatifierPersistence.Storage` already gave through the facade.
+  A behaviour change on two adapter callbacks: code rescuing the raise
+  sees a tagged tuple instead. Nothing changes on Postgres, and the facade
+  is untouched.
+
 ## [0.8.0] 2026-09-06
 
 Feature release: a chart can now report that its own run failed, and the
