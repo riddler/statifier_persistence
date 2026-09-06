@@ -478,10 +478,11 @@ decision.** Metadata `parent_run_id`, `invoke_id`, `policy`, `decision`
 sweep had just written. A read that fails before reaching a decision emits
 nothing: there is no decision to report.
 
-The four tallies are measurements because they are always numbers, per
-decision 3. They partition `child_count` only once every index has a run
-of its own; `unstarted` is the indexes with none, which is what tells a
-fan-out still starting from one that is stuck.
+The four tallies are measurements because they are always numbers, under
+the measurements-are-numbers split this record's Consequences adopts from
+`sob-ADR-0006` unchanged. They partition `child_count` only once every
+index has a run of its own; `unstarted` is the indexes with none, which is
+what tells a fan-out still starting from one that is stuck.
 
 **3. `:answered`'s `outcome` is the invocation's aggregate for a fan-out,
 and it carries `child_count` and `failed_count`.** The aggregate is
@@ -496,10 +497,13 @@ with a width, and the two `nil`s say so rather than defaulting to `1` and
 `0`.
 
 `child_count` and `failed_count` are metadata rather than measurements,
-which is the one place this record's numbers-are-measurements split
-(decision 3) does not decide the question: a key that is `nil` on a whole
-class of emissions cannot be a measurement, and both are dimensions a
-consumer groups by rather than quantities it averages.
+which is the one place that same measurements-are-numbers split does not
+decide the question: a key that is `nil` on a whole class of emissions
+cannot be a measurement, and both are dimensions a consumer groups by
+rather than quantities it averages. This record already carries one
+number as metadata for that reason - `child_index` on
+`[:statifier_persistence, :child, :started]` - so the reading is not new
+here.
 
 **4. `[:statifier_persistence, :run, :step, :stop]` gains `invoke_id` and
 `child_count`.** Both `nil` on every ordinary drive, and set by
@@ -507,7 +511,7 @@ consumer groups by rather than quantities it averages.
 span that carries a whole fan-out's assembled answer through the parent's
 door was previously indistinguishable from any other invocation answer,
 and `entry` alone cannot separate them. They ride as metadata for the same
-reason as decision 3 above: they are dimensions of the span, not
+reason clause 3 above gives: they are dimensions of the span, not
 quantities it measured. They are `StatifierPersistence.Runs` options this
 package sets on its own behalf, never a host's - the same posture as
 `entry:`.
