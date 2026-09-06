@@ -19,6 +19,24 @@ defmodule StatifierPersistence.Storage do
   unidentified machine with `{:error, :unidentified_chart}` rather than
   writing a row a later load has no way to check.
 
+  A chart is keyed by that `content_hash` and by nothing else. No tenant,
+  namespace, or host scope takes part in the key, so two tenants that store
+  byte-identical charts share one chart row: the hash is a content address,
+  saving the same one twice is `:ok`, and it does not duplicate the row
+  (`StatifierPersistence.Storage.Adapter`'s `save_chart/2` contract). The
+  hash answers which chart these bytes are, never who stored them.
+
+  A multi-tenant host therefore tenant-qualifies its own per-chart rows, in
+  its own tables, rather than expecting this package to do it. The package
+  stores nothing per tenant; a run's opaque `metadata` map (ADR-0006) is
+  where a host tags a run with the scope it already keys its own tables by,
+  and any narrower scoping stays the host's.
+
+  Folding a namespace into the hash would change what a chart's identity
+  is, and that is `Statifier.Machine.identity/1`'s question - statifier-ex's
+  contract, not this package's. Nothing here proposes it, and this package
+  offers no option to do it.
+
   Every function here returns an error tuple instead of throwing; nothing
   in this module ever downgrades a failure to a default value.
 
