@@ -716,6 +716,21 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     end
   end
 
+  describe "the version this package expects" do
+    # sabotage: pointed expected_version/0 at @initial_version -> red at
+    # the first assertion (left 1, right 5), this case and its SQLite twin
+    # alone ("45 tests, 2 failures"). Verified red, reverted.
+    test "expected_version/0 is the newest version the migration map holds" do
+      assert Migrations.expected_version() == 5
+
+      # Moves with the map: a V06 added without moving expected_version/0
+      # leaves this call valid and this case red.
+      assert_raise ArgumentError, ~r/unknown migration version/, fn ->
+        Migrations.up(for: KxUxid, version: Migrations.expected_version() + 1)
+      end
+    end
+  end
+
   defp metadata_indexes(table) do
     %{rows: rows} =
       SQL.query!(
