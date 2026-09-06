@@ -10,6 +10,46 @@ fragment in [`changelog.d/`](changelog.d/README.md); the fragments are assembled
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
 
+## [0.10.0] 2026-09-06
+
+Feature release: a durable subchart child failed from outside the
+interpreter now settles its parent's pending `<invoke>` instead of leaving
+it hanging forever. `StatifierPersistence.Runs.fail/4` takes a `driver:`
+option and answers the parent itself, and
+`StatifierPersistence.Driver.resolve_and_answer_parent/3` is the public
+form of that answer for a caller with no drive of the child to hang it
+off. Alongside it, `StatifierPersistence.Ecto.Migrations.expected_version/0`
+names the newest migration version this package knows, for a host whose
+schema is hand-written DDL and which therefore has to check for itself
+that its tables are current.
+
+### Added
+
+- `StatifierPersistence.Runs.fail/4` takes a `driver:` option: a durable
+  subchart child failed from outside the interpreter now answers its
+  parent's `<invoke>` with the failure instead of leaving it pending
+  forever (ADR-0008's note on the outside-fail seam).
+- Adds `StatifierPersistence.Driver.resolve_and_answer_parent/3`, the
+  public form of the automatic answer - resolve the parent's chart through
+  `chart_resolver:`, then answer through `answer_parent/3` - for a caller
+  that has no drive of the child to hang it off.
+- `StatifierPersistence.Ecto.Migrations.expected_version/0` returns the
+  newest migration version this package knows, for a host whose schema is
+  hand-written DDL rather than a delegated migration and which therefore has
+  to check for itself that its tables are current. There is no
+  `assert_version!/1` to go with it: the package records no version marker in
+  a repo's schema, so the comparison stays the host's - the function's docs
+  say why.
+
+### Documentation
+
+- ADR-0010 takes a note answering whether a host needs the V05 input log
+  table at all. An adapter that does not export the optional input-log
+  callbacks never touches it - a host on one caps its migration at V04 in
+  both directions rather than carrying an empty table - while a host storing
+  through `StatifierPersistence.Storage.Ecto` needs it unconditionally,
+  because that adapter declares input-log support without probing.
+
 ## [0.9.0] 2026-09-06
 
 Feature release: a durably stepped run can now keep a verbatim log of every
