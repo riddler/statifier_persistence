@@ -285,7 +285,7 @@ exact-match adapter check the sp-11w Note describes, because there is no
 index there to rebuild. `docs/non-postgres-backends.md` lists it beside
 V03's skip.
 
-Nothing in decisions 1, 2, 3 or 4 moves. `sp-461`, the measurement issue
-the plain build's cost was left to, is unscheduled and unaffected: it
-measures what the plain build costs, which is still what a host reaching
-V03 for the first time pays.
+Nothing in decisions 1, 2, 3 or 4 moves. `sp-461` is unaffected and
+stays unscheduled: it measures the settlement read cost against a
+GIN-indexed `metadata` column at increasing fan-out widths, which is the
+same index answering the same query whichever statement built it.
