@@ -58,7 +58,7 @@ defmodule StatifierPersistence.Telemetry do
   | Event | Measurements | Metadata |
   |---|---|---|
   | `[:statifier_persistence, :run, :step, :start]` | `system_time`, `monotonic_time` | `run_id`, `entry`, `span_ref` |
-  | `[:statifier_persistence, :run, :step, :stop]` | `duration`, `monotonic_time` | `run_id`, `session_id`, `content_hash`, `entry`, `outcome`, `status`, `reason`, `span_ref` |
+  | `[:statifier_persistence, :run, :step, :stop]` | `duration`, `monotonic_time` | `run_id`, `session_id`, `content_hash`, `entry`, `outcome`, `status`, `reason`, `span_ref`, `invoke_id`, `child_count` |
   | `[:statifier_persistence, :run, :lock]` | `duration`, `system_time` | `run_id`, `strategy`, `outcome`, `reason` |
 
   `entry` is which public door was used: `:create`, `:step`,
@@ -67,6 +67,12 @@ defmodule StatifierPersistence.Telemetry do
   `[:statifier_persistence, :run, :lock]`'s `duration` is the **wait** for
   the per-run exclusion, not the held time, and its `outcome` is
   `:acquired` or `:unavailable`.
+
+  `invoke_id` and `child_count` on the stop are `nil` on every ordinary
+  drive and set on the `entry: :answer_parent` step a child takes on its
+  parent's behalf, so the step span carrying a fan-out's whole assembled
+  answer is recognisable as that one (the ADR-0009 sp-8wv amendment).
+  `child_count` is `nil` for a single-child subchart.
 
   ## The storage seam
 
@@ -103,13 +109,24 @@ defmodule StatifierPersistence.Telemetry do
   |---|---|---|
   | `[:statifier_persistence, :child, :started]` | `system_time` | `parent_run_id`, `child_run_id`, `invoke_id`, `child_index`, `content_hash`, `session_id` |
   | `[:statifier_persistence, :child, :refused]` | `system_time` | `parent_run_id`, `invoke_id`, `reason` |
-  | `[:statifier_persistence, :child, :answered]` | `system_time` | `child_run_id`, `parent_run_id`, `invoke_id`, `outcome` |
+  | `[:statifier_persistence, :child, :recorded]` | `system_time` | `parent_run_id`, `child_run_id`, `invoke_id`, `child_index`, `outcome` |
+  | `[:statifier_persistence, :child, :answered]` | `system_time` | `child_run_id`, `parent_run_id`, `invoke_id`, `outcome`, `child_count`, `failed_count` |
+  | `[:statifier_persistence, :child, :settled]` | `system_time`, `child_count`, `completed`, `failed`, `cancelled`, `unstarted` | `parent_run_id`, `invoke_id`, `policy`, `decision` |
   | `[:statifier_persistence, :child, :cascade_cancelled]` | `system_time`, `count`, `retained` | `parent_run_id`, `invoke_id` |
 
   `content_hash` on `:started` is the child's *pinned* hash (ADR-0008
   decision 2). `count` on `:cascade_cancelled` is how many runs the sweep
   actually cancelled and `retained` is how many it found already terminal
   and left alone; both are legitimately `0`.
+
+  `:recorded` fires once per fan-out child answer written under the
+  parent's exclusion, and `:settled` once per settlement decision -
+  `decision` is `:answer` or `:not_yet` - both from the settlement section
+  (the ADR-0009 sp-8wv amendment). `:answered`'s `outcome` is the
+  *invocation's* aggregate for a fan-out, `:failed` when any index failed,
+  even though the parent's door is always `done_invocation/5`; and
+  `child_count` and `failed_count` are `nil` on the single-child path,
+  which is not an invocation with a width.
 
   ## Cardinality and disclosure
 
@@ -152,7 +169,9 @@ defmodule StatifierPersistence.Telemetry do
   @drive_turns_exhausted [:statifier_persistence, :drive, :turns_exhausted]
   @child_started [:statifier_persistence, :child, :started]
   @child_refused [:statifier_persistence, :child, :refused]
+  @child_recorded [:statifier_persistence, :child, :recorded]
   @child_answered [:statifier_persistence, :child, :answered]
+  @child_settled [:statifier_persistence, :child, :settled]
   @child_cascade_cancelled [:statifier_persistence, :child, :cascade_cancelled]
 
   @events [
@@ -168,7 +187,9 @@ defmodule StatifierPersistence.Telemetry do
     @drive_turns_exhausted,
     @child_started,
     @child_refused,
+    @child_recorded,
     @child_answered,
+    @child_settled,
     @child_cascade_cancelled
   ]
 
@@ -225,7 +246,9 @@ defmodule StatifierPersistence.Telemetry do
         outcome: fields[:outcome],
         status: fields[:status],
         reason: fields[:reason],
-        span_ref: fields[:span_ref]
+        span_ref: fields[:span_ref],
+        invoke_id: fields[:invoke_id],
+        child_count: fields[:child_count]
       }
     )
   end
@@ -415,7 +438,36 @@ defmodule StatifierPersistence.Telemetry do
     )
   end
 
-  @doc "Emits `[:statifier_persistence, :child, :answered]`."
+  @doc """
+  Emits `[:statifier_persistence, :child, :recorded]` - one fan-out
+  child's own answer, persisted on its own run record inside the parent's
+  settlement exclusion.
+
+  Every index but the last records an answer that never reaches the
+  parent's door, so this is the only surface those answers appear on at
+  all.
+  """
+  @spec child_recorded(fields :: fields()) :: :ok
+  def child_recorded(fields) do
+    :telemetry.execute(
+      @child_recorded,
+      %{system_time: System.system_time()},
+      %{
+        parent_run_id: fields[:parent_run_id],
+        child_run_id: fields[:child_run_id],
+        invoke_id: fields[:invoke_id],
+        child_index: fields[:child_index],
+        outcome: fields[:outcome]
+      }
+    )
+  end
+
+  @doc """
+  Emits `[:statifier_persistence, :child, :answered]`.
+
+  `child_count` and `failed_count` are the invocation's, and are `nil` for
+  a single-child subchart, which has no invocation to aggregate.
+  """
   @spec child_answered(fields :: fields()) :: :ok
   def child_answered(fields) do
     :telemetry.execute(
@@ -425,7 +477,32 @@ defmodule StatifierPersistence.Telemetry do
         child_run_id: fields[:child_run_id],
         parent_run_id: fields[:parent_run_id],
         invoke_id: fields[:invoke_id],
-        outcome: fields[:outcome]
+        outcome: fields[:outcome],
+        child_count: fields[:child_count],
+        failed_count: fields[:failed_count]
+      }
+    )
+  end
+
+  @doc """
+  Emits `[:statifier_persistence, :child, :settled]` - one settlement
+  decision over a whole invocation, `:answer` or `:not_yet`.
+
+  `counts` is the measurement map: `child_count` and the four tallies over
+  the invocation's indexes. They partition `child_count` only once every
+  index has a run of its own, which is what makes `unstarted` worth
+  reading - it tells a fan-out still starting from one that is stuck.
+  """
+  @spec child_settled(counts :: %{atom() => non_neg_integer()}, fields :: fields()) :: :ok
+  def child_settled(counts, fields) do
+    :telemetry.execute(
+      @child_settled,
+      Map.put(counts, :system_time, System.system_time()),
+      %{
+        parent_run_id: fields[:parent_run_id],
+        invoke_id: fields[:invoke_id],
+        policy: fields[:policy],
+        decision: fields[:decision]
       }
     )
   end

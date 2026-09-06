@@ -208,6 +208,13 @@ defmodule StatifierPersistence.Runs do
     supplies `metadata:` for its own identities; supplying `linkage:` from
     outside this package is a caller bug the same way a malformed
     `metadata:` is.
+  - `invoke_id:` and `child_count:` - this package's own, never a host's,
+    and telemetry only. Set by `StatifierPersistence.Driver` beside
+    `entry: :answer_parent`, they name the invocation the step is
+    answering and its width on
+    `[:statifier_persistence, :run, :step, :stop]` (the ADR-0009 sp-8wv
+    amendment). `child_count` is `nil` for a single-child subchart. They
+    change nothing else about the step.
   """
   @type opt ::
           {:executor, Executor.t()}
@@ -218,6 +225,8 @@ defmodule StatifierPersistence.Runs do
           | {:metadata, Adapter.metadata()}
           | {:linkage, Linkage.t()}
           | {:entry, entry()}
+          | {:invoke_id, String.t()}
+          | {:child_count, pos_integer()}
 
   @typedoc """
   The fixed vocabulary of public doors `entry` names on this package's own
@@ -670,7 +679,7 @@ defmodule StatifierPersistence.Runs do
       end)
 
     result = unlocked(locked, lock_start, run_id, strategy)
-    Telemetry.run_step_stop(started_at, step_stop_fields(run_id, entry, span_ref, result))
+    Telemetry.run_step_stop(started_at, step_stop_fields(run_id, entry, span_ref, result, opts))
 
     result
   end
@@ -702,8 +711,17 @@ defmodule StatifierPersistence.Runs do
   # at all. `status` is `nil` where the step reached no write - with the
   # one exception of `{:budget_exhausted, _}`, which reaches a `:failed`
   # write and *then* returns an error (`tail_result/5`).
-  @spec step_stop_fields(run_id(), entry(), reference(), term()) :: keyword()
-  defp step_stop_fields(run_id, entry, span_ref, result) do
+  #
+  # `invoke_id` and `child_count` are the settlement dimensions (sp-8wv's
+  # ADR-0009 amendment): `nil` on every ordinary drive, and set by
+  # `StatifierPersistence.Driver` on the `entry: :answer_parent` step it
+  # takes on a parent's behalf, so the step span that carries a fan-out's
+  # whole assembled answer is recognisable as one. They are metadata
+  # rather than measurements because they are dimensions of the span, not
+  # quantities it measured, and `child_count` is `nil` for a single-child
+  # subchart.
+  @spec step_stop_fields(run_id(), entry(), reference(), term(), [opt()]) :: keyword()
+  defp step_stop_fields(run_id, entry, span_ref, result, opts) do
     {session_id, content_hash, outcome, status, reason} = stop_shape(result)
 
     [
@@ -714,7 +732,9 @@ defmodule StatifierPersistence.Runs do
       outcome: outcome,
       status: status,
       reason: reason,
-      span_ref: span_ref
+      span_ref: span_ref,
+      invoke_id: Keyword.get(opts, :invoke_id),
+      child_count: Keyword.get(opts, :child_count)
     ]
   end
 

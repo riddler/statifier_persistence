@@ -710,24 +710,69 @@ defmodule StatifierPersistence.Driver do
       child_run_id: child_run_id,
       parent_run_id: linkage.parent_run_id,
       invoke_id: linkage.invoke_id,
-      outcome: outcome
+      outcome: outcome,
+      child_count: linkage.child_count,
+      failed_count: nil
+    )
+  end
+
+  # A fan-out's `outcome` is the *invocation's*, not the door's (sp-8wv's
+  # ADR-0009 amendment). The parent is always answered through
+  # `done_invocation/5` - a fan-out that lost an index still delivers a
+  # dense list, and st-ADR-0068's failure shape is inside the entry rather
+  # than around the list - so reporting the door here said `outcome: :done`
+  # for a settlement that failed, which is the one thing a consumer counts
+  # this event to learn. The entries are what the parent is about to be
+  # answered with, so they are what the report reads.
+  @spec report_settled_answer(Runs.run_id(), Linkage.t(), [map()]) :: :ok
+  defp report_settled_answer(child_run_id, %Linkage{} = linkage, entries) do
+    failed_count = Enum.count(entries, &(&1["status"] == "failed"))
+
+    Telemetry.child_answered(
+      child_run_id: child_run_id,
+      parent_run_id: linkage.parent_run_id,
+      invoke_id: linkage.invoke_id,
+      outcome: if(failed_count > 0, do: :failed, else: :done),
+      child_count: linkage.child_count,
+      failed_count: failed_count
     )
   end
 
   # `entry: :answer_parent` is telemetry only (`docs/telemetry.md`): the
   # parent's own door is `done_invocation/5` or `failed_invocation/5`, but
   # what an operator wants to see on the step is that a *child* drove it.
+  # `invoke_id:` and `child_count:` ride beside it for the same reason and
+  # are telemetry only too (sp-8wv's ADR-0009 amendment): they are what
+  # makes the step span carrying a whole fan-out's assembled answer
+  # recognisable as that, and not an ordinary invocation answer.
   @spec respond_to_parent(t(), Linkage.t(), {:done, term()} | {:failed, keyword()}) :: result()
   defp respond_to_parent(driver, %Linkage{} = linkage, {:done, donedata}) do
-    done_invocation(driver, linkage.parent_run_id, linkage.invoke_id, donedata,
-      entry: :answer_parent
+    done_invocation(
+      driver,
+      linkage.parent_run_id,
+      linkage.invoke_id,
+      donedata,
+      answer_opts(linkage)
     )
   end
 
   defp respond_to_parent(driver, %Linkage{} = linkage, {:failed, failure}) do
-    failed_invocation(driver, linkage.parent_run_id, linkage.invoke_id, failure,
-      entry: :answer_parent
+    failed_invocation(
+      driver,
+      linkage.parent_run_id,
+      linkage.invoke_id,
+      failure,
+      answer_opts(linkage)
     )
+  end
+
+  @spec answer_opts(Linkage.t()) :: keyword()
+  defp answer_opts(%Linkage{} = linkage) do
+    [
+      entry: :answer_parent,
+      invoke_id: linkage.invoke_id,
+      child_count: linkage.child_count
+    ]
   end
 
   @spec door({:done, term()} | {:failed, keyword()}) :: Runs.entry()
@@ -814,10 +859,9 @@ defmodule StatifierPersistence.Driver do
           :ok
   defp settle_child(driver, %Linkage{} = linkage, child_run_id, payload) do
     case decide(driver, linkage, child_run_id, payload) do
-      {:ok, {:answer, donedata}} ->
-        assembled = {:done, donedata}
-        respond_to_parent(driver, linkage, assembled)
-        report_answered(child_run_id, linkage, assembled)
+      {:ok, {:answer, entries}} ->
+        respond_to_parent(driver, linkage, {:done, entries})
+        report_settled_answer(child_run_id, linkage, entries)
 
       _not_yet_or_error ->
         :ok
@@ -898,9 +942,29 @@ defmodule StatifierPersistence.Driver do
         ) :: {:ok, {:answer, term()} | :not_yet} | {:error, term()}
   defp record_and_settle(driver, %Linkage{} = linkage, match, child_run_id, payload) do
     case record_outcome(driver, child_run_id, payload) do
-      :ok -> settle(driver, linkage, match)
-      {:error, _reason} = error -> error
+      :ok ->
+        report_recorded(child_run_id, linkage, payload)
+        settle(driver, linkage, match)
+
+      {:error, _reason} = error ->
+        error
     end
+  end
+
+  # `[:statifier_persistence, :child, :recorded]`, after the write and
+  # inside the same exclusion, so the report cannot claim an answer the
+  # settlement that follows will not read. Every index but the settling one
+  # records an answer that reaches no door at all, and before this event
+  # nothing showed them (sp-8wv's ADR-0009 amendment).
+  @spec report_recorded(Runs.run_id(), Linkage.t(), {:done, term()} | {:failed, keyword()}) :: :ok
+  defp report_recorded(child_run_id, %Linkage{} = linkage, {outcome, _payload}) do
+    Telemetry.child_recorded(
+      parent_run_id: linkage.parent_run_id,
+      child_run_id: child_run_id,
+      invoke_id: linkage.invoke_id,
+      child_index: linkage.child_index,
+      outcome: outcome
+    )
   end
 
   @spec settlement_strategy(t()) :: {module(), term()}
@@ -914,13 +978,52 @@ defmodule StatifierPersistence.Driver do
   defp settle(driver, %Linkage{} = linkage, match) do
     with {:ok, states} <- Storage.list_run_states_by_metadata(driver.store, match),
          {:ok, states, cancelled?} <- maybe_cancel(driver, linkage, states, match) do
-      if settled?(states, linkage.child_count, cancelled?) do
-        assemble(driver, linkage, states, cancelled?)
-      else
-        {:ok, :not_yet}
-      end
+      decided =
+        if settled?(states, linkage.child_count, cancelled?) do
+          assemble(driver, linkage, states, cancelled?)
+        else
+          {:ok, :not_yet}
+        end
+
+      report_settled(linkage, states, decided)
+      decided
     end
   end
+
+  # `[:statifier_persistence, :child, :settled]`, once per decision this
+  # section reaches and never for a read that failed before reaching one
+  # (sp-8wv's ADR-0009 amendment). The four tallies are read off the same
+  # `states` the decision was made from - including the cancels
+  # `maybe_cancel/4` had just written, which is why this reports after the
+  # decision rather than before it - and `unstarted` is the indexes with no
+  # run at all, which is the number that tells a fan-out still starting
+  # from one that is stuck.
+  @spec report_settled(
+          Linkage.t(),
+          [Adapter.run_state()],
+          {:ok, {:answer, [map()]} | :not_yet} | {:error, term()}
+        ) :: :ok
+  defp report_settled(%Linkage{} = linkage, states, {:ok, decision}) do
+    Telemetry.child_settled(
+      %{
+        child_count: linkage.child_count,
+        completed: Enum.count(states, &(&1.status == :completed)),
+        failed: Enum.count(states, &(&1.status == :failed)),
+        cancelled: Enum.count(states, &(&1.status == :cancelled)),
+        unstarted: length(unstarted_indices(states, linkage.child_count))
+      },
+      parent_run_id: linkage.parent_run_id,
+      invoke_id: linkage.invoke_id,
+      policy: linkage.policy,
+      decision: decision_atom(decision)
+    )
+  end
+
+  defp report_settled(_linkage, _states, {:error, _reason}), do: :ok
+
+  @spec decision_atom({:answer, [map()]} | :not_yet) :: :answer | :not_yet
+  defp decision_atom({:answer, _entries}), do: :answer
+  defp decision_atom(:not_yet), do: :not_yet
 
   # `first_error`'s cancel, and the whole of it: the live siblings through
   # the cascade this package already has, the not-yet-started ones through
