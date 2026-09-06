@@ -317,3 +317,51 @@ heading, which a merged record cannot be edited to fix.
 
 Nothing in decisions 1, 2, 3 or 4 moves, and nothing in the sp-t57, sp-11w
 or sp-ajz Notes is withdrawn.
+
+## Note (2026-09-06, sp-a4x): the columns `:blob_type` reaches, named rather than counted
+
+Recording the column set the code has today, not a change of decision.
+ADR-0010's 2026-09-06 `sp-t12` Note corrects that record's own count and
+says ADR-0006's list is corrected here; this is that correction.
+
+Two places in this record describe what `:blob_type` covers by naming a
+pair. The Context paragraph that introduces the disclosure hazard says
+sp-km3's option "encrypts the chart and position blobs at rest", and
+decision 2 repeats it as "covers the chart and position blobs and does not
+reach this column". Both were written when `identity_blob`, `chart_blob`
+and `position_blob` were the whole payload set, and the pair named in each
+sentence is the part of it the sentence needed. The set has grown twice
+since.
+
+`ecto.ex`'s `@blob_columns` is the list, and it holds five entries:
+
+| Column | Table | Arrives in |
+|---|---|---|
+| `identity_blob` | charts, positions, runs | V01 |
+| `chart_blob` | charts | V01 |
+| `position_blob` | positions, runs | V01 |
+| `outcome_blob` | runs | V03 |
+| `input_blob` | inputs | V05 |
+
+`outcome_blob` is the run's own terminal answer (ADR-0008); `input_blob`
+is the per-run input log's opaque payload (ADR-0010 decision 4). The
+identity and lookup columns - `content_hash`, `session_id`, `run_id`,
+`status`, `failure`, and the input log's `seq` and `door` - never reach
+`:blob_type`, because the identity guard, the unique indexes and the log's
+ordering all depend on reading them back verbatim.
+
+What this record decided does not move, and the sentences above are not
+wrong about the thing they were making an argument about. The argument in
+Context and in decision 2 is that `metadata` is **not** a column
+`:blob_type` reaches, so identities filed there are at rest in the clear
+however the blobs are configured. That is as true against five payload
+columns as it was against three: `metadata` is a `jsonb` column the host
+queries (decision 3), it is absent from `@blob_columns`, and no growth of
+that list has reached it. Decision 2's identities-only rule therefore
+stands exactly as written, and so do decisions 1, 3 and 4 and the sp-t57,
+sp-11w, sp-ajz and sp-23z Notes above.
+
+The prose that names columns rather than counting them is
+`StatifierPersistence.Ecto`'s moduledoc and the `:blob_type` section of
+`README.md`, both of which `sp-80g` brought to the five-column set when it
+shipped the input log.
