@@ -536,3 +536,28 @@ package sets on its own behalf, never a host's - the same posture as
   somebody owns (a single-node fan-out driver), which would want a
   `:start`/`:stop` pair rather than the point-in-time `:settled` this
   clause adds.
+
+## Note (2026-09-06, sp-74k): the count correction reaches decision 3's inventory line too
+
+The sp-8wv amendment above corrects decision 8's frozen list from fourteen
+event names to **sixteen**, and names two places still reading the old
+count: "the Consequences section above and `docs/adr/README.md`'s index
+row". The index row has since been corrected in place (sp-74k, under the
+operator's standing word that an index-row count correction is an
+in-place edit rather than an amendment).
+
+One site the amendment did not name is decision 3's inventory heading, the
+line reading "**Fourteen events**, listed with their measurements and
+metadata in `docs/telemetry.md`". It is **sixteen** as of this Note, by
+addition, for the same reason the amendment gives: an accepted record's
+text is amended and not rewritten. The four things that inventory covers,
+and the numbered list beneath it, are unchanged.
+
+The count is checkable against the code: `@events` in
+`lib/statifier_persistence/telemetry.ex` holds sixteen names, and
+`StatifierPersistence.Telemetry.events/0` returns them. The two the
+amendment added are `[:statifier_persistence, :child, :recorded]` and
+`[:statifier_persistence, :child, :settled]`.
+
+No decision moves. Nothing in decision 8's freeze changes: this Note
+corrects prose that trailed a correction already taken.
