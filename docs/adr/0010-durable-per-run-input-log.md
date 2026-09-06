@@ -98,6 +98,15 @@ that are worth naming now they exist (decision 9). None of the four changes
 what was decided; they record what the decided thing is called and where it
 sits.
 
+**Note (2026-09-06, `sp-gb2`):** a fifth place, found after the flip by a
+`statifier_examples` worker reading a real log: decision 5's door table says a
+`:create` appends nothing, and decision 8's mapping table has no row for a
+stored `create` entry. Neither is wrong about what was decided - both
+enumerations are short, and a create drive that answers synchronous
+invocations writes rows that fall through the gap. The correction is two
+dated Notes where those tables stand, below; the count above is left at the
+four the flip found.
+
 ## Decision
 
 ### 1. The input log is a storage-adapter seam in this package, optional by export
@@ -280,6 +289,28 @@ second door vocabulary and renames nothing.
 | `:fail` | `Runs.fail/4` | no - a host decision about the record, no interpreter (ADR-0009 decision 3) |
 | `:cancel` | `Runs.cancel/3`, `Runs.cascade_cancel/3` | no - same, and see the warning below |
 
+**Note (2026-09-06, `sp-gb2`):** the `:create` row's "no" is true of
+`Runs.create/4` and of nothing around it. `Interpreter.initialize/2` does take
+no event and `Runs.create/4` never reaches the write site, so the *initialize*
+appends nothing and a create does open the run's log empty. But
+`Driver.create/3` stamps `entry: :create` with `Keyword.put_new/3` and hands
+that same option list to its answer loop: `advance/6` steps every drained
+answer through `Runs.step/5`, which reads `entry(opts, :step)` and finds
+`:create` already there. So each synchronous invocation a create answers
+before the drive reaches quiescence appends one row - through this decision's
+one write site, under the same exclusion, in `seq` order - stamped
+`door: "create"`. `Driver.start_child_at/6` inherits it whole, because it
+starts its child through `create/3`.
+
+A run whose initial configuration invokes twice therefore opens its log with
+two `create` rows before its first `step` row, which is what a
+`myapp:signup` wizard's log looks like on disk. What each row records is the
+*answer the create drive delivered*, never the create itself; the door names
+the drive the answer arrived under, exactly as `:answer_parent` names the
+re-entry rather than the event (decision 7). Nothing about the write site or
+the "only inputs the interpreter saw" rule changes - both held for these rows
+all along. The enumeration is what was short.
+
 `Runs.cancel/3` must not be mapped to upstream's `{:cancel, routes}`
 recording entry. That entry means `Statifier.Interpreter.cancel/1` ran and
 its exit walk executed `<onexit>` blocks; this package's `:cancel` changes a
@@ -400,6 +431,24 @@ invocation-answer path, through the `enqueue_invoked/3` both its
 `{:done_invocation, _, _}` and `{:failed_invocation, _, _}` casts share), and a
 mapping that produced `{:event, ...}` would
 replay an external delivery where the run had an invocation answer.
+
+**Note (2026-09-06, `sp-gb2`):** the table has no `door "create"` row and
+needs one, for the entries decision 5's Note names. Every event such a row can
+carry is built by `Driver`'s `answer_event/3` - `done.invoke.<invoke_id>` or
+`error.communication.invoke.<invoke_id>`, through the same `invoked_event/4`
+the `done_invocation` and `failed_invocation` doors use - so a `create` entry
+maps to `{:invoked_event, invoke_id, event, nil}`, and the `invoke_id`
+derivation above applies to it unchanged. It cannot carry anything else: the
+initialize half of a create contributes no entry at all, and the drive loop
+delivers only invocation answers.
+
+This is decision 8's own rule rather than an exception to it - the mapping is
+read off what the event *is*, not off the door's name, and the door is
+consulted only to tell an invocation answer from an external delivery. A
+`create` row is an invocation answer by construction. The one thing it does
+not tell a reader is which door a live session would have recorded it under,
+and nothing needs that: `Recording.put_invoked_event/4` is what a live session
+calls for both.
 
 Two limits are stated rather than papered over:
 
