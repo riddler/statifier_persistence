@@ -260,6 +260,11 @@ sits in `StatifierPersistence.Runs`' `run_status/2` and nowhere else, so
 the arm order there - budget, then the failure tag, then `:done` - is the
 whole of the difference.
 
+**Note (2026-09-06, `sp-ive`):** the future tense above has come due. That
+amendment is accepted and implemented (`sp-hia`), so a `:done` effect no
+longer always completes a run, and `run_status/2` decides in exactly the
+order named.
+
 Decision 6's second half is untouched in both readings. `fail/4` remains
 "the only host-driven terminal transition", because a failure-classed
 final is not host-driven: it is the chart saying so, in the same breath it
