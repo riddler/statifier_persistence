@@ -623,3 +623,24 @@ the one part still outstanding: `statifier_examples`' durable fan-out chart
 still answers its parent with the host-side translation this record deletes,
 and that deletion is a `statifier_examples` bead, not a reopening of this
 amendment.
+
+## Note (2026-09-06, `sp-23z`): what "the floor this package depends on" names in the sp-n8g amendment
+
+Correcting a wording, not a decision. The sp-n8g amendment's decision 1
+says the reserved key survives the whole pipeline as a flat string key
+"on `statifier` 2.3.0, the floor this package depends on". Two different
+versions are conflated in that clause.
+
+`mix.exs`' `statifier_dep/0` declares `{:statifier, "~> 2.2 and >=
+2.2.1"}`, so the floor this package depends on is **2.2.1**. **2.3.0** is
+what `mix.lock` resolves that requirement to, and therefore the version
+the amendment's claim was checked against.
+
+Read the clause as *on `statifier` 2.3.0, the version this package's
+`mix.lock` resolves to*. The claim it introduces - that the final resolves
+to `%{"statifier_persistence:run_status" => "failed"}` and compiles with
+no finding - is unchanged and still holds there. What the clause should
+not be read as saying is that the declared floor guarantees it: a host
+that pins `statifier` lower within the declared range checks that itself.
+
+Nothing else in the amendment or in this record moves.

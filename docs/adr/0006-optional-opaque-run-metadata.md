@@ -289,3 +289,31 @@ Nothing in decisions 1, 2, 3 or 4 moves. `sp-461` is unaffected and
 stays unscheduled: it measures the settlement read cost against a
 GIN-indexed `metadata` column at increasing fan-out widths, which is the
 same index answering the same query whichever statement built it.
+
+## Note (2026-09-06, `sp-23z`): errata on the sp-ajz Note's heading
+
+Correcting a heading, not a decision and not a body. The sp-ajz Note above
+is headed "the shipped index is built concurrently from V04 on", which
+claims more than the Note under it does.
+
+That Note names two conditions the heading does not carry, and both are
+load-bearing for a reader deciding what V04 will do to their database:
+
+- **The host's own migration module has to permit it.** `CREATE INDEX
+  CONCURRENTLY` cannot run inside a transaction block, and `Ecto.Migrator`
+  reads `@disable_ddl_transaction` and `@disable_migration_lock` from the
+  module it runs. Called from inside a transaction, V04 leaves V03's
+  plainly-built index in place and warns when the runs table already holds
+  rows; it rebuilds nothing.
+- **Off Postgres there is no index to rebuild.** V04 is a no-op in both
+  directions, under the same exact-match adapter check the sp-11w Note
+  describes.
+
+So what the sp-ajz Note records is that V04 makes the concurrent build
+*available* - on Postgres, to a host whose migration module is shaped for
+it - and not that every host's index is built concurrently from V04 on.
+The Note's body says exactly that already; this errata corrects only its
+heading, which a merged record cannot be edited to fix.
+
+Nothing in decisions 1, 2, 3 or 4 moves, and nothing in the sp-t57, sp-11w
+or sp-ajz Notes is withdrawn.
