@@ -202,6 +202,19 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
       assert tables() == ["sq_charts", "sq_inputs", "sq_positions", "sq_runs"]
     end
 
+    # sabotage: pointed expected_version/0 at @initial_version -> red at
+    # the first assertion (left 1, right 5), this case and its Postgres
+    # twin alone ("45 tests, 2 failures"). Verified red, reverted. The number is backend-independent by construction -
+    # it is the newest key of the migration map and reads no repo - and
+    # this case is where that is asserted off Postgres.
+    test "expected_version/0 answers the same version this backend migrated through" do
+      assert Migrations.expected_version() == 5
+
+      assert_raise ArgumentError, ~r/unknown migration version/, fn ->
+        Migrations.up(for: Host, version: Migrations.expected_version() + 1)
+      end
+    end
+
     # sabotage: replaced V03.down/1's postgres?() guard with `true`, so
     # down/1 drops an index that was never created -> red, this case alone
     # ("6 tests, 1 failure") with

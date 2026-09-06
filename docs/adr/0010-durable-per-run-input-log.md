@@ -521,6 +521,42 @@ other SQLite case already lives. SQLite is still not a lesser tier: append
 and list, denseness from zero, run isolation, the cap and its marker, and
 the verbatim event round-trip are all asserted against it.
 
+**Note (2026-09-06, `sp-b0g`):** whether a host needs the V05 table at all,
+answered from the code on `main`. **An adapter that does not export the
+callbacks never touches it, and its host does not need it.** Above the
+adapter there is exactly one write site and one read site, and both stop
+before the seam when the log is unsupported: `Runs.stepped/6` appends
+through `Storage.append_input/4`, which answers `:not_supported` *without
+calling the adapter* when `Storage.input_log_supported?/1` is false, and
+`Runs.append_input/4` reads that as `:ok`; `Runs.inputs/2` reads through
+`Storage.list_inputs/2`, which is the only other caller. Below the seam,
+`StatifierPersistence.Storage.Ecto` names the inputs table in
+`append_input/3`, `list_inputs/2` and their private helpers and nowhere
+else - not in `insert_run/2`, not in the metadata listings, not in
+`isolate/1`, and in no cascade, because there is none. Everywhere else in
+the package the table is a *name*, not a query: `Ecto.Config`'s
+`@table_keys`, `t:StatifierPersistence.Ecto.KeyGenerator.table/0`, the
+`:uxid` prefix map, and the `Input` schema `use StatifierPersistence.Ecto`
+generates - and a generated schema module costs nothing until something
+queries it. So a host on an adapter of its own that keeps no log caps its
+migration at V04, in both directions, with the moduledoc's capped recipe:
+`up(for: MyApp.Persistence, version: 4)` beside
+`down(for: MyApp.Persistence, from: 4)`. It carries no empty table, and
+decision 1's "refuses at no door" is what makes that safe.
+
+**The in-package Ecto adapter is the other case, and it is not optional.**
+`Storage.Ecto.supports_input_log?/1` answers `true` unconditionally - it
+probes nothing - so a host that stores through `Storage.Ecto` gets the log
+whether or not it ever replays, and the table has to be there: the first
+stepped event appends, and a failed append fails the step (only
+`{:error, :input_log_full}` is tolerated, and that arm is the host's own
+cap, not a missing table). `input_log_cap:` does not buy an opt-out either,
+because the cap's last slot is still a written row - decision 6's closed
+marker. A `Storage.Ecto` host that wants no input log at all has no way to
+say so today; that is the trigger, if it fires, and the fix would be a
+declaration at `init/1` that makes this adapter's answer conditional, not a
+change to the two callbacks decided here.
+
 ## Consequences
 
 - A persisted run becomes replayable for the first time. That is `sp-2sg`'s
