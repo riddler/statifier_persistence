@@ -433,3 +433,181 @@ widen. The amendment's ordered set with per-child status is the logical
 parent-side view of the linkage, whose "concrete encoding is the
 implementation plan's, not this record's" - and today that view is derived
 from the children rather than stored on the parent.
+
+## Amendment (2026-09-06, sp-n8g): a run fails when its chart settles in a failure-classed final, tagged in that final's `<donedata>`
+
+Decision 5's cascade and `sb-ADR-0009` decision 6's `first_error` policy
+both key on a child run being `:failed`, and until now a chart had no way
+to become one. `StatifierPersistence.Runs`' `run_status/2` reaches
+`:failed` from budget exhaustion and from nothing else, and `Runs.fail/4`
+is a host decision about a run rather than a chart transition (ADR-0004
+decision 6). So a child whose chart handles its own error and settles
+deliberately - the ordinary shape of *this one finished badly* - completes
+as `:completed`, `first_error` never fires, and its siblings run on.
+Campaign 031's fan-out proof hit exactly that and worked around it
+host-side, translating the condition through the public
+`StatifierPersistence.Driver.answer_parent/3`.
+
+This amendment closes that seam, per the operator's campaign-033 ruling of
+2026-09-06. Its sibling is bead `sb-napt` in `statifier_blocks`, which
+spends the tag named below in the block outcome vocabulary; ownership
+splits the way decision 3 already splits it, stepping and run status here,
+handler and block shape there. What follows is this package's half, and it
+is deliberately the smaller half: one tag, one status arm, and no new
+public function.
+
+**1. The tag is a reserved `<donedata>` key,
+`statifier_persistence:run_status`, whose value is `failed`.** A final
+declares itself failure-classed by carrying one `<param>`, and needs
+nothing else to say it - whatever other `<param>`s it carries for its
+own reasons:
+
+    <final id="ended_badly">
+      <donedata>
+        <param name="statifier_persistence:run_status" expr="'failed'"/>
+      </donedata>
+    </final>
+
+The value set is **closed at `"failed"`**. Any other value - `"completed"`,
+`"cancelled"`, an integer, an unresolved expression - is ignored, and the
+run takes the status it would have taken without the key at all. A chart
+may therefore ask for exactly one thing, which is the one thing decision 5
+and `first_error` need to hear; a chart cannot claim `:completed` it did
+not reach or a `:cancelled` that is the parent's word and not its own.
+Widening the set is a later record's business and would reopen this one.
+
+`<donedata>` is the carrier because it is the only place the durable
+stepper can read a chart's own word without either a core change or a
+layering violation, and two alternatives were considered and rejected on
+exactly that ground:
+
+- **A convention on the final's state id.** The `{:done, %Done{}}` effect
+  carries `configuration`, and `MachineState` carries the compiled
+  `machine`, so a state id *is* reachable here. But the ids a block
+  compiler mints are its own grammar (`statifier_blocks` mints its
+  root-termination finals under a `root_` role), and matching on them
+  would make this package read a downstream compiler's naming scheme.
+  A hand-written chart would have to adopt that scheme to say the same
+  thing.
+- **A compiled attribute on `<final>`.** SCXML declares no such
+  attribute, so this would be a core change in `statifier`, which owns
+  the interpreter contract and not this package. A seam this package can
+  build inside its own contract does not get to reach upstream for one
+  bit.
+
+`<donedata>` costs neither. It is chart-visible, it is what a final is
+already for, it needs no compiler and no core change, and it crosses the
+invoke boundary unchanged - which matters, because the reader is often the
+parent's settlement rather than the child's own host.
+
+The key is namespaced the way decision 2 namespaces linkage metadata: a
+reserved, package-owned prefix, read by this package only, with everything
+outside it left exactly as opaque as it was. The separator is a **colon
+rather than a dot** on purpose. A dotted key would be indistinguishable in
+a predicator path expression from a nested map, so
+`_event.data.statifier_persistence.run_status` would resolve a
+`statifier_persistence` submap that is not there; a colon is not a
+predicator identifier character, so the reserved key can be written by any
+chart and pathed into by none. The name survives the whole pipeline as a
+flat string key: on `statifier` 2.3.0, the floor this package depends on,
+the final above resolves to `%{"statifier_persistence:run_status" =>
+"failed"}` and compiles with no finding.
+
+**2. The tag is read on the step that produced the `{:done, _}` effect,
+and that step's run is `:failed`.** `run_status/2` gains a third
+arm, ahead of its `machine_state.status == :done` arm and behind its
+budget arm, so the order it decides in is: budget exhausted, then
+failure-classed final, then done, then active. Both of the middle two
+conditions hold on the same step - a failure-classed final *is* a top-level
+final - and the tag is the tie-break.
+
+Three things follow, and each is a deliberate narrowing rather than an
+omission:
+
+- The step is an ordinary successful step. It returns
+  `{:ok, %StatifierPersistence.Run{status: :failed}, machine_state}`, not
+  the `{:error, {:budget_exhausted, _}}` shape that route returns; a chart
+  that says it failed has not malfunctioned, it has finished.
+- The run's `donedata` carries the resolved `<donedata>` **verbatim, tag
+  included**. Nothing is stripped. The tag's second reader is the block
+  half's collect over a failed child, which needs to see it on the answer
+  the parent is given, and this package does not edit chart-authored data
+  on its way past (the same posture ADR-0006 decision 1 takes toward
+  metadata).
+- The run record's short `failure` string is `"failed_final"`, in the
+  `<reason>` shape `failure_string/1` already writes for budget exhaustion,
+  and it is the same string
+  `[:statifier_persistence, :run, :terminated]` reports as `reason` and
+  `maybe_answer_parent/3` sends the parent as `{:failed, reason: ...}`.
+  Whether a detail is appended after a colon is the implementation plan's,
+  as it is for the budget string.
+
+**3. Settlement gains no rule.** This is the part worth stating plainly,
+because it is what makes the amendment small. `Driver`'s `maybe_cancel/4`
+already reads `Enum.any?(states, &(&1.status == :failed))` for a
+`:first_error` linkage, and `terminal?/1` already counts `:failed` among
+the three terminal statuses `settled?/3` waits for. So a chart-authored
+failure cancels its live siblings through the cascade decision 5 built,
+cancels its unstarted ones through the scheduler seam, and settles the
+invocation - all by the path that already exists, reached by a status that
+could not previously be produced. The seam was never a missing settlement
+rule. It was a missing transition.
+
+**4. Budget exhaustion stays a second route, and an unhandled `error.*`
+is not a route at all.** Both halves are decided, and the second is the
+one the operator ruled explicitly.
+
+Budget exhaustion is untouched: it still yields `:failed`, still returns
+`{:error, {:budget_exhausted, _}}`, and still writes its own `failure`
+string. Two routes to one status is the intended shape - a run that
+exhausted its macrostep budget and a run that reached a failure-classed
+final are both failed, and a reader who needs to tell them apart reads the
+`failure` string, which is what it is for.
+
+An unhandled `error.communication` or `error.execution` that leaves a chart
+with nowhere to go does **not** fail the run. Crash-as-failed was
+considered and rejected: whether a chart that cannot continue has *failed*
+is a judgement, and this record puts that judgement with the chart author,
+who states it by transitioning to a failure-classed final, and with the
+host, who states it through `Runs.fail/4`. It does not put it with the
+stepper, which would have to infer intent from an event nobody handled.
+The practical consequence is unchanged from today and is the honest one: a
+chart that raises an error it does not catch stays `:active`, and that is a
+chart bug the author fixes with a transition, not a status this package
+invents on the author's behalf.
+
+**5. A document compiled to terminate carries `<donedata>` on its
+failure-classed finals.** Named here because the tag's carrier forces it,
+and because the block half copies the spelling from this record rather
+than re-deriving it.
+
+`statifier_blocks`' compiler emits a top-level `<final>` per root outcome
+under two options, and only one of them emits `<donedata>` today: a
+`:child_use` final carries `<param name="outcome" expr="'<outcome>'"/>`,
+and a `:terminate` final carries none, because nothing was listening. The
+tag rides `<donedata>`, so a failure-classed outcome needs one under both.
+That is a change to what a terminating document emits, and it belongs to
+`sb-napt` along with every question this record does not answer: which
+outcomes are failure-classed, how a block type declares that, and what
+`core.map`'s collect does with a failed child. This record fixes the
+spelling and nothing above it.
+
+**6. The reference embedder's translation is deleted, not deprecated.**
+`statifier_examples`' durable fan-out chart today inspects each chunk
+child after its create-drive returns, finds it `:active`, and answers the
+parent through `Driver.answer_parent/3` with
+`{:failed, reason: "chunk_call_refused"}`. That code exists only because
+this seam did not: with the chart routing its refusal to a failure-classed
+final, the child reaches `:failed` on its own step and the driver's
+automatic path answers the parent with no host in the loop. The host-side
+translation goes away entirely rather than being kept as a supported
+alternative - a second way to say a child failed is a second thing to keep
+consistent with settlement, and `answer_parent/3` remains public for what
+it is actually for, a host answering for a party that is not a run.
+
+**Proposed, not accepted, and not implemented.** This amendment carries no
+`lib/` change and no test, in the same posture the sp-3n2 amendment above
+records for itself. `sp-hia` implements it - the `run_status/2` arm, the
+`failure` string, and a case that drives a failure-classed final through a
+`:first_error` fan-out - and this section's acceptance is recorded
+separately once that lands.

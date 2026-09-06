@@ -241,3 +241,34 @@ Read ADR-0007 for why the arm exists - the liveness read against
 `active_invocations` has to be taken inside `with_run/3` (decision 5) under
 the same exclusion as the step it gates, which is only expressible if the
 event is built after the load.
+
+## Note (2026-09-06, sp-n8g): decision 6's "the `:done` effect is the only path to `:completed`" is one-directional
+
+Recording clarification only. Nothing in the decisions above changes; the
+sentence is exact and stays exact, and this note is here because its
+converse is about to stop holding and a reader who assumed the converse
+would be surprised by the code.
+
+Decision 6 says two things and this note touches only how they are read.
+"The `:done` effect is the only path to `:completed`" says that nothing
+*except* a `:done` effect can complete a run, and that remains true. It
+does not say that a `:done` effect always completes one, and after
+ADR-0008's 2026-09-06 amendment (`sp-n8g`) it will not: a chart that
+settles in a final tagged failure-classed in its own `<donedata>` produces
+the same single `:done` effect and takes `:failed` instead. The tie-break
+sits in `StatifierPersistence.Runs`' `run_status/2` and nowhere else, so
+the arm order there - budget, then the failure tag, then `:done` - is the
+whole of the difference.
+
+Decision 6's second half is untouched in both readings. `fail/4` remains
+"the only host-driven terminal transition", because a failure-classed
+final is not host-driven: it is the chart saying so, in the same breath it
+reaches its final, through the same effect. That is the point of putting
+the tag on the chart rather than adding a public `complete/2`-shaped
+counterpart for failure, which decision 6 refused and this note does not
+reopen.
+
+The Consequences list above is likewise unmoved. Its reopener is "an
+effect the lifecycle must consume beyond the two named (`:done`,
+`:budget_exhausted`)", and the amendment adds no third effect - it reads a
+field of the first one.
