@@ -16,6 +16,7 @@ defmodule StatifierPersistence.DriverFanoutTest do
   alias StatifierPersistence.Run.Linkage
   alias StatifierPersistence.Storage.InMemory
 
+  alias StatifierPersistence.Test.LockOrderRecorder
   alias StatifierPersistence.Test.OutcomeWindowSerialization
 
   alias StatifierPersistence.Test.{
@@ -524,6 +525,86 @@ defmodule StatifierPersistence.DriverFanoutTest do
                Driver.answer_parent(parent_driver(store), child_run_id, {:done, "explicit"})
 
       assert leaves(reload_parent(store)) == ["calling"]
+    end
+  end
+
+  describe "lock acquisition order" do
+    # sp-oq4's audit, pinned. Under `first_error` the settlement holds the
+    # PARENT's exclusion (`Driver.decide/4`) and the cascade writes the
+    # siblings' rows from inside it, each under its own; meanwhile every
+    # sibling's own drive holds that same sibling's exclusion. Two
+    # connections, two lock sets, and the one place on this path where a
+    # lock-order cycle is conceivable at all.
+    #
+    # It is not reachable, and this is why: every exclusion taken while
+    # another is held is taken on a STRICT DESCENDANT of the one held.
+    # `Linkage.child_run_id/3` makes a child's run id strictly extend its
+    # parent's, so "descendant" is a prefix test and the run tree is
+    # acyclic by construction (ADR-0008 decision 6) - a wait-for relation
+    # that only ever runs parent-to-child down an acyclic tree has no
+    # cycle in it, on Postgres advisory locks or anywhere else.
+    #
+    # The upward acquisition - a child answering its parent - is the case
+    # that would close a cycle, and it is taken with NOTHING held: the
+    # child's own drive commits and releases its own exclusion before
+    # `maybe_answer_parent/3` runs, and `settle_child/4` answers the
+    # parent's door after `decide/4`'s exclusion has closed, not inside
+    # it. Assertion (3) is what pins that.
+    #
+    # Both sabotages below fail this case by HANGING rather than by
+    # tripping an assert, which is the finding rather than a weakness in
+    # them: `Storage.InMemory.lock_run/3` is not reentrant, so an
+    # acquisition that is not on a strict descendant is one that can name
+    # a run this process already holds - and then it waits for itself.
+    # That is the shape of the cycle this case exists to rule out, drawn
+    # inside one process because a single connection is where it is
+    # reproducible.
+    #
+    # sabotage: in Driver.decide/4, take the exclusion on `child_run_id`
+    # instead of `linkage.parent_run_id` -> red, the cascade's own cancel
+    # of index 1 asked for the exclusion the settlement was already
+    # holding and the case timed out inside Runs.cascade_cancel/3.
+    # Verified red, reverted.
+    # sabotage: in Driver.record_and_settle/5, answer the parent's door
+    # from inside the settlement's own exclusion (respond_to_parent/3 on
+    # the assembled answer) rather than from settle_child/4 after it
+    # closes -> red, `reenter/5` asked for "run_1" while "run_1" was held
+    # and the case timed out. Verified red, reverted.
+    test "every nested exclusion is taken on a strict descendant of the one held", %{
+      store: store
+    } do
+      strategy = {LockOrderRecorder, {self(), store}}
+
+      parent = start_parent(store)
+      start_children(parent, 3, policy: :first_error)
+
+      finish_child(store, 0, serialization: strategy)
+      refuse_child(store, 1, serialization: strategy)
+
+      assert leaves(reload_parent(store)) == ["approved"]
+
+      acquisitions = for {:acquire, run_id, held} <- LockOrderRecorder.trace(), do: {run_id, held}
+
+      # (1) The direction, over every acquisition the run made.
+      upward =
+        for {run_id, held} <- acquisitions,
+            holder <- held,
+            not String.starts_with?(run_id, holder <> "/"),
+            do: {holder, run_id}
+
+      assert upward == []
+
+      # (2) Not vacuous: the settlement really does nest, so (1) is a
+      # statement about a relation that exists.
+      assert {Linkage.child_run_id("run_1", "call", 2), ["run_1"]} in acquisitions
+
+      # (3) Every acquisition of the PARENT's exclusion is taken holding
+      # nothing - the child's own exclusion is already closed, so no
+      # connection ever holds a child and waits for its parent.
+      parent_acquisitions = for {"run_1", held} <- acquisitions, do: held
+
+      assert parent_acquisitions != []
+      assert Enum.all?(parent_acquisitions, &(&1 == []))
     end
   end
 

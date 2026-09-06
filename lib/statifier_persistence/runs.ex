@@ -492,6 +492,21 @@ defmodule StatifierPersistence.Runs do
   own descendant. This is why no depth ceiling is needed (ADR-0008
   decision 6).
 
+  That same fact is what makes the lock order safe, which is worth stating
+  because this walk is the one place a cycle would be conceivable. It runs
+  from inside the caller's own exclusion on every path that has one - the
+  `{:cancel_invoke, _}` effect fires inside the exiting run's, and
+  `first_error`'s settlement fires it inside the PARENT's - and it only
+  ever takes an exclusion on a run further down that same subtree. Nothing
+  here holds a descendant's exclusion and then asks for an ancestor's: a
+  child releases its own before answering its parent
+  (`Driver.maybe_answer_parent/3` runs after the drive returns), and the
+  parent's door is stepped after the settlement's exclusion closes rather
+  than inside it. So the wait-for relation between two connections embeds
+  in the run tree, and an acyclic tree has no cycle to deadlock on.
+  `test/statifier_persistence/driver_fanout_test.exs` pins the direction;
+  its Ecto variant runs it against real Postgres advisory locks.
+
   `metadata_match` is a `StatifierPersistence.Run.Linkage` containment map -
   `Linkage.invocation_match/2` to cancel one invocation's subtree,
   `Linkage.parent_match/1` for every child a parent has ever started. `opts`
