@@ -187,7 +187,7 @@ and closes inside it.
 | Event | Emitted from | Measurements | Metadata |
 |---|---|---|---|
 | `[:statifier_persistence, :run, :step, :start]` | `Runs`, immediately inside `serialized/4` | `system_time`, `monotonic_time` | `run_id`, `entry`, `span_ref` |
-| `[:statifier_persistence, :run, :step, :stop]` | the same call, on every return path | `duration`, `monotonic_time` | `run_id`, `session_id`, `content_hash`, `entry`, `outcome`, `status`, `reason`, `span_ref` |
+| `[:statifier_persistence, :run, :step, :stop]` | the same call, on every return path | `duration`, `monotonic_time` | `run_id`, `session_id`, `content_hash`, `entry`, `outcome`, `status`, `reason`, `span_ref`, `invoke_id`, `child_count` |
 | `[:statifier_persistence, :run, :lock]` | `serialized/4`, after `strategy.with_run/3` returns or refuses | `duration` (the wait, not the held time), `system_time` | `run_id`, `strategy`, `outcome`, `reason` |
 
 `entry` is which public door was used: `:create`, `:step`,
@@ -206,6 +206,16 @@ folding it into a metric dimension must narrow it first.
 `session_id` is `nil` on the stop when the step never got as far as a
 decoded position: a terminal-run discard reads the run record only, and a
 lock refusal or an identity refusal never loads at all.
+
+`invoke_id` and `child_count` are the settlement dimensions, and they are
+`nil` on every ordinary drive. `StatifierPersistence.Driver` sets them
+beside `entry: :answer_parent`, so the step that carries a fan-out's whole
+assembled answer through the parent's door is recognisable as that one and
+not as any other invocation answer; `child_count` is `nil` for a
+single-child subchart, which has no width. They are metadata rather than
+measurements because they are dimensions of the span rather than
+quantities it measured - the departure from the numbers-are-measurements
+split that the ADR-0009 sp-8wv amendment records.
 
 `[:statifier_persistence, :run, :lock]`'s `duration` is the wait for the
 per-run exclusion, which is the number that says whether a host's
@@ -306,7 +316,9 @@ Emitted on the parent's stepping process, at dispatch time.
 |---|---|---|---|
 | `[:statifier_persistence, :child, :started]` | `Driver.start_child/3`, after `adopt_child/3` | `system_time` | `parent_run_id`, `child_run_id`, `invoke_id`, `child_index`, `content_hash`, `session_id` |
 | `[:statifier_persistence, :child, :refused]` | the same chain, on any refusal | `system_time` | `parent_run_id`, `invoke_id`, `reason` |
-| `[:statifier_persistence, :child, :answered]` | `Driver.answer_parent/3`, after the parent's door returns | `system_time` | `child_run_id`, `parent_run_id`, `invoke_id`, `outcome` |
+| `[:statifier_persistence, :child, :recorded]` | `Driver.record_and_settle/5`, after the child's own answer is written | `system_time` | `parent_run_id`, `child_run_id`, `invoke_id`, `child_index`, `outcome` |
+| `[:statifier_persistence, :child, :answered]` | `Driver.answer_parent/3`, after the parent's door returns | `system_time` | `child_run_id`, `parent_run_id`, `invoke_id`, `outcome`, `child_count`, `failed_count` |
+| `[:statifier_persistence, :child, :settled]` | `Driver.settle/3`, once per decision | `system_time`, `child_count`, `completed`, `failed`, `cancelled`, `unstarted` | `parent_run_id`, `invoke_id`, `policy`, `decision` |
 | `[:statifier_persistence, :child, :cascade_cancelled]` | `Runs.cascade_cancel/3`, after the sweep | `system_time`, `count`, `retained` | `parent_run_id`, `invoke_id` |
 
 `content_hash` on `:started` is the child's *pinned* hash - ADR-0008
@@ -324,7 +336,34 @@ reach the chart as `{:failed, reason: "child_run_creation_failed", detail:
 detail}`, so a host sees them there too - but only as a chart-level
 failure, without which of the four it was.
 
-`:answered`'s `outcome` is `:done` or `:failed`, mirroring the two doors.
+`:answered`'s `outcome` is `:done` or `:failed`. For a single child it
+mirrors the two doors, and `child_count` and `failed_count` are `nil`: one
+child is not an invocation with a width. For a **fan-out** it is the
+*invocation's* aggregate - `:failed` when any index failed - which is not
+the door: a fan-out that lost an index still answers through
+`done_invocation/5` with a dense list, because st-ADR-0068's failure shape
+is inside the entry rather than around the list. Reporting the door said
+`outcome: :done` for a settlement that failed, which is the one thing a
+consumer counts this event to learn (the ADR-0009 sp-8wv amendment).
+`failed_count` is how many entries in that list failed.
+
+`:recorded` and `:settled` are the fan-out settlement seam, and both are
+emitted **inside the parent's settlement exclusion**, which is what makes
+them trustworthy: a `:recorded` cannot claim an answer the settlement that
+follows will not read.
+
+`:recorded` fires once per child answer written to a child's own run
+record. Every index but the settling one records an answer that reaches no
+door at all - nine of ten for a ten-wide fan-out - so this is the only
+surface those answers appear on.
+
+`:settled` fires once per decision the settlement section reaches, and not
+at all for a read that failed before reaching one. `decision` is `:answer`
+or `:not_yet`. The four tallies are read off the same states the decision
+was made from, the `first_error` cancels included, and `unstarted` is the
+indexes with no run of their own at all - which is what tells a fan-out
+still starting from one that is stuck. They partition `child_count` only
+once every index has a run.
 
 `count` on `:cascade_cancelled` is how many runs the sweep actually
 cancelled and `retained` is how many it found already terminal and left
@@ -449,6 +488,15 @@ What the events are built to let the bridge do:
   `content_hash` and the child's `session_id` - everything needed for a
   link, with nothing read out of `Run.Linkage`. Parenthood would hold the
   parent's trace open for the child's whole life.
+
+- **A fan-out is reassembled from `:recorded` and `:settled`, not from the
+  parent's span.** The invocation is not an interval anything here owns:
+  its children run on N nodes over N intervals, and the only thing that
+  happens at one place and time is each settlement decision. So a bridge
+  reads the invocation as the `(parent_run_id, invoke_id)` pair those two
+  events share with `:started` and `:answered`, counts the recorded
+  answers against `child_count`, and reads the last `:settled` -
+  `decision: :answer` - as the point the parent moved.
 
 - **`trigger` is a pass-through string.** No event here originates one, but
   the macrostep events this package emits through `Statifier.Telemetry`

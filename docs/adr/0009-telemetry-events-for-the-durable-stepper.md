@@ -431,3 +431,104 @@ position (`st-ADR-0060`).
   calling `Statifier.Telemetry`. `st-ADR-0067` decision 1 already weighed
   and rejected it for the whole family; restating it here would be this
   package relitigating a contract it defers to.
+
+## Amendment (2026-09-06, sp-8wv): the fan-out settlement gets three events of its own, and `:answered` reports the invocation rather than the door
+
+Decision 5's seams were written before Tier A's fan-out existed. The
+settlement section that ADR-0008's sp-3n2 amendment added -
+`StatifierPersistence.Driver`'s `decide/4`, `record_and_settle/5` and
+`settle/3`, all inside the parent's own exclusion - emits nothing, and a
+read-only run of a hybrid fan-out under the bridge (campaign 033's W0
+scout) found three specific holes:
+
+- **Every recorded answer but one is invisible.** A settlement writes the
+  finishing child's answer to that child's run record and then asks
+  whether every index is terminal. Nine of ten answers in a ten-wide
+  fan-out are written and never reach a door, so nothing reported them.
+- **The decision itself is invisible.** `:not_yet` is the ordinary answer,
+  and an invocation that never settles is indistinguishable from one that
+  never started: the counts the decision was made from - how many indexes
+  completed, failed, were cancelled, or have no run at all - exist only
+  inside `settle/3`.
+- **`[:statifier_persistence, :child, :answered]` reported the door, not
+  the outcome.** A fan-out answers its parent through
+  `done_invocation/5` whatever happened, because st-ADR-0068's failure
+  shape is inside each entry rather than around the list. So a
+  `first_error` settlement whose second index failed reported
+  `outcome: :done`, which is the one thing a consumer counts this event to
+  learn.
+
+This amendment is additive under decision 8: two new names and three new
+metadata keys, no rename and no removal. It is this package's half of the
+campaign-034 ruling of 2026-09-06 (`RQ-034-12`); nothing about the trace
+wire format changes, because these are `:telemetry` events.
+
+**1. `[:statifier_persistence, :child, :recorded]`, once per recorded
+answer.** Metadata `parent_run_id`, `child_run_id`, `invoke_id`,
+`child_index`, `outcome` (`:done` or `:failed`); measurement
+`system_time`. Emitted from `record_and_settle/5` after the write and
+inside the parent's exclusion, so it cannot report an answer the
+settlement that follows will not read.
+
+**2. `[:statifier_persistence, :child, :settled]`, once per settlement
+decision.** Metadata `parent_run_id`, `invoke_id`, `policy`, `decision`
+(`:answer` or `:not_yet`); measurements `system_time`, `child_count`,
+`completed`, `failed`, `cancelled`, `unstarted`. Emitted from `settle/3`
+*after* the decision, so the tallies include the cancels a `first_error`
+sweep had just written. A read that fails before reaching a decision emits
+nothing: there is no decision to report.
+
+The four tallies are measurements because they are always numbers, per
+decision 3. They partition `child_count` only once every index has a run
+of its own; `unstarted` is the indexes with none, which is what tells a
+fan-out still starting from one that is stuck.
+
+**3. `:answered`'s `outcome` is the invocation's aggregate for a fan-out,
+and it carries `child_count` and `failed_count`.** The aggregate is
+`:failed` when any index's entry failed and `:done` otherwise, read off
+the dense list the parent is about to be answered with. This changes the
+*value* of an existing key rather than the key itself, and it is
+deliberately the reading decision 8's amendment discipline permits: the
+key still means "how this invocation came out", and it now says so
+truthfully. The single-child path is unchanged and reports the door, with
+`child_count` and `failed_count` `nil` - one child is not an invocation
+with a width, and the two `nil`s say so rather than defaulting to `1` and
+`0`.
+
+`child_count` and `failed_count` are metadata rather than measurements,
+which is the one place this record's numbers-are-measurements split
+(decision 3) does not decide the question: a key that is `nil` on a whole
+class of emissions cannot be a measurement, and both are dimensions a
+consumer groups by rather than quantities it averages.
+
+**4. `[:statifier_persistence, :run, :step, :stop]` gains `invoke_id` and
+`child_count`.** Both `nil` on every ordinary drive, and set by
+`StatifierPersistence.Driver` beside `entry: :answer_parent`. The step
+span that carries a whole fan-out's assembled answer through the parent's
+door was previously indistinguishable from any other invocation answer,
+and `entry` alone cannot separate them. They ride as metadata for the same
+reason as decision 3 above: they are dimensions of the span, not
+quantities it measured. They are `StatifierPersistence.Runs` options this
+package sets on its own behalf, never a host's - the same posture as
+`entry:`.
+
+**Consequences of this amendment.**
+
+- Decision 8's frozen list grows from fourteen event names to **sixteen**.
+  The Consequences section above and `docs/adr/README.md`'s index row
+  still say fourteen; this clause is the correction, by addition, since an
+  accepted record's text is amended and not rewritten.
+- A bridge reassembles a fan-out from `(parent_run_id, invoke_id)` across
+  `:started`, `:recorded`, `:settled` and `:answered`, with nothing read
+  out of `Run.Linkage` and no interval invented for an invocation that
+  does not have one. `docs/telemetry.md`'s bridge section states that.
+- Cardinality is unchanged in kind: `child_index`, `policy` and `decision`
+  are bounded by the chart or by a closed vocabulary, and the new counts
+  are measurements. Nothing host-opaque travels - decision 7 holds, and in
+  particular no entry's `donedata` is on any of these events. The
+  aggregate outcome is computed *from* the entries and only the verdict
+  and the failure count leave.
+- What would reopen this: a settlement seam that is genuinely an interval
+  somebody owns (a single-node fan-out driver), which would want a
+  `:start`/`:stop` pair rather than the point-in-time `:settled` this
+  clause adds.

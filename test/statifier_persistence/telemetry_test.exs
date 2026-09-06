@@ -89,6 +89,42 @@ defmodule StatifierPersistence.TelemetryTest do
   </scxml>
   """
 
+  # The fan-out parent: one `<invoke>` the scheduler fans out, resting in
+  # "calling" with the invocation answered `:pending`.
+  @fanout_parent_source """
+  <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="calling">
+      <state id="calling">
+          <invoke id="call" type="myapp:map"/>
+          <transition event="done.invoke.call" target="approved"/>
+          <transition event="error.communication.invoke.call" target="refused"/>
+      </state>
+      <state id="approved"/>
+      <state id="refused"/>
+  </scxml>
+  """
+
+  # A fan-out child: "go" completes it with its own item as donedata,
+  # "refuse" reaches a failure-classed final (ADR-0008's 2026-09-06
+  # amendment), which is what makes `first_error` fire with no host in the
+  # loop.
+  @fanout_child_source """
+  <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="idle">
+      <datamodel><data id="item"/></datamodel>
+      <state id="idle">
+          <transition event="go" target="done"/>
+          <transition event="refuse" target="refused"/>
+      </state>
+      <final id="done">
+          <donedata><content expr="item"/></donedata>
+      </final>
+      <final id="refused">
+          <donedata>
+              <param name="statifier_persistence:run_status" expr="'failed'"/>
+          </donedata>
+      </final>
+  </scxml>
+  """
+
   # A child that completes with donedata on "go" - the answer fixture.
   @child_done_source """
   <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="idle">
@@ -132,10 +168,10 @@ defmodule StatifierPersistence.TelemetryTest do
   describe "events/0 (ADR-0009 decision 8)" do
     # Sabotage: dropped @run_lock from @events - the count assertion went
     # red, which is the whole point of a bridge attaching from this list.
-    test "returns all fourteen names, unique, under this package's prefix" do
+    test "returns all sixteen names, unique, under this package's prefix" do
       events = Telemetry.events()
 
-      assert length(events) == 14
+      assert length(events) == 16
       assert Enum.uniq(events) == events
 
       assert Enum.all?(events, fn [prefix | rest] ->
@@ -159,7 +195,9 @@ defmodule StatifierPersistence.TelemetryTest do
                [:statifier_persistence, :drive, :turns_exhausted],
                [:statifier_persistence, :child, :started],
                [:statifier_persistence, :child, :refused],
+               [:statifier_persistence, :child, :recorded],
                [:statifier_persistence, :child, :answered],
+               [:statifier_persistence, :child, :settled],
                [:statifier_persistence, :child, :cascade_cancelled]
              ]
     end
@@ -188,8 +226,10 @@ defmodule StatifierPersistence.TelemetryTest do
       assert stop_m.duration >= 0
 
       assert Map.keys(stop_meta) |> Enum.sort() == [
+               :child_count,
                :content_hash,
                :entry,
+               :invoke_id,
                :outcome,
                :reason,
                :run_id,
@@ -200,6 +240,11 @@ defmodule StatifierPersistence.TelemetryTest do
 
       assert stop_meta.span_ref == start_meta.span_ref
       assert stop_meta.outcome == :ok
+
+      # An ordinary drive answers no invocation, so the two settlement
+      # dimensions are honestly absent rather than defaulted.
+      assert stop_meta.invoke_id == nil
+      assert stop_meta.child_count == nil
       assert stop_meta.status == :active
       assert stop_meta.reason == nil
       assert is_binary(stop_meta.content_hash)
@@ -711,7 +756,9 @@ defmodule StatifierPersistence.TelemetryTest do
       assert Map.keys(m) == [:system_time]
 
       assert Map.keys(meta) |> Enum.sort() == [
+               :child_count,
                :child_run_id,
+               :failed_count,
                :invoke_id,
                :outcome,
                :parent_run_id
@@ -721,6 +768,15 @@ defmodule StatifierPersistence.TelemetryTest do
       assert meta.parent_run_id == "run-1"
       assert meta.invoke_id == "call"
       assert meta.outcome == :done
+
+      # A single-child subchart is not an invocation with a width, so
+      # both aggregate counts are nil rather than 1 and 0.
+      assert meta.child_count == nil
+      assert meta.failed_count == nil
+
+      # Nothing settles a single child, so neither settlement event fires.
+      refute_received {:telemetry, [:statifier_persistence, :child, :recorded], _m, _meta}
+      refute_received {:telemetry, [:statifier_persistence, :child, :settled], _m, _meta}
     end
 
     # Sabotage: made cancel_counted/3 tally an already-terminal run as
@@ -763,6 +819,145 @@ defmodule StatifierPersistence.TelemetryTest do
       assert {_m, meta} = await([:statifier_persistence, :child, :cascade_cancelled])
       assert meta.parent_run_id == "run-1"
       assert meta.invoke_id == nil
+    end
+  end
+
+  describe "the fan-out settlement seam (the ADR-0009 sp-8wv amendment)" do
+    # Sabotage: dropped the report_recorded/3 call from
+    # record_and_settle/5 - red at the first assertion; before this event
+    # every recorded answer but the settling one was invisible, which is
+    # the gap the amendment names.
+    test "reports every recorded answer, not only the settling one", %{store: store} do
+      driver = fanout_driver(store)
+      start_children(driver, 3)
+      drain()
+
+      for index <- [2, 0, 1], do: finish_child(store, index)
+
+      recorded =
+        for _index <- 0..2 do
+          {m, meta} = one([:statifier_persistence, :child, :recorded], fn _meta -> true end)
+          assert Map.keys(m) == [:system_time]
+
+          assert Map.keys(meta) |> Enum.sort() == [
+                   :child_index,
+                   :child_run_id,
+                   :invoke_id,
+                   :outcome,
+                   :parent_run_id
+                 ]
+
+          assert meta.parent_run_id == "run-1"
+          assert meta.invoke_id == "call"
+          assert meta.child_run_id == Linkage.child_run_id("run-1", "call", meta.child_index)
+          assert meta.outcome == :done
+          meta.child_index
+        end
+
+      # One per child, and each names the index whose answer it wrote.
+      assert Enum.sort(recorded) == [0, 1, 2]
+    end
+
+    # Sabotage: hardcoded report_settled/3's `cancelled` tally to 0 - red
+    # on the first_error case below, which is the settlement whose tallies
+    # a cancel is the whole point of.
+    test "reports one decision per settlement, with the tallies it decided from",
+         %{store: store} do
+      driver = fanout_driver(store)
+      start_children(driver, 3)
+      drain()
+
+      finish_child(store, 0)
+
+      assert {m, meta} = await([:statifier_persistence, :child, :settled])
+
+      assert Map.keys(m) |> Enum.sort() == [
+               :cancelled,
+               :child_count,
+               :completed,
+               :failed,
+               :system_time,
+               :unstarted
+             ]
+
+      assert Map.keys(meta) |> Enum.sort() == [:decision, :invoke_id, :parent_run_id, :policy]
+
+      assert meta.parent_run_id == "run-1"
+      assert meta.invoke_id == "call"
+      assert meta.policy == :all
+      assert meta.decision == :not_yet
+      assert m.child_count == 3
+      assert m.completed == 1
+      assert m.failed == 0
+      assert m.cancelled == 0
+
+      # Two indexes have a run of their own and have not finished; none is
+      # unstarted, because the scheduler already created all three.
+      assert m.unstarted == 0
+
+      drain()
+      finish_child(store, 1)
+      assert {_m, %{decision: :not_yet}} = await([:statifier_persistence, :child, :settled])
+
+      drain()
+      finish_child(store, 2)
+      assert {last_m, %{decision: :answer}} = await([:statifier_persistence, :child, :settled])
+      assert last_m.completed == 3
+    end
+
+    # The conformance case the amendment exists for: a first_error fan-out
+    # answers its parent through done_invocation/5 with a dense list whose
+    # second entry failed, and the old report called that outcome :done.
+    #
+    # Sabotage: made report_settled_answer/3 pass `outcome: :done`
+    # unconditionally - red here and green everywhere else, which is
+    # exactly the defect the fan-out scout observed.
+    test "reports a failed settlement honestly, with the invocation's counts",
+         %{store: store} do
+      driver = fanout_driver(store)
+      start_children(driver, 3, policy: :first_error)
+      drain()
+
+      finish_child(store, 0)
+      refuse_child(store, 1)
+
+      assert {_m, meta} = await([:statifier_persistence, :child, :answered])
+      assert meta.outcome == :failed
+      assert meta.child_count == 3
+      assert meta.failed_count == 1
+      assert meta.parent_run_id == "run-1"
+      assert meta.invoke_id == "call"
+
+      # The settlement that answered says the same thing in tallies: one
+      # completed, one failed, and the live sibling cancelled by the
+      # first_error cascade.
+      assert {settle_m, settle_meta} =
+               one([:statifier_persistence, :child, :settled], &(&1.decision == :answer))
+
+      assert settle_meta.policy == :first_error
+      assert settle_m.completed == 1
+      assert settle_m.failed == 1
+      assert settle_m.cancelled == 1
+    end
+
+    # Sabotage: passed nil for invoke_id and child_count in answer_opts/1
+    # - red;
+    # the step span carrying a whole fan-out's assembled answer was
+    # indistinguishable from any other invocation answer.
+    test "names the invocation and its width on the answering step's stop", %{store: store} do
+      driver = fanout_driver(store)
+      start_children(driver, 2)
+      drain()
+
+      finish_child(store, 0)
+      finish_child(store, 1)
+
+      assert {_m, meta} =
+               one([:statifier_persistence, :run, :step, :stop], &(&1.entry == :answer_parent))
+
+      assert meta.run_id == "run-1"
+      assert meta.invoke_id == "call"
+      assert meta.child_count == 2
     end
   end
 
@@ -812,6 +1007,91 @@ defmodule StatifierPersistence.TelemetryTest do
     fn effect, _context ->
       if elem(effect, 0) in kinds, do: {:error, reason}, else: :ok
     end
+  end
+
+  # The fan-out equivalent of `subchart_driver/3`: the dispatch answers
+  # `:pending`, because this package never starts a fan-out's children -
+  # the scheduler does, through `start_child_at/6`.
+  defp fanout_driver(store) do
+    parent = compile!(@fanout_parent_source)
+
+    charts =
+      Map.new(
+        [parent, compile!(@fanout_child_source)],
+        &{Statifier.Machine.identity(&1).content_hash, &1}
+      )
+
+    driver =
+      Driver.new(store, parent,
+        dispatch: fn "myapp:map", _params, _context -> :pending end,
+        invoke_types: InvokeTypes.new(types: ["myapp:map"]),
+        chart_resolver: fn content_hash -> Map.fetch(charts, content_hash) end
+      )
+
+    {:ok, _run, _ms} = Driver.create(driver, "run-1")
+    driver
+  end
+
+  # Starts `count` children of "run-1" under one policy, each seeded with
+  # its own item so the assembled list is a function of the index.
+  defp start_children(driver, count, opts \\ []) do
+    for index <- 0..(count - 1) do
+      :ok = Driver.start_child_at(driver, "run-1", fanout_effect(index), index, count, opts)
+    end
+  end
+
+  defp fanout_effect(index) do
+    %Statifier.Effect.Invoke{
+      invoke_id: "call",
+      type: "myapp:map",
+      src: nil,
+      params: %{"item" => "item-#{index}"},
+      content: @fanout_child_source,
+      autoforward: nil,
+      state_index: 0,
+      invoke_index: 0,
+      macrostep: 0,
+      microstep: 0,
+      round: 0
+    }
+  end
+
+  # Drives child `index` to a terminal final. Its own drive routes the
+  # completion into the settlement, with no explicit answer call.
+  defp finish_child(store, index), do: drive_child(store, index, "go")
+
+  # The same, to the failure-classed final.
+  defp refuse_child(store, index), do: drive_child(store, index, "refuse")
+
+  defp drive_child(store, index, event) do
+    child = %{fanout_driver_for_child(store) | machine: compile!(@fanout_child_source)}
+
+    {:ok, _run, _ms} =
+      Driver.send_event(
+        child,
+        Linkage.child_run_id("run-1", "call", index),
+        Event.external(event)
+      )
+
+    :ok
+  end
+
+  # A driver over the same store and charts, used to step a child: only
+  # `machine` differs, exactly as `Driver.answer_parent/3` documents.
+  defp fanout_driver_for_child(store) do
+    parent = compile!(@fanout_parent_source)
+
+    charts =
+      Map.new(
+        [parent, compile!(@fanout_child_source)],
+        &{Statifier.Machine.identity(&1).content_hash, &1}
+      )
+
+    Driver.new(store, parent,
+      dispatch: fn _type, _params, _context -> :pending end,
+      invoke_types: InvokeTypes.new(types: ["myapp:map"]),
+      chart_resolver: fn content_hash -> Map.fetch(charts, content_hash) end
+    )
   end
 
   # A driver whose dispatch answers `{:start_child, ...}` with the child
