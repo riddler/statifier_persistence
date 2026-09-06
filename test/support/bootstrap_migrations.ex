@@ -6,11 +6,14 @@ defmodule StatifierPersistence.BootstrapMigrations do
   place - the SQL sandbox rolls each test's rows back, so only the DDL
   persists between runs.
 
-  Migrations 104 and 105 apply V02 (the runs `metadata` column) and V03
-  (the runs `outcome_blob` column and the `metadata` GIN index) on their
-  own with the helper's `from:`/`version:` options, because the migrations
-  before each of them are already recorded as up in any database
-  bootstrapped before that version existed.
+  Migrations 104, 105 and 106 apply V02 (the runs `metadata` column), V03
+  (the runs `outcome_blob` column and the `metadata` GIN index) and V05
+  (ADR-0010's input log table) on their own with the helper's
+  `from:`/`version:` options, because the migrations before each of them
+  are already recorded as up in any database bootstrapped before that
+  version existed. V04 is deliberately absent: it rebuilds V03's index
+  concurrently, which needs a migration module of its own and changes
+  nothing a test reads.
 
   The `Kx*` hosts are not bootstrapped here: the live migration tests
   own their DDL end to end, up and down, and prove the helper itself.
@@ -22,7 +25,8 @@ defmodule StatifierPersistence.BootstrapMigrations do
     {20_260_822_000_102, __MODULE__.OverriddenTables},
     {20_260_829_000_103, __MODULE__.BlobTypedTables},
     {20_260_829_000_104, __MODULE__.RunMetadataColumns},
-    {20_260_905_000_105, __MODULE__.RunOutcomeColumns}
+    {20_260_905_000_105, __MODULE__.RunOutcomeColumns},
+    {20_260_906_000_106, __MODULE__.InputLogTables}
   ]
 
   defmodule DefaultTables do
@@ -109,6 +113,31 @@ defmodule StatifierPersistence.BootstrapMigrations do
     def down do
       for host <- [EctoHosts.Default, EctoHosts.Overridden, EctoHosts.BlobTyped] do
         Migrations.down(for: host, version: 3)
+      end
+
+      :ok
+    end
+  end
+
+  defmodule InputLogTables do
+    @moduledoc false
+    use Ecto.Migration
+
+    alias StatifierPersistence.Ecto.Migrations
+    alias StatifierPersistence.EctoHosts
+
+    # V05 alone, for the reason migration 104 applies V02 alone.
+    def up do
+      for host <- [EctoHosts.Default, EctoHosts.Overridden, EctoHosts.BlobTyped] do
+        Migrations.up(for: host, from: 5, version: 5)
+      end
+
+      :ok
+    end
+
+    def down do
+      for host <- [EctoHosts.Default, EctoHosts.Overridden, EctoHosts.BlobTyped] do
+        Migrations.down(for: host, from: 5, version: 5)
       end
 
       :ok

@@ -190,15 +190,17 @@ defmodule StatifierPersistence.Runs do
     strategy the fetch-to-persist tail runs inside (ADR-0004 decision 5;
     `fail/4` accepts it too). Defaults to
     `{StatifierPersistence.Serialization.AdapterLock, store}`.
-  - `entry:` - this package's own, never a host's, and telemetry-only: the
-    public door this drive came through, carried on
+  - `entry:` - this package's own, never a host's: the public door this
+    drive came through, carried on
     `[:statifier_persistence, :run, :step, :start | :stop]` and
     `[:statifier_persistence, :run, :discarded]` as `entry` (ADR-0009,
     `docs/telemetry.md`). `StatifierPersistence.Driver` sets it to
     `:done_invocation`, `:failed_invocation` or `:answer_parent` on the
     doors that reach `step/5` rather than being one of its own; every
     other entry point derives its own (`:create`, `:step`, `:fail`,
-    `:cancel`) and this option changes nothing but the reported value.
+    `:cancel`). It stopped being telemetry-only with ADR-0010: on an
+    adapter that keeps an input log, `entry:` also stamps the stored
+    entry's `door` (decision 5). It changes nothing else.
   - `linkage:` (`create/4` only) - this package's own, never a host's. Set
     by the durable subchart `start_child` clause (Phase 3) to record a
     child's parent under the reserved metadata namespace
@@ -222,6 +224,13 @@ defmodule StatifierPersistence.Runs do
   telemetry (`docs/telemetry.md`). It is the dimension an operator slices
   step latency by first, because a `:done_invocation` step and a `:step`
   step have different expected shapes.
+
+  It is also ADR-0010's door vocabulary: the same seven atoms, stored as
+  strings on an input log entry, and the record adds no second one. Of the
+  seven, only `:step`, `:done_invocation` and `:failed_invocation` -
+  `:answer_parent` among them, since it re-enters the parent through one
+  of the two invocation doors - ever carry an event into an interpreter,
+  so those are the doors that append (decision 5's table).
   """
   @type entry ::
           :create
@@ -545,6 +554,32 @@ defmodule StatifierPersistence.Runs do
     end
   end
 
+  @doc """
+  Lists `run_id`'s input log, in the order the run's interpreter saw it
+  (ADR-0010 decision 2).
+
+  Each entry carries its ordinal (`seq`, dense from zero), the public
+  door it entered by, and the `%Statifier.Event{}` itself - equal to the
+  one that was delivered, `caller_context` and all. An entry whose
+  `event` is `nil` is the closed marker a host-declared cap wrote
+  (decision 6); a reader mapping this log onto a replay refuses on it
+  rather than replaying a run that never happened.
+
+  `:not_supported` for a store whose adapter keeps no log - which is not
+  a failure, since nothing in this package refuses a run over it
+  (decision 1). `{:error, :run_not_found}` for a run that does not exist,
+  and `{:ok, []}` for one that has taken no input yet.
+
+  Read-only and outside the run's exclusion by design: this is a
+  diagnostic read, and nothing in this package consumes it. The replay
+  itself is `StatifierUI.Trace.Replay.from_events/4`'s, under the mapping
+  ADR-0010 decision 8 names and no code here builds.
+  """
+  @spec inputs(store :: Storage.t(), run_id :: run_id()) ::
+          {:ok, [Storage.input()]} | :not_supported | {:error, error()}
+  def inputs(%Storage{} = store, run_id) when is_binary(run_id),
+    do: Storage.list_inputs(store, run_id)
+
   # The match map is this package's own (`Run.Linkage.parent_match/1` or
   # `invocation_match/2`), so reading the two ids back out of it is
   # reading what this package just wrote. `invoke_id` is `nil` for the
@@ -780,12 +815,45 @@ defmodule StatifierPersistence.Runs do
     span = open_macrostep(machine_state, session_id, :event, event)
 
     case Interpreter.handle_event(machine_state, event) do
-      {:ok, machine_state, effects} ->
-        close_macrostep(span, session_id, :event, machine_state, event, effects)
-        persist_tail(store, run_id, machine_state, effects, executor, :update)
+      {:ok, stepped_state, effects} ->
+        close_macrostep(span, session_id, :event, stepped_state, event, effects)
+
+        with :ok <- append_input(store, run_id, entry, event) do
+          persist_tail(store, run_id, stepped_state, effects, executor, :update)
+        end
 
       {:error, :not_running} ->
         repair_terminal(store, run_id, machine_state, entry)
+    end
+  end
+
+  # ADR-0010's ONE write site: the single point at which a resolved event
+  # HAS reached the interpreter, inside the serialized unit this step
+  # already holds. That the exclusion is held is what makes the log's
+  # order the run's order and what makes the adapter's `seq` assignment
+  # safe; `Driver` has no exclusion of its own and therefore no write site
+  # of its own - every door it opens funnels through here carrying its own
+  # `entry:` (decision 5).
+  #
+  # After `handle_event/2` rather than before it, because decision 5
+  # appends only inputs the interpreter SAW: `{:error, :not_running}` is a
+  # discard, and a log that carried the event a terminal position refused
+  # would replay a run that never happened. The three other discards -
+  # a terminal run record, a builder that declines, an adapter with no log
+  # at all - never reach this function.
+  #
+  # A failed append fails the step, because the append is part of the
+  # serialized unit and this repository does not rescue to a default at a
+  # leaf. `{:error, :input_log_full}` is the sole exception: it is a
+  # boundary the host declared on purpose, the log has recorded its own
+  # truncation, and the run carries on.
+  @spec append_input(Storage.t(), run_id(), entry(), Event.t()) :: :ok | {:error, error()}
+  defp append_input(store, run_id, entry, event) do
+    case Storage.append_input(store, run_id, entry, event) do
+      {:ok, _seq} -> :ok
+      :not_supported -> :ok
+      {:error, :input_log_full} -> :ok
+      {:error, _reason} = error -> error
     end
   end
 

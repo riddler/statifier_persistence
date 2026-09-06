@@ -18,19 +18,20 @@ defmodule StatifierPersistence.Ecto.Config do
     * `:table_prefix` - prefix for the generated table names, default
       `"statifier_"`
     * `:tables` - per-table override map with keys `:charts`,
-      `:positions`, `:runs`; an override replaces the whole name,
-      prefix included
+      `:positions`, `:runs`, `:inputs`; an override replaces the whole
+      name, prefix included
     * `:prefix` - the Postgres schema (Ecto's `@schema_prefix`), default
       `nil`
-    * `:blob_type` - the Ecto type applied to the three blob columns
-      (`identity_blob`, `chart_blob`, `position_blob`), default
+    * `:blob_type` - the Ecto type applied to the payload blob columns
+      (`identity_blob`, `chart_blob`, `position_blob`, `outcome_blob`,
+      and `input_blob` since ADR-0010 decision 4), default
       `:binary` (the built-in `bytea` behaviour, unchanged). Pass a
       module implementing `Ecto.Type` for `field(name, Mod)`, or a
       `{module, opts}` tuple for an `Ecto.ParameterizedType` for
       `field(name, Mod, opts)` - the shape Ecto itself uses to declare a
       parameterized field. Keys and lookup columns (`content_hash`,
-      `session_id`, `run_id`, `status`, `failure`) are never affected;
-      only the three blob columns reach this option. Resolved and
+      `session_id`, `run_id`, `status`, `failure`, `seq`, `door`) are
+      never affected; only the payload blob columns reach this option. Resolved and
       stored on the struct as `:binary` (bare) or `{module, opts}`
       (normalized, so a bare custom module becomes `{module, []}`) -
       one shape for downstream code to read.
@@ -42,7 +43,7 @@ defmodule StatifierPersistence.Ecto.Config do
   alias StatifierPersistence.Ecto.KeyGenerator
 
   @known_options [:repo, :key, :table_prefix, :tables, :prefix, :blob_type]
-  @table_keys [:charts, :positions, :runs]
+  @table_keys [:charts, :positions, :runs, :inputs]
 
   @enforce_keys [:repo, :key, :table_prefix, :tables, :prefix, :blob_type]
   defstruct [:repo, :key, :table_prefix, :tables, :prefix, :blob_type]

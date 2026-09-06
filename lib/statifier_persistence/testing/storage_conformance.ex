@@ -772,6 +772,182 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         end
       end
 
+      # -- Adapter level: the optional input log (ADR-0010) --------------
+      #
+      # Generated only when the adapter under test exports the optional
+      # append_input/3 - the same opt-in-by-export shape every optional
+      # callback above uses. An adapter that exports none of the three
+      # stores no inputs, sees no behaviour change, and generates none of
+      # these cases (ADR-0010 decision 1).
+      #
+      # Untagged, unlike the child enumeration and the lock: nothing here
+      # needs a Postgres-only feature - no jsonb predicate, no advisory
+      # lock, no index type beyond a unique one - so these cases are the
+      # contract on every backend (ADR-0010 decision 9).
+
+      if Code.ensure_loaded?(conformance_adapter) and
+           function_exported?(conformance_adapter, :append_input, 3) do
+        setup %{store: store} do
+          %{logged_run: input_log_run(store, "run-conformance-input-log")}
+        end
+
+        # sabotage: in the adapter under test's append_input/3, assign a
+        # fixed ordinal (0) instead of the run's next one -> red on both
+        # adapters and on the SQLite mirror of this case, on the second
+        # append: the in-memory one handed out 0 twice, and the Ecto one
+        # returned {:adapter, :seq_conflict} off the V05 unique index.
+        # Nine cases red across the two conformance modules. Verified red,
+        # reverted.
+        test "adapter: append_input/3 assigns dense ordinals from zero and lists them in order",
+             %{store: store, logged_run: run_id} do
+          for {door, index} <- Enum.with_index(["create", "step", "done_invocation"]) do
+            assert {:ok, ^index} =
+                     @conformance_adapter.append_input(store.opts, run_id, %{
+                       run_id: run_id,
+                       seq: 0,
+                       door: door,
+                       input_blob: <<index>>
+                     })
+          end
+
+          assert {:ok, entries} = @conformance_adapter.list_inputs(store.opts, run_id)
+
+          assert Enum.map(entries, & &1.seq) == [0, 1, 2]
+          assert Enum.map(entries, & &1.door) == ["create", "step", "done_invocation"]
+          assert Enum.map(entries, & &1.input_blob) == [<<0>>, <<1>>, <<2>>]
+        end
+
+        # sabotage: in the adapter under test's list_inputs/2, drop the
+        # run-existence check -> red, this case asserted :run_not_found and
+        # got `{:ok, []}`. Verified red on both conformance modules and on
+        # the SQLite mirror (three failures, exactly this case), reverted.
+        test "adapter: list_inputs/2 reports :run_not_found for an unknown run_id", %{
+          store: store
+        } do
+          assert {:error, :run_not_found} =
+                   @conformance_adapter.list_inputs(store.opts, "run-conformance-absent-log")
+        end
+
+        # sabotage: in the adapter under test's list_inputs/2, return every
+        # stored entry rather than the given run's -> red on both
+        # conformance modules and on the SQLite mirror: one run's log came
+        # back carrying the other's entries. Verified red, reverted.
+        test "adapter: two runs' logs never see each other's entries", %{
+          store: store,
+          logged_run: run_id
+        } do
+          other = input_log_run(store, "run-conformance-input-log-other")
+
+          for door <- ["step", "step"] do
+            assert {:ok, _seq} =
+                     @conformance_adapter.append_input(store.opts, run_id, %{
+                       run_id: run_id,
+                       seq: 0,
+                       door: door,
+                       input_blob: <<1>>
+                     })
+          end
+
+          assert {:ok, 0} =
+                   @conformance_adapter.append_input(store.opts, other, %{
+                     run_id: other,
+                     seq: 0,
+                     door: "answer_parent",
+                     input_blob: <<2>>
+                   })
+
+          assert {:ok, mine} = @conformance_adapter.list_inputs(store.opts, run_id)
+          assert {:ok, theirs} = @conformance_adapter.list_inputs(store.opts, other)
+
+          assert Enum.map(mine, & &1.seq) == [0, 1]
+          assert Enum.map(theirs, &{&1.seq, &1.door}) == [{0, "answer_parent"}]
+        end
+
+        # sabotage: in the adapter under test's `:marker` arm, return
+        # {:error, :input_log_full} without inserting the marker row -> red
+        # on both conformance modules, on the SQLite mirror, and on
+        # RunsInputLogTest's cap case: the log ended one entry short and
+        # its last entry was a real input rather than the nil-blob marker.
+        # Verified red, reverted.
+        test "adapter: a cap of n admits n - 1 inputs, then closes the log with a marker" do
+          {:ok, capped} =
+            Storage.new(@conformance_adapter, @conformance_adapter_opts ++ [input_log_cap: 3])
+
+          if function_exported?(@conformance_adapter, :isolate, 1) do
+            # credo:disable-for-next-line Credo.Check.Refactor.Apply
+            :ok = apply(@conformance_adapter, :isolate, [capped.opts])
+          end
+
+          run_id = input_log_run(capped, "run-conformance-input-log-cap")
+
+          append = fn ->
+            @conformance_adapter.append_input(capped.opts, run_id, %{
+              run_id: run_id,
+              seq: 0,
+              door: "step",
+              input_blob: <<7>>
+            })
+          end
+
+          assert {:ok, 0} = append.()
+          assert {:ok, 1} = append.()
+          assert {:error, :input_log_full} = append.()
+          assert {:error, :input_log_full} = append.()
+
+          assert {:ok, entries} = @conformance_adapter.list_inputs(capped.opts, run_id)
+
+          assert Enum.map(entries, &{&1.seq, &1.input_blob}) ==
+                   [{0, <<7>>}, {1, <<7>>}, {2, nil}]
+
+          # The refusal is the log's, never the run's: the record is
+          # untouched and still writable (ADR-0010 decision 5).
+          assert {:ok, %{status: :active}} = Storage.fetch_run(capped, run_id)
+        end
+
+        # sabotage: in StatifierPersistence.Storage.append_input/4, encode
+        # only the event's name instead of the whole struct -> red on both
+        # conformance modules and on the SQLite mirror: the decoded entry
+        # was a binary rather than the equal %Statifier.Event{},
+        # caller_context and all. Verified red, reverted.
+        test "facade: an event round-trips through the log equal to what was delivered", %{
+          store: store,
+          logged_run: run_id
+        } do
+          event = %Statifier.Event{
+            name: "done.invoke.call",
+            type: :internal,
+            data: %{"email" => "buyer@example.com"},
+            invokeid: "call",
+            origin: "sess_conformance_origin",
+            origintype: "http://www.w3.org/TR/scxml/#SCXMLEventProcessor",
+            sendid: "send-1",
+            caller_context: %{"tenant" => "acme"}
+          }
+
+          assert Storage.input_log_supported?(store)
+          assert {:ok, 0} = Storage.append_input(store, run_id, :done_invocation, event)
+
+          assert {:ok, [entry]} = Storage.list_inputs(store, run_id)
+          assert entry.seq == 0
+          assert entry.door == "done_invocation"
+          assert entry.event == event
+        end
+
+        # Inserts a run for the log to hang off, since list_inputs/2 is
+        # required to distinguish an empty log from a run that is not
+        # there.
+        defp input_log_run(store, run_id) do
+          {_source, machine} = Charts.chart_a()
+
+          machine_state =
+            Statifier.MachineState.new(machine, session_id: "sess_" <> run_id)
+
+          :ok = Storage.insert_run(store, run_id, machine_state, :active)
+
+          run_id
+        end
+      end
+
       # -- Facade level --------------------------------------------------
 
       # sabotage: in StatifierPersistence.Storage.save_position/3, drop the

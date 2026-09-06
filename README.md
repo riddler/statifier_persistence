@@ -357,7 +357,10 @@ actually Postgres SQL: `lock_run/3` (advisory lock plus `FOR UPDATE`) and
 the two metadata listings (`jsonb` containment). Everything else - charts,
 positions, run records, the identity guard, the executor seam, resume,
 and the versioned migrations, V03's Postgres-only index included - runs
-on any Ecto backend.
+on any Ecto backend. So does the input log of V05: a table, four columns
+and a unique index, with no `jsonb` predicate, no advisory lock and no
+index type beyond a unique one, and the same conformance cases on both
+backends.
 
 A host on SQLite or another backend therefore **declines the lock
 callback** rather than getting a portable imitation of it: pass your own
@@ -597,13 +600,77 @@ storing something that is not what you handed it. The map is write-once:
 it is set at create and a later step or abandonment carries it forward
 untouched.
 
+### Recording a run's inputs, so it can be replayed
+
+A durably stepped run stores a chart, a position and a run record, and
+none of them is an input. The position is the run's *current*
+configuration, overwritten on every step, so by construction the history
+an offline replay needs is destroyed by the mechanism that makes the run
+durable.
+
+ADR-0010 adds an optional per-run input log to close that gap. It is
+opt-in by export, exactly as the `metadata` map is: an adapter that
+exports `supports_input_log?/1` and answers `true` keeps one, and an
+adapter that does not stores no inputs and behaves exactly as it did
+before. **Nothing refuses a run over it** - a diagnostic facility must
+not break the run it is diagnosing - so ask before you rely on it:
+
+    StatifierPersistence.Storage.input_log_supported?(store)
+
+The Ecto adapter keeps the log on every backend, in the V05 table. Each
+entry is the `%Statifier.Event{}` the interpreter was handed, verbatim,
+stamped with the public door it entered by and a dense zero-based
+ordinal:
+
+    {:ok, entries} = StatifierPersistence.Runs.inputs(store, "run_1")
+
+    Enum.map(entries, &{&1.seq, &1.door, &1.event.name})
+    #=> [{0, "step", "advance"}, {1, "answer_parent", "done.invoke.call"}]
+
+One log belongs to one run. A durable subchart's child is an ordinary
+run, so it has its own log; the parent's holds the answer it saw at the
+`answer_parent` door, and not the child's inputs. Only inputs an
+interpreter actually saw are recorded - a delivery to a terminal run, or
+to an invocation the chart has since cancelled, is discarded and appends
+nothing, because a replay that applied it would produce a different run
+than the one that happened.
+
+**Turning the log on is a data-retention decision, not a debugging
+switch.** Chart, position and identity blobs are engine-shaped; an
+event's `data` is your own values, and this is the first thing this
+package stores that can hold personal or cardholder data. So `input_blob`
+is a blob in the `:blob_type` sense below, and it is *not* the `metadata`
+map, which stays in the clear by design. Bound how much accumulates with
+a per-run cap declared where every other adapter setting is:
+
+    {:ok, store} =
+      StatifierPersistence.Storage.new(
+        StatifierPersistence.Storage.Ecto,
+        persistence: MyApp.Persistence,
+        input_log_cap: 500
+      )
+
+The default is `:infinity`; a bounded default would be this package
+silently truncating your log. Past the cap the log **closes itself**: the
+last slot is written as a marker entry whose `event` is `nil`, every
+later append is refused, and the step itself succeeds and the run carries
+on. The marker is the point - a truncated log that looked complete would
+satisfy every check a replay makes while replaying a run that never
+happened.
+
+The replay itself is `statifier_ui`'s
+(`StatifierUI.Trace.Replay.from_events/4`); ADR-0010 decision 8 names the
+mapping from a stored entry to what that function takes, and nothing in
+this package depends on `statifier_ui` to say so.
+
 ### Encrypting the blob columns
 
-`use StatifierPersistence.Ecto` hard-codes `:binary` for its three blob
-columns (`identity_blob`, `chart_blob`, `position_blob`) by default -
-plain `bytea`, byte-identical round trip, nothing extra. Pass
-`:blob_type` to put a custom Ecto type on those three columns instead,
-and encryption at rest needs no wrapping adapter:
+`use StatifierPersistence.Ecto` hard-codes `:binary` for its payload blob
+columns (`identity_blob`, `chart_blob`, `position_blob`, `outcome_blob`,
+and the input log's `input_blob`) by default - plain `bytea`,
+byte-identical round trip, nothing extra. Pass `:blob_type` to put a
+custom Ecto type on those columns instead, and encryption at rest needs
+no wrapping adapter:
 
     defmodule MyApp.Persistence do
       use StatifierPersistence.Ecto,
@@ -613,10 +680,10 @@ and encryption at rest needs no wrapping adapter:
 
 `:blob_type` accepts a bare module implementing `Ecto.Type`, or a
 `{module, opts}` tuple for an `Ecto.ParameterizedType`. It reaches only
-those three columns: keys and lookup columns (`content_hash`,
-`session_id`, `run_id`, `status`, `failure`) always stay plain text,
-because the identity guard and the unique indexes depend on reading
-them back verbatim.
+those payload columns: keys and lookup columns (`content_hash`,
+`session_id`, `run_id`, `status`, `failure`, and the input log's `seq`
+and `door`) always stay plain, because the identity guard, the unique
+indexes and the log's ordering depend on reading them back verbatim.
 
 The shape a production `MyApp.EncryptedBlob` needs is a vault-backed or
 envelope-encrypting `Ecto.Type` - `dump/1` encrypts on the way in,
@@ -644,12 +711,12 @@ stand-in to show the wiring):
       end
     end
 
-The shipped V01 migration always emits `:binary` (`bytea`) for the
-three blob columns and does not read `:blob_type`. A `:blob_type` whose
+The shipped migrations always emit `:binary` (`bytea`) for the payload
+blob columns and do not read `:blob_type`. A `:blob_type` whose
 underlying database type is still binary - an envelope-encrypting type
 that dumps to and loads from raw bytes, like the sketch above - needs
 no DDL change. A `:blob_type` that dumps to a different underlying type
-(text, jsonb, a Postgres domain) needs you to alter those three columns
+(text, jsonb, a Postgres domain) needs you to alter those columns
 yourself; the migrations helper does not do it for you.
 
 ## Running the tests
