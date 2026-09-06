@@ -22,10 +22,20 @@ do not assume.
 Pushing the branch and opening the request are gated by the same authority
 table this repo's `CLAUDE.md` carries: they happen only inside a campaign
 carrying the operator's explicit, quotable consent, and only after the
-terminology scan below is clean. Merging the request is never an agent's, in
-every campaign and outside every campaign - open it and stop. This skill
-never closes the bead, and in this repo a mirrored bead is never closed by an
-agent regardless.
+terminology scan below is clean.
+
+Merging the request is the operator's, with the one exception that table's
+own *merging a campaign PR* row records (added 2026-09-01, after the 025
+post-wrap walk): a campaign consent the operator adopted verbatim that names
+automatic merges, with every condition the row lists met - full gate green,
+CI green, the terminology scan clean with a positive control, and any named
+review gate passed. Read the row for those conditions rather than this
+paragraph; the row is the authority and this is the pointer at it. Outside
+such a consent, with any one of the row's conditions unmet, or for a request
+the consent's own carve-outs hold for the operator: open it and stop.
+
+This skill never closes the bead, and in this repo a mirrored bead is never
+closed by an agent regardless.
 
 ## The terminology firewall gates the push
 

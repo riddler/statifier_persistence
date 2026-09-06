@@ -8,8 +8,30 @@ override, and nothing below rewrites a step the skill already performs.
 Read this together with `.claude/wurk.json`'s `release` block. Between them
 they name every file a release commit here touches, and no others.
 
-The reference for the shape is `957c122`, the 0.5.0 prep - the most recent
-release prep in this repo, and the commit every step below is modeled on.
+The reference for every shape below is **the most recent release-prep commit
+on `main`**, resolved when you read this rather than named here. Find it
+with:
+
+```bash
+git log --oneline --no-patch -L '/@version/,+1:mix.exs'
+```
+
+The first line is the last commit that moved `@version`, and the last commit
+that moved `@version` is the last release prep by definition. Where this file
+and that commit disagree, the commit is the evidence and this file is the
+defect.
+
+**This file names no SHA for that reference, and no count of how many
+releases have happened, on purpose.** A hard-coded reference stops being
+the most recent the moment the next release lands: the sentence that used
+to sit here named `957c122`, the 0.5.0 prep, and by the 0.7.2 release it
+was four preps stale (`sp-kka`). Nothing below needs editing at a release,
+and a release commit does not touch this file - the table at the end lists
+every file it does touch, and this is not one of them.
+
+Commits cited further down are historical evidence for a claim about the past
+("this happened once, in that commit"). They are not the reference, and they
+stay correct as releases accumulate.
 
 `changelog.d/README.md`'s "At release" paragraph is the checked-in statement of
 the same procedure, written for the person dropping fragments rather than for
@@ -55,27 +77,36 @@ Stated explicitly so that a future release does not go looking for a carrier
 that was never there. If one is ever added, it belongs in this section and in
 the table below, in the same change that adds it.
 
-`CLAUDE.md`'s "The package is released (0.5.x on Hex)" line is **not** a
+`CLAUDE.md`'s "The package is released (... on Hex)" line is **not** a
 carrier and does not move here. It states what is published, which stays true
-until the operator publishes; `957c122`'s commit body says so in those words.
-It moves in its own commit after a publish, never in the prep.
+until the operator publishes; the 0.5.0 prep's commit body (`957c122`, cited
+here as evidence about that commit, not as the reference) said so in those
+words. It moves in its own commit after a publish, never in the prep.
 
 ## Step B: promote the changelog fragments
 
 Placed where the skill's changelog step would have been, and modeled on the
-0.5.0 prep commit `957c122`, which is the reference for the shape.
+most recent release-prep commit on `main` - the reference for the shape, found
+the way the top of this file says.
 
 1. Read every `changelog.d/*.md` fragment except `README.md`. Each is a Keep a
    Changelog section heading followed by its bullets.
 2. Insert a new `## [X.Y.Z] YYYY-MM-DD` section into `CHANGELOG.md` directly
-   above the previous version's section, dated today. The heading form is the
-   one the file already uses throughout - the bracketed version, a single
-   space, then the date, **with no `-` separator between them**. (Keep a
-   Changelog's own form has the dash; this file has never used it in eight
-   released sections, and a release is not the place to change them.)
+   above the previous version's section. The heading form is the one the file
+   already uses throughout - the bracketed version, a single space, then the
+   date, **with no `-` separator between them**. (Keep a Changelog's own form
+   has the dash; this file has not used it in any released section, and a
+   release is not the place to change them.)
+
+   **The date is the LOCAL date of the machine cutting the prep**, the one
+   `date +%F` prints there - not the UTC date, and not a date carried over
+   from a campaign journal, which is written in UTC. The two differ for part
+   of every day, and a section dated a day ahead of the commit that wrote it
+   reads as a backdated release. Take the date from `date +%F` at the moment
+   you write the heading (fleet ruling RQ-033-15, 2026-09-06).
 3. Write a short lead paragraph between the heading and the first `### `
    sub-heading, saying what the release is. Unlike some sibling repos this one
-   carries a lead on **every** section, `0.1.0` through `0.5.0`, so it is the
+   carries a lead on **every** released section, from `0.1.0` on, so it is the
    rule here rather than the exception - one or two sentences naming the kind
    of release ("Feature release: ...", "Docs release: ...", "Patch release:
    ...") and what a user gets. A breaking change is called out in bold here
@@ -96,15 +127,15 @@ Placed where the skill's changelog step would have been, and modeled on the
 Whether the release is major, minor or patch is not decided here - the version
 is explicit input to the skill. The fragments' headings are evidence for that
 judgement, not a rule that computes it, and the reasoning belongs in the
-commit body, where `957c122` put it.
+commit body, where every prep in this repo has put it.
 
 ## The README install pin
 
 `release.readme_pin` is `true`. `README.md`'s `def deps` snippet carries
 `{:statifier_persistence, "~> X.Y"}` - the major/minor form with the patch
-component dropped that the skill's step 2 bumps. `957c122` is the format
-precedent as well as the shape precedent: it moved the pin from `~> 0.4` to
-`~> 0.5` in the same commit as the bump.
+component dropped that the skill's step 2 bumps. Every prep since has moved
+it in the same commit as the bump; the 0.5.0 prep `957c122` is the historical
+evidence for that, having moved the pin from `~> 0.4` to `~> 0.5` there.
 
 `changelog.d/README.md`'s "At release" paragraph names this move as part of the
 same step, on an operator ruling of 2026-09-01, so a prep that bumps `mix.exs`
