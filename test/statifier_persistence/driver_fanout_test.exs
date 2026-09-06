@@ -526,6 +526,26 @@ defmodule StatifierPersistence.DriverFanoutTest do
 
       assert leaves(reload_parent(store)) == ["calling"]
     end
+
+    # sp-y7n: the outside-fail answer reaches `answer_parent/3` too, so a
+    # fan-out child failed through `Runs.fail/4` settles rather than
+    # completing the invocation on one child's failure.
+    #
+    # sabotage: had `Driver.answer_resolved/4`'s no-resolver clause call
+    # `respond_to_parent/3` directly instead of `answer_parent/3`, which is
+    # where the fan-out routing lives - red, this case alone: the one
+    # child's failure answered the parent's door and it left "calling".
+    # Verified red, reverted.
+    test "Runs.fail/4 with driver: settles a fan-out child rather than answering", %{store: store} do
+      parent = start_parent(store)
+      start_children(parent, 2)
+
+      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+
+      assert {:ok, _run} = Runs.fail(store, child_run_id, "boom", driver: parent_driver(store))
+
+      assert leaves(reload_parent(store)) == ["calling"]
+    end
   end
 
   describe "lock acquisition order" do

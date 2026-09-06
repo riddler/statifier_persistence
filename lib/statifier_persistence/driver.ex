@@ -581,6 +581,59 @@ defmodule StatifierPersistence.Driver do
   end
 
   @doc """
+  `answer_parent/3` with the parent's chart resolved first, and the same
+  answer whatever happens: `:ok`.
+
+  This is the public form of what the automatic path does once a drive of
+  the *child* has left it terminal - resolve the parent's chart through
+  `chart_resolver:`, then answer through `answer_parent/3` with a driver
+  over that chart - and it exists because a caller outside a drive needs
+  the same two steps. `StatifierPersistence.Runs.fail/4`'s `driver:` option
+  is that caller (ADR-0008's outside-fail note): a run failed from outside
+  the interpreter has no drive to hang the answer off, so it calls here.
+
+  A driver with no `chart_resolver:` answers through `answer_parent/3`
+  directly, on `driver.machine` - that function's own contract, where the
+  driver was built over the parent's chart by the caller. The automatic
+  path deliberately does *not* do this: it is entered from a drive of the
+  child, so its `driver.machine` is the child's chart and answering with it
+  would step the parent against the wrong chart. Here the caller chose the
+  driver, so the choice is theirs to make.
+
+  Never raises for a run with no parent and never reports a storage error:
+  `:no_parent` and a failed fetch are both `:ok`, exactly as the automatic
+  path treats them. A caller that needs the answer's own result calls
+  `answer_parent/3`.
+  """
+  @spec resolve_and_answer_parent(
+          driver :: t(),
+          child_run_id :: Runs.run_id(),
+          donedata_or_failure :: {:done, term()} | {:failed, keyword()}
+        ) :: :ok
+  def resolve_and_answer_parent(%__MODULE__{} = driver, child_run_id, donedata_or_failure)
+      when is_binary(child_run_id) do
+    case parent_link(driver.store, child_run_id) do
+      {:ok, %Linkage{} = linkage} ->
+        answer_resolved(driver, linkage, child_run_id, donedata_or_failure)
+
+      _no_parent_or_error ->
+        :ok
+    end
+  end
+
+  @spec answer_resolved(t(), Linkage.t(), Runs.run_id(), {:done, term()} | {:failed, keyword()}) ::
+          :ok
+  defp answer_resolved(%__MODULE__{chart_resolver: nil} = driver, _linkage, child_run_id, payload) do
+    answer_parent(driver, child_run_id, payload)
+
+    :ok
+  end
+
+  defp answer_resolved(driver, %Linkage{} = linkage, child_run_id, payload) do
+    resolve_and_answer(driver, linkage, child_run_id, payload)
+  end
+
+  @doc """
   Starts child `index` of `count` for `parent_run_id`'s `<invoke>` - the
   public start-with-index door a scheduler drives a fan-out through
   (sp-t57, ruling C4; mirrors `sob-q3y`).
@@ -802,10 +855,7 @@ defmodule StatifierPersistence.Driver do
   defp auto_answer_parent(%__MODULE__{chart_resolver: nil}, _run_id, _payload), do: :ok
 
   defp auto_answer_parent(driver, run_id, payload) do
-    case parent_link(driver.store, run_id) do
-      {:ok, %Linkage{} = linkage} -> resolve_and_answer(driver, linkage, run_id, payload)
-      _no_parent_or_error -> :ok
-    end
+    resolve_and_answer_parent(driver, run_id, payload)
   end
 
   # -- Settlement (sp-t57, rulings C1, C3, C5, C9) ---------------------

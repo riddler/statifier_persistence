@@ -419,6 +419,98 @@ defmodule StatifierPersistence.DriverSubchartTest do
     end
   end
 
+  # sp-y7n / RQ-SF035-9: a child failed from *outside* the interpreter,
+  # through `Runs.fail/4`, answers its parent when it is handed a driver -
+  # the seam ADR-0008's note of 2026-09-06 records. The Ecto and SQLite
+  # variants of the first case live in `DriverSubchartEctoTest` and
+  # `Ecto.SqliteMigrationsTest`; everything here runs over `InMemory`.
+  describe "an outside fail on a linked child" do
+    # sabotage: in `Runs.answer_parent_of_failed/4`, replaced the `driver`
+    # clause's `Driver.resolve_and_answer_parent/3` call with a bare
+    # `result` - the parent stayed in "calling" and the assertion on
+    # `leaves/1` == `["refused"]` went red, together with the two cases
+    # below it that answer through the same clause. Verified red, reverted.
+    test "with driver:, the parent takes the failing door and carries the reason", %{store: store} do
+      {:ok, parent_machine} = Statifier.compile(@parent_source)
+      resolver = parent_resolver(parent_machine)
+
+      driver =
+        driver(store, @parent_source, subchart_dispatch(@child_source), chart_resolver: resolver)
+
+      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+
+      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+
+      assert {:ok, child_run} = Runs.fail(store, child_run_id, "boom", driver: driver)
+      assert child_run.status == :failed
+      assert child_run.failure == "boom"
+
+      assert {:ok, parent_reloaded} = Storage.load_run_position(store, "run_1", parent_machine)
+      assert leaves(parent_reloaded) == ["refused"]
+      assert parent_reloaded.datamodel["_event"]["data"]["reason"] == "boom"
+      assert parent_reloaded.active_invocations == %{}
+    end
+
+    # sabotage: dropped the `chart_resolver: nil` clause of
+    # `Driver.answer_resolved/4`, so a driver without a resolver fell to
+    # the resolving clause - red, this case alone, with
+    # `** (BadFunctionError) expected a function, got: nil`. Verified red,
+    # reverted.
+    test "a driver over the parent's own chart needs no chart_resolver", %{store: store} do
+      {:ok, parent_machine} = Statifier.compile(@parent_source)
+      driver = driver(store, @parent_source, subchart_dispatch(@child_source))
+
+      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+
+      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+      parent_driver = %{driver | machine: parent_machine}
+
+      assert {:ok, _child_run} = Runs.fail(store, child_run_id, "boom", driver: parent_driver)
+
+      assert {:ok, parent_reloaded} = Storage.load_run_position(store, "run_1", parent_machine)
+      assert leaves(parent_reloaded) == ["refused"]
+    end
+
+    # sabotage: replaced the `nil ->` clause of
+    # `Runs.answer_parent_of_failed/4` - the whole of what a call without
+    # `driver:` runs - with `{:error, :no_driver}`, and this case's
+    # `assert {:ok, child_run}` went red. Verified red, reverted.
+    test "without driver:, no linkage is read and the parent is untouched", %{store: store} do
+      {:ok, parent_machine} = Statifier.compile(@parent_source)
+      driver = driver(store, @parent_source, subchart_dispatch(@child_source))
+
+      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+
+      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+
+      assert {:ok, child_run} = Runs.fail(store, child_run_id, "boom")
+      assert child_run.status == :failed
+
+      assert {:ok, parent_reloaded} = Storage.load_run_position(store, "run_1", parent_machine)
+      assert leaves(parent_reloaded) == ["calling"]
+      assert Map.values(parent_reloaded.active_invocations) == ["call"]
+    end
+
+    # sabotage: replaced `Driver.resolve_and_answer_parent/3`'s whole
+    # `case` with a bare `{:ok, linkage} = parent_link(...)` match, so a
+    # run with no parent is a crash rather than a no-op - red, this case
+    # and the SQLite one in `Ecto.SqliteMigrationsTest`, both with
+    # `** (MatchError) no match of right hand side value: :no_parent`.
+    # Verified red, reverted.
+    test "an unlinked run's fail/4 is unchanged, driver: or not", %{store: store} do
+      {:ok, machine} = Statifier.compile(@child_source)
+      driver = driver(store, @parent_source, subchart_dispatch(@child_source))
+
+      machine_state = Statifier.MachineState.new(machine, session_id: "sess_lone")
+      :ok = Storage.insert_run(store, "run_lone", machine_state, :active)
+
+      assert {:ok, run} = Runs.fail(store, "run_lone", "boom", driver: driver)
+      assert run.status == :failed
+      assert run.failure == "boom"
+      assert Driver.parent_link(store, "run_lone") == :no_parent
+    end
+  end
+
   describe "cascading cancel" do
     # Sabotage: had the `{:cancel_invoke, _}` clause in `perform/5` return
     # `:ok` unconditionally, never calling `Runs.cascade_cancel/3` - the
