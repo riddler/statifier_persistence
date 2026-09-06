@@ -605,9 +605,22 @@ alternative - a second way to say a child failed is a second thing to keep
 consistent with settlement, and `answer_parent/3` remains public for what
 it is actually for, a host answering for a party that is not a run.
 
-**Proposed, not accepted, and not implemented.** This amendment carries no
+**Accepted 2026-09-06 (campaign-033, `sp-ive`), and implemented.** This
+amendment carries no
 `lib/` change and no test, in the same posture the sp-3n2 amendment above
 records for itself. `sp-hia` implements it - the `run_status/2` arm, the
 `failure` string, and a case that drives a failure-classed final through a
 `:first_error` fan-out - and this section's acceptance is recorded
 separately once that lands.
+
+**Note (2026-09-06, `sp-ive`):** that separate acceptance is this line, and
+what it rests on is on `main` in both packages: `sp-hia` landed decisions 1
+to 4 here (`run_status/2`'s third arm behind budget and ahead of `:done`,
+the value set closed at `"failed"`, the `"failed_final"` string, donedata
+passed on verbatim, settlement untouched), and `statifier_blocks`' `sb-napt`
+landed decision 5, so a failure-classed outcome's final now carries the
+reserved `<param>` under `:terminate` as well as `:child_use`. Decision 6 is
+the one part still outstanding: `statifier_examples`' durable fan-out chart
+still answers its parent with the host-side translation this record deletes,
+and that deletion is a `statifier_examples` bead, not a reopening of this
+amendment.
