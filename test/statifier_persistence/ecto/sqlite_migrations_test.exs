@@ -10,7 +10,8 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
   `outcome_blob` unconditionally. These cases are the standing proof that
   V03 runs to completion on such an adapter, that the column arrives and
   the index does not, and that what the index served refuses rather than
-  raises.
+  raises. V04's concurrent rebuild of that index (sp-ajz) is a no-op here
+  for the same reason, and has a case of its own below.
 
   ADR-0005 decision 2's Postgres harness is untouched: every storage,
   conformance and lock test still runs against a real Postgres server.
@@ -84,7 +85,25 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
     def with_run(_config, _run_id, fun), do: {:ok, fun.()}
   end
 
+  # V04's concurrent rebuild (sp-ajz) on this adapter, in the same shape
+  # the moduledoc prescribes on Postgres: its own migration, with the DDL
+  # transaction and the migration lock disabled. There is no index here
+  # for it to rebuild, so the point of the case is that it runs to
+  # completion and creates none.
+  defmodule MigrateSqliteConcurrentV04 do
+    @moduledoc false
+    use Ecto.Migration
+
+    @disable_ddl_transaction true
+    @disable_migration_lock true
+
+    def up, do: Migrations.up(for: StatifierPersistence.SqliteTestRepo.Host, from: 4)
+    def down, do: Migrations.down(for: StatifierPersistence.SqliteTestRepo.Host, version: 4)
+  end
+
   @migration_version 20_260_905_000_201
+
+  @concurrent_version 20_260_906_000_401
 
   @capped_versions [20_260_906_000_301, 20_260_906_000_302]
 
@@ -134,7 +153,7 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
     # run ended "6 tests, 0 failures, 6 invalid" - the rolled-back
     # migration left no tables for any case in this module. Verified red,
     # reverted.
-    test "V01 through V03 apply, and the runs table carries every column" do
+    test "V01 through V04 apply, and the runs table carries every column" do
       assert tables() == ["sq_charts", "sq_positions", "sq_runs"]
 
       columns = columns("sq_runs")
@@ -151,6 +170,29 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
     # here is exactly what it asserts. Verified red (invalid), reverted.
     test "no index on metadata is created" do
       refute Enum.any?(indexes("sq_runs"), &String.contains?(&1, "metadata"))
+    end
+
+    # sabotage: dropped V04.up/1's postgres?() guard, so the rebuild ran on
+    # this adapter -> red, this case alone ("8 tests, 1 failure"), with
+    # `** (ArgumentError) `concurrently` is not supported with SQLite3` out
+    # of the drop - the same shape of refusal V03's `using:` once raised.
+    # Verified red, reverted.
+    test "V04's concurrent rebuild is a no-op here, and needs no attribute of its own" do
+      on_exit(fn ->
+        SQL.query!(SqliteTestRepo, "DELETE FROM schema_migrations WHERE version = ?1", [
+          @concurrent_version
+        ])
+      end)
+
+      :ok = migrate_capped(:up, @concurrent_version, MigrateSqliteConcurrentV04)
+
+      refute Enum.any?(indexes("sq_runs"), &String.contains?(&1, "metadata"))
+      assert "outcome_blob" in columns("sq_runs")
+
+      :ok = migrate_capped(:down, @concurrent_version, MigrateSqliteConcurrentV04)
+
+      refute Enum.any?(indexes("sq_runs"), &String.contains?(&1, "metadata"))
+      assert tables() == ["sq_charts", "sq_positions", "sq_runs"]
     end
 
     # sabotage: replaced V03.down/1's postgres?() guard with `true`, so

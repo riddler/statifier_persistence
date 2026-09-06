@@ -13,8 +13,8 @@ declining costs, and how to prove your own setup is honest about it.
 
 ## What is Postgres-only
 
-Three callbacks on the Ecto adapter are Postgres SQL, and one migration
-step is a Postgres index.
+Three callbacks on the Ecto adapter are Postgres SQL, and two migration
+steps are about a Postgres index.
 
 | Surface | Why | What happens elsewhere |
 |---|---|---|
@@ -22,8 +22,9 @@ step is a Postgres index.
 | `list_runs_by_metadata/2`, `list_run_states_by_metadata/2` | `jsonb` containment (`@>`) with a `-> ... ->>` extraction | The backend does not parse it. Called directly, the callbacks raise |
 | `supports_metadata?/1` | Declares the `jsonb` column *and* the list helpers as one capability | Already answers `false` off `repo.__adapter__()`, so `StatifierPersistence.Storage` refuses the listings cleanly rather than reaching the raising SQL |
 | V03's `GIN jsonb_path_ops` index on `runs.metadata` | Serves the containment query above | The migration helper skips it, so `Migrations.up/1` runs to completion and the `outcome_blob` column arrives |
+| V04's concurrent rebuild of that index | `CREATE INDEX CONCURRENTLY` on the same index | A no-op in both directions: there is no index here to rebuild. The `@disable_ddl_transaction` / `@disable_migration_lock` attributes a Postgres host puts on that migration are not needed here |
 
-The last two rows are already engine-conditional and need nothing from
+The last three rows are already engine-conditional and need nothing from
 you. Everything a host has to decide is about the first row.
 
 The run metadata *column* is not Postgres-only, and neither is anything
@@ -156,4 +157,5 @@ conformance and lock case here still runs against a real Postgres server.
   adapter that cannot store it takes.
 - `test/statifier_persistence/ecto/sqlite_migrations_test.exs`: the
   standing proof, on a real SQLite repo, that V03 applies, that the index
-  is skipped, and that what the index served refuses rather than raises.
+  is skipped, that V04's rebuild of it is a no-op, and that what the index
+  served refuses rather than raises.

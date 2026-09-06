@@ -241,3 +241,51 @@ only, which is where it ships one.
 
 The Postgres-only surface this widens the description of, not the extent
 of, is tracked on `sp-5lm`. Nothing in decisions 1, 2, 3 or 4 moves.
+
+## Note (2026-09-06, sp-ajz): the shipped index is built concurrently from V04 on
+
+Recording how the index is built, not a change of decision. This Note is
+an addition to the two Notes above and contradicts neither.
+
+The sp-t57 Note recorded that V03 creates a `GIN` `jsonb_path_ops` index
+on `metadata`; the sp-11w Note recorded that it creates it only on
+`Ecto.Adapters.Postgres`. Both still describe V03 exactly. What neither
+said is what the build costs while it runs: V03's `up/1` issues a plain
+`CREATE INDEX`, which holds a `SHARE` lock on the runs table until the
+index is finished and blocks every write against it. For a host stepping
+runs durably that is every step of every run, which on a large table is
+an outage rather than a migration.
+
+V04 rebuilds the same index - same name, same expression, same opclass -
+with `CREATE INDEX CONCURRENTLY`, which takes no such lock. What the
+package ships is therefore unchanged in shape and changed in how it
+arrives.
+
+Two consequences a reader of this record should have in front of them.
+
+**The host's own migration module is what makes the concurrent build
+possible.** `CREATE INDEX CONCURRENTLY` cannot run inside a transaction
+block, and `Ecto.Migrator` reads `@disable_ddl_transaction` and
+`@disable_migration_lock` from the module it runs, not from a module that
+module delegates to. A package migration cannot turn its caller's
+transaction off. Called from inside one, V04 leaves V03's index in place
+and warns when the runs table already holds rows; it does not raise,
+because the index it would have built is the one already there and
+raising would break the one-call migration recipe every fresh database
+uses. `README.md` carries the recipe and
+`StatifierPersistence.Ecto.Migrations.V04` the reasoning.
+
+**V04's `down/1` does nothing.** What V04 leaves behind is V03's index
+under V03's name, and V03's `down/1` is what drops it; rebuilding it
+plainly on the way down would take the lock this version exists to avoid
+in order to reach a state no reader can distinguish.
+
+Off Postgres V04 is a no-op in both directions, under the same
+exact-match adapter check the sp-11w Note describes, because there is no
+index there to rebuild. `docs/non-postgres-backends.md` lists it beside
+V03's skip.
+
+Nothing in decisions 1, 2, 3 or 4 moves. `sp-461`, the measurement issue
+the plain build's cost was left to, is unscheduled and unaffected: it
+measures what the plain build costs, which is still what a host reaching
+V03 for the first time pays.
