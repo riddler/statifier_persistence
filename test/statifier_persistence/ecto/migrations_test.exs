@@ -4,6 +4,8 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
   # restores :manual on exit, hence async: false.
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Ecto.Adapters.SQL
   alias Ecto.Adapters.SQL.Sandbox
   alias Ecto.Migrator
@@ -76,6 +78,55 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     def down, do: Migrations.down(@opts ++ [version: 3])
   end
 
+  # V04's concurrent rebuild (sp-ajz), as the two host migrations the
+  # moduledoc prescribes: everything through V03 transactionally, then V04
+  # alone in a migration that disables the DDL transaction and the
+  # migration lock. Those attributes are read from the module the Migrator
+  # runs, so they belong here and cannot live in the package's V04.
+  defmodule MigrateKxConcurrentV03 do
+    use Ecto.Migration
+
+    @opts [
+      repo: StatifierPersistence.TestRepo,
+      key: :uxid,
+      table_prefix: "kx_con_"
+    ]
+
+    def up, do: Migrations.up(@opts ++ [version: 3])
+    def down, do: Migrations.down(@opts ++ [from: 3])
+  end
+
+  defmodule MigrateKxConcurrentV04 do
+    use Ecto.Migration
+
+    @disable_ddl_transaction true
+    @disable_migration_lock true
+
+    @opts [
+      repo: StatifierPersistence.TestRepo,
+      key: :uxid,
+      table_prefix: "kx_con_"
+    ]
+
+    def up, do: Migrations.up(@opts ++ [from: 4])
+    def down, do: Migrations.down(@opts ++ [version: 4])
+  end
+
+  # The same V04 call from an ordinary transactional migration - the
+  # one-call recipe's shape, and the case V04 must not raise on.
+  defmodule MigrateKxTransactionalV04 do
+    use Ecto.Migration
+
+    @opts [
+      repo: StatifierPersistence.TestRepo,
+      key: :uxid,
+      table_prefix: "kx_con_"
+    ]
+
+    def up, do: Migrations.up(@opts ++ [from: 4])
+    def down, do: Migrations.down(@opts ++ [version: 4])
+  end
+
   @host_migrations [
     {20_260_822_000_001, MigrateKxUxid},
     {20_260_822_000_002, MigrateKxUuid},
@@ -85,6 +136,8 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
   @literal_version 20_260_822_000_009
 
   @capped_versions [20_260_822_000_010, 20_260_822_000_011]
+
+  @concurrent_versions [20_260_906_000_401, 20_260_906_000_402, 20_260_906_000_403]
 
   @key_prefixes ["kx_uxid_", "kx_uuid_", "kx_big_"]
 
@@ -389,11 +442,111 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     end
   end
 
+  describe "V04: the concurrent rebuild of the metadata index" do
+    setup do
+      [v03_version, concurrent_version, transactional_version] = @concurrent_versions
+
+      on_exit(fn ->
+        SQL.query!(TestRepo, ~s(DROP TABLE IF EXISTS "kx_con_runs"), [])
+        SQL.query!(TestRepo, ~s(DROP TABLE IF EXISTS "kx_con_positions"), [])
+        SQL.query!(TestRepo, ~s(DROP TABLE IF EXISTS "kx_con_charts"), [])
+
+        SQL.query!(TestRepo, "DELETE FROM schema_migrations WHERE version = ANY($1)", [
+          @concurrent_versions
+        ])
+      end)
+
+      :ok = migrate(:up, v03_version, MigrateKxConcurrentV03)
+
+      %{concurrent_version: concurrent_version, transactional_version: transactional_version}
+    end
+
+    # sabotage: made V04.up/1's rebuild_concurrently a bare `:ok` -> red on
+    # the oid assertion ("the index V03 built is still the one in place"),
+    # the two indexes being the same object. Verified red, reverted.
+    test "the index is dropped and rebuilt, valid and unchanged in shape", ctx do
+      before_oid = metadata_index_oid("kx_con_runs")
+
+      assert metadata_indexes("kx_con_runs") == [["kx_con_runs_metadata_gin_index"]]
+
+      :ok = migrate(:up, ctx.concurrent_version, MigrateKxConcurrentV04)
+
+      after_oid = metadata_index_oid("kx_con_runs")
+
+      refute after_oid == before_oid,
+             "V04 left the index V03 built in place rather than rebuilding it"
+
+      assert metadata_indexes("kx_con_runs") == [["kx_con_runs_metadata_gin_index"]]
+      assert metadata_index_definition("kx_con_runs") =~ "USING gin"
+      assert metadata_index_definition("kx_con_runs") =~ "jsonb_path_ops"
+      assert metadata_index_valid?("kx_con_runs")
+    end
+
+    # sabotage: made V04.down/1 drop the index too -> red, and red across
+    # the whole module ("24 tests, 24 failures"): every rollback then
+    # dropped the index twice, V04's `down` and V03's, and the second
+    # `** (Postgrex.Error) ERROR 42704 (undefined_object)` took setup_all's
+    # on_exit down with it. Verified red, reverted.
+    test "down/1 keeps the concurrently built index, and V03's down drops it", ctx do
+      :ok = migrate(:up, ctx.concurrent_version, MigrateKxConcurrentV04)
+      rebuilt_oid = metadata_index_oid("kx_con_runs")
+
+      :ok = migrate(:down, ctx.concurrent_version, MigrateKxConcurrentV04)
+
+      assert metadata_index_oid("kx_con_runs") == rebuilt_oid
+      assert metadata_indexes("kx_con_runs") == [["kx_con_runs_metadata_gin_index"]]
+
+      [v03_version | _rest] = @concurrent_versions
+      :ok = migrate(:down, v03_version, MigrateKxConcurrentV03)
+
+      assert tables_in_schema("public", "kx_con_") == []
+    end
+
+    # sabotage: dropped V04.up/1's `repo().in_transaction?()` clause, so the
+    # rebuild ran unconditionally -> red ("24 tests, 9 failures"), and red
+    # as the migration itself: `** (Postgrex.Error) ERROR 25001
+    # (active_sql_transaction) DROP INDEX CONCURRENTLY cannot run inside a
+    # transaction block`. Verified red, reverted.
+    test "inside a DDL transaction the rebuild is skipped, silently on an empty table", ctx do
+      before_oid = metadata_index_oid("kx_con_runs")
+
+      log =
+        capture_log(fn ->
+          :ok = migrate(:up, ctx.transactional_version, MigrateKxTransactionalV04)
+        end)
+
+      refute log =~ "V04 skipped the concurrent rebuild"
+
+      assert metadata_index_oid("kx_con_runs") == before_oid
+      assert metadata_indexes("kx_con_runs") == [["kx_con_runs_metadata_gin_index"]]
+    end
+
+    # sabotage: made V04's warn_skipped/1 warn unconditionally -> red in the
+    # empty-table case above, which is the one a fresh database and every
+    # test harness takes. Verified red, reverted.
+    test "the skip warns once the runs table already holds rows", ctx do
+      insert_run("kx_con_runs", "run-kx-con-warn")
+
+      before_oid = metadata_index_oid("kx_con_runs")
+
+      log =
+        capture_log(fn ->
+          :ok = migrate(:up, ctx.transactional_version, MigrateKxTransactionalV04)
+        end)
+
+      assert log =~ "V04 skipped the concurrent rebuild"
+      assert log =~ "@disable_ddl_transaction true"
+      assert log =~ "@disable_migration_lock true"
+
+      assert metadata_index_oid("kx_con_runs") == before_oid
+    end
+  end
+
   describe "option validation" do
     # sabotage: skipped parse!'s version validation -> red (KeyError, not ArgumentError)
     test "an unknown version raises before any DDL" do
       assert_raise ArgumentError, ~r/unknown migration version/, fn ->
-        Migrations.up(for: KxUxid, version: 4)
+        Migrations.up(for: KxUxid, version: 5)
       end
 
       assert_raise ArgumentError, ~r/unknown migration version/, fn ->
@@ -415,7 +568,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     # red, reverted.
     test "an unknown down from: raises before any DDL" do
       assert_raise ArgumentError, ~r/unknown migration from/, fn ->
-        Migrations.down(for: KxUxid, from: 4)
+        Migrations.down(for: KxUxid, from: 5)
       end
     end
 
@@ -478,6 +631,58 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
       )
 
     rows
+  end
+
+  defp insert_run(table, run_id) do
+    SQL.query!(
+      TestRepo,
+      """
+      INSERT INTO "#{table}" (id, run_id, status, content_hash, identity_blob,
+                              inserted_at, updated_at)
+      VALUES ($1, $2, 'running', 'sha256:kx-con', $3, now(), now())
+      """,
+      [run_id, run_id, <<1>>]
+    )
+
+    :ok
+  end
+
+  defp metadata_index_oid(table) do
+    %{rows: [[oid]]} =
+      SQL.query!(
+        TestRepo,
+        """
+        SELECT i.oid
+        FROM pg_class i
+        JOIN pg_index ix ON ix.indexrelid = i.oid
+        JOIN pg_class t ON t.oid = ix.indrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public' AND t.relname = $1
+          AND i.relname = $1 || '_metadata_gin_index'
+        """,
+        [table]
+      )
+
+    oid
+  end
+
+  defp metadata_index_valid?(table) do
+    %{rows: [[valid]]} =
+      SQL.query!(
+        TestRepo,
+        """
+        SELECT ix.indisvalid
+        FROM pg_class i
+        JOIN pg_index ix ON ix.indexrelid = i.oid
+        JOIN pg_class t ON t.oid = ix.indrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public' AND t.relname = $1
+          AND i.relname = $1 || '_metadata_gin_index'
+        """,
+        [table]
+      )
+
+    valid
   end
 
   defp metadata_index_definition(table) do

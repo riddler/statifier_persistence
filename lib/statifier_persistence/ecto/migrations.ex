@@ -63,6 +63,31 @@ if Code.ensure_loaded?(Ecto.Migration) do
     migration and once from this one - and the second call fails on a
     column that is already gone.
 
+    V04 is the one version whose full effect depends on how the host's
+    own migration module is written. It rebuilds V03's `metadata` GIN
+    index with `CREATE INDEX CONCURRENTLY`, which cannot run inside a
+    transaction, and `@disable_ddl_transaction` / `@disable_migration_lock`
+    are read from the module `Ecto.Migrator` runs - the host's - not from
+    a module it delegates to. A host that wants the concurrent build
+    therefore gives V04 a migration of its own:
+
+        defmodule MyApp.Repo.Migrations.RebuildStatifierPersistenceMetadataIndex do
+          use Ecto.Migration
+
+          @disable_ddl_transaction true
+          @disable_migration_lock true
+
+          def up, do: StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, from: 4)
+          def down, do: StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence, version: 4)
+        end
+
+    Inside a transaction V04 skips the rebuild and leaves V03's index in
+    place, which is the same index under the same name - so the one-call
+    recipe above stays correct on a fresh database, where a plain build
+    on an empty runs table costs nothing. It warns only when that table
+    already holds rows. `StatifierPersistence.Ecto.Migrations.V04`
+    records the whole of it.
+
     When `prefix:` names a Postgres schema, `up/1` creates the schema if it
     does not exist; `down/1` leaves the schema in place (dropping a schema
     the host may share is not this package's call).
@@ -71,12 +96,13 @@ if Code.ensure_loaded?(Ecto.Migration) do
     alias StatifierPersistence.Ecto.Config
 
     @initial_version 1
-    @current_version 3
+    @current_version 4
 
     @migrations %{
       1 => StatifierPersistence.Ecto.Migrations.V01,
       2 => StatifierPersistence.Ecto.Migrations.V02,
-      3 => StatifierPersistence.Ecto.Migrations.V03
+      3 => StatifierPersistence.Ecto.Migrations.V03,
+      4 => StatifierPersistence.Ecto.Migrations.V04
     }
 
     @doc """

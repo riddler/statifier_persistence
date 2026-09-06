@@ -424,11 +424,11 @@ configured `:blob_type` with the other three blob columns, so a
 hand-written `ALTER` this README's encryption section already describes
 for those three - now for four columns, not three.
 
-**The `metadata` GIN index** is the part to plan for. `up/1` issues a
-plain `CREATE INDEX`, **not** `CREATE INDEX CONCURRENTLY`: it takes a
-`SHARE` lock on the runs table for the whole build, which blocks every
-`INSERT`, `UPDATE` and `DELETE` against that table until the index is
-finished. Reads are unaffected. On a small or idle runs table this is
+**The `metadata` GIN index** is the part to plan for. V03's `up/1`
+issues a plain `CREATE INDEX`, **not** `CREATE INDEX CONCURRENTLY`: it
+takes a `SHARE` lock on the runs table for the whole build, which blocks
+every `INSERT`, `UPDATE` and `DELETE` against that table until the index
+is finished. Reads are unaffected. On a small or idle runs table this is
 imperceptible. On a large one it is an outage of every write the runs
 table takes - which, for a host stepping runs durably, means every step
 of every run.
@@ -436,40 +436,8 @@ of every run.
 How long that is depends on the row count, the width of the `metadata`
 maps, and the server, so measure rather than guess (`sp-461` is this
 package's own measurement issue if you want a number to compare against).
-A host with millions of runs rows should treat this as a scheduled
-maintenance step rather than a deploy-time migration - or write V03's two
-statements out by hand instead of calling the helper, so the index can be
-built concurrently:
-
-    defmodule MyApp.Repo.Migrations.AddStatifierPersistenceOutcomeBlob do
-      use Ecto.Migration
-
-      @disable_ddl_transaction true
-      @disable_migration_lock true
-
-      def up do
-        alter table("runs") do
-          add(:outcome_blob, :binary, null: true)
-        end
-
-        create(
-          index("runs", ["metadata jsonb_path_ops"],
-            using: "GIN",
-            name: :runs_metadata_gin_index,
-            concurrently: true
-          )
-        )
-      end
-    end
-
-substituting your configured table name and prefix throughout; the index
-name must stay `<runs table>_metadata_gin_index`, which is what V03's
-`down/1` drops. A concurrent build does not block writes and takes
-longer, and it cannot run inside a transaction, which is what the two
-module attributes are for. A host that goes this route has reached V03
-without calling `up(from: 3)` and should not call it afterwards: V03's
-`create/1` is a plain `create`, not `create_if_not_exists`, so a second
-run fails on the index that is already there.
+The concurrent build is what a host with a large runs table wants, and
+0.8.0 ships it as V04 - see below.
 
 The index is not optional in effect: without it, every fan-out child
 completion asks whether its N siblings are terminal with a `jsonb`
@@ -499,6 +467,71 @@ children nothing can settle. Storing, loading, stepping and resuming runs
 are unaffected. Per-run locking is a separate Postgres-only surface -
 `lock_run/3` is `pg_advisory_xact_lock` plus `SELECT ... FOR UPDATE` -
 and is tracked in `sp-5lm`.
+
+### Building the metadata index concurrently: V04
+
+0.8.0 adds V04, whose whole job is to rebuild V03's `metadata` GIN index
+with `CREATE INDEX CONCURRENTLY` - same name, same expression, same
+`jsonb_path_ops` opclass, built without the `SHARE` lock. It ships in the
+same versioned helper as everything else, so a fresh database picks it up
+with the one-call recipe and needs nothing else.
+
+The one thing V04 cannot do for you is turn off the transaction it runs
+in. `CREATE INDEX CONCURRENTLY` cannot run inside a transaction block,
+and Ecto reads `@disable_ddl_transaction` and `@disable_migration_lock`
+from the module `Ecto.Migrator` runs - **your** migration, not a module
+it delegates to. So V04 wants a migration of its own:
+
+    defmodule MyApp.Repo.Migrations.RebuildStatifierPersistenceMetadataIndex do
+      use Ecto.Migration
+
+      @disable_ddl_transaction true
+      @disable_migration_lock true
+
+      def up, do: StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, from: 4)
+      def down, do: StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence, version: 4)
+    end
+
+Called from an ordinary transactional migration instead, V04 leaves V03's
+index in place and does nothing else. That is deliberate rather than a
+failure mode: the index it would have built is the one already there,
+under the same name, and raising would break the one-call recipe every
+fresh database and test harness uses, where a plain build on an empty
+runs table costs nothing. It logs a warning when the runs table already
+holds rows, which is the case where the plain build did block writes and
+the two attributes are what you were missing.
+
+`down/1` for V04 does nothing at all: what it leaves behind is V03's
+index, and V03's `down/1` is what drops it. A non-transactional migration
+has no rollback, so if the rebuild is interrupted, re-run the migration -
+the drop is `drop_if_exists`, so it clears a missing or an invalid
+leftover either way.
+
+**A host with a large runs table that has not yet reached V03** is the
+one case V04 does not solve by itself, because V03 still builds the index
+plainly on the way past. Such a host adds the `outcome_blob` column by
+hand, skipping V03's helper call entirely:
+
+    defmodule MyApp.Repo.Migrations.AddStatifierPersistenceOutcomeBlob do
+      use Ecto.Migration
+
+      def up do
+        alter table("runs") do
+          add(:outcome_blob, :binary, null: true)
+        end
+      end
+    end
+
+substituting your configured table name and prefix, and then runs the V04
+migration above for the index. That is a smaller hand-written migration
+than 0.7.x asked for - the index half is V04's now - and the warning
+about never calling `up(from: 3)` afterwards still applies: V03's
+`create/1` is a plain `create`, not `create_if_not_exists`, so a second
+run fails on the index that is already there.
+
+**On an Ecto adapter that is not Postgres, V04 is a no-op**, both
+directions, under the same adapter check V03 uses: there is no index to
+rebuild, because V03 created none. Such a host needs neither attribute.
 
 ### Listing runs by host scope
 
