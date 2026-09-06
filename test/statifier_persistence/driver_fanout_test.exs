@@ -16,6 +16,8 @@ defmodule StatifierPersistence.DriverFanoutTest do
   alias StatifierPersistence.Run.Linkage
   alias StatifierPersistence.Storage.InMemory
 
+  alias StatifierPersistence.Test.OutcomeWindowSerialization
+
   alias StatifierPersistence.Test.{
     NoChildListingAdapter,
     NoRunOutcomeAdapter,
@@ -285,6 +287,77 @@ defmodule StatifierPersistence.DriverFanoutTest do
              ]
     end
 
+    # sp-kl3, the concurrent settlement race, in its deterministic form: a
+    # child's terminal STATUS is persisted by its own drive, and its answer
+    # is recorded by the settlement that follows - two writes, in that
+    # order. Under a concurrent queue a sibling's settlement can run in
+    # between, and a settlement that judges terminality by status alone
+    # finds every index terminal while an answer is still in flight.
+    #
+    # Driving index 0 with a resolver-less driver reproduces exactly that
+    # interleaving without a race: the drive commits `completed` and
+    # answers nothing, which is the state index 1's settlement would
+    # observe if it won the race.
+    #
+    # sabotage: in Driver.entry/5, drop the pending-outcome clause so a
+    # recorded-nil outcome assembles as an entry again -> red, the parent
+    # left "calling" for "approved" on index 1's settlement and index 0
+    # assembled with a nil donedata, which is the live defect. Verified
+    # red, reverted.
+    test "a completed child whose answer is still in flight does not settle the invocation", %{
+      store: store
+    } do
+      parent = start_parent(store)
+      start_children(parent, 2)
+
+      # Index 0's drive committed `completed`; its answer has not been
+      # recorded yet.
+      finish_child_without_answering(store, 0)
+      finish_child(store, 1)
+
+      assert leaves(reload_parent(store)) == ["calling"]
+
+      # The in-flight answer lands, and its own settlement is the one that
+      # sees both answers and assembles.
+      assert :ok =
+               Driver.answer_parent(
+                 parent_driver(store),
+                 Linkage.child_run_id("run_1", "call", 0),
+                 {:done, "item-0"}
+               )
+
+      assert leaves(reload_parent(store)) == ["approved"]
+
+      assert answered(store) == [
+               %{"index" => 0, "status" => "completed", "donedata" => "item-0"},
+               %{"index" => 1, "status" => "completed", "donedata" => "item-1"}
+             ]
+    end
+
+    # sp-kl3's other half, the ordering one: the answer is recorded inside
+    # the parent's exclusion, not before it. That is what makes the
+    # settlement that records the last answer the settlement that sees
+    # them all, rather than leaving it to how two separate writes happen
+    # to interleave with two separate reads.
+    #
+    # sabotage: in Driver.decide/4, move record_outcome/3 back out of the
+    # `with_run` callback and into settle_child/4 ahead of it -> red, the
+    # answer was already stored when the settlement's exclusion opened.
+    # Verified red, reverted.
+    test "a child's answer is recorded inside the parent's exclusion", %{store: store} do
+      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+      strategy = {OutcomeWindowSerialization, {self(), store, child_run_id}}
+
+      parent = start_parent(store)
+      start_children(parent, 1)
+
+      finish_child(store, 0, serialization: strategy)
+
+      assert leaves(reload_parent(store)) == ["approved"]
+
+      assert_receive {:exclusion, "run_1", false, true}
+    end
+
     # Scoped to the settlement's own question. The listing is legitimately
     # used elsewhere on this path - the parent's exit from the invoking
     # state cascades a cancel over the invocation, which walks records
@@ -462,11 +535,32 @@ defmodule StatifierPersistence.DriverFanoutTest do
 
   # Drives child `index` to its final state. Its own drive is what routes
   # the completion into the settlement, with no explicit call at all.
-  defp finish_child(store, index) do
+  defp finish_child(store, index, opts \\ []) do
     child_run_id = Linkage.child_run_id("run_1", "call", index)
 
     assert {:ok, _run, _machine_state} =
-             Driver.send_event(child_driver(store), child_run_id, Event.external("go"))
+             Driver.send_event(child_driver(store, opts), child_run_id, Event.external("go"))
+
+    :ok
+  end
+
+  # Drives child `index` to its final state through a driver with no
+  # `chart_resolver:`, so the drive persists the terminal status and the
+  # automatic answer no-ops (`Driver.auto_answer_parent/3`'s nil clause).
+  # That is the half-written picture a sibling's settlement can observe
+  # under a concurrent queue, held still.
+  defp finish_child_without_answering(store, index) do
+    child_run_id = Linkage.child_run_id("run_1", "call", index)
+
+    resolverless =
+      driver(store, @child_source, fn _type, _params, _context -> :pending end,
+        child_canceller: recording_canceller()
+      )
+
+    assert {:ok, run, _machine_state} =
+             Driver.send_event(resolverless, child_run_id, Event.external("go"))
+
+    assert run.status == :completed
 
     :ok
   end
@@ -492,12 +586,17 @@ defmodule StatifierPersistence.DriverFanoutTest do
 
   # A driver over a child's chart that can reach the parent's: the shape
   # every node answering a durable child automatically has.
-  defp child_driver(store) do
+  defp child_driver(store, opts) do
     {:ok, parent_machine} = Statifier.compile(@parent_source)
 
-    driver(store, @child_source, fn _type, _params, _context -> :pending end,
-      chart_resolver: parent_resolver(parent_machine),
-      child_canceller: recording_canceller()
+    driver(
+      store,
+      @child_source,
+      fn _type, _params, _context -> :pending end,
+      Keyword.merge(
+        [chart_resolver: parent_resolver(parent_machine), child_canceller: recording_canceller()],
+        opts
+      )
     )
   end
 

@@ -772,19 +772,30 @@ defmodule StatifierPersistence.Driver do
   # `child_count`. Three things then happen, in this order and for these
   # reasons:
   #
-  # 1. The child's own answer is persisted on the child's run record.
+  # 1. A settlement section takes the PARENT's exclusion. Everything that
+  #    follows happens inside it, because the question and the answer that
+  #    follows from it have to be one decision.
+  # 2. The child's own answer is persisted on the child's run record.
   #    Nothing else keeps it: a stored record carries no donedata, so an
   #    answer that stayed on the step that produced it could not be
-  #    assembled later by a node that never saw the child run.
-  # 2. A settlement section runs under the PARENT's exclusion and asks,
-  #    through the indexed status projection, whether every index has
-  #    reached a terminal status. Under the parent's exclusion because the
-  #    question and the answer that follows from it have to be one
-  #    decision; through the projection because the question is asked once
-  #    per child, and the listing would move N position blobs each time.
-  # 3. Only the settlement that finds them all terminal reads the N
-  #    payloads, assembles the dense index-ordered list, and answers the
-  #    parent's ordinary door once.
+  #    assembled later by a node that never saw the child run. It is
+  #    written under the parent's exclusion (sp-kl3) so that every
+  #    invocation's answers are written and read in one order: the
+  #    settlement that records the last answer is the settlement that then
+  #    sees them all.
+  # 3. The section asks, through the indexed status projection, whether
+  #    every index has reached a terminal status - through the projection
+  #    because the question is asked once per child, and the listing would
+  #    move N position blobs each time.
+  # 4. The settlement that finds them all terminal reads the N payloads
+  #    and assembles the dense index-ordered list. A terminal status is
+  #    necessary but not sufficient: a child's status is persisted by its
+  #    own drive and its answer by the settlement that follows, so a
+  #    terminal index whose answer has not been recorded yet is an answer
+  #    still in flight, not a missing one, and the read yields `:not_yet`
+  #    rather than an entry with a nil donedata (sp-kl3). Only the
+  #    settlement that reads N recorded answers answers the parent's
+  #    ordinary door, once.
   #
   # `driver.machine` must be the PARENT's chart, exactly as
   # `answer_parent/3` documents: the answer this delivers goes through the
@@ -792,20 +803,24 @@ defmodule StatifierPersistence.Driver do
   # path arrives with the parent's chart already resolved, because
   # `resolve_and_answer/4` swaps it in before calling `answer_parent/3`.
   #
-  # Two racers can both find every index terminal - each writes its own
-  # status before either reads - and both will answer. The second is
-  # discarded by `late_answer/3`'s liveness read, the same mechanism this
+  # Two settlements can still both find the invocation settled and both
+  # answer - a re-delivered job settling a child that already recorded its
+  # answer is the ordinary way. The second is discarded by
+  # `late_answer/3`'s liveness read, the same mechanism this
   # package already relies on for a late answer to a cancelled invocation.
   # That discard is idempotent for a chart that transitions out of the
   # invoking state on its answer, which the compiled fan-out block is.
   @spec settle_child(t(), Linkage.t(), Runs.run_id(), {:done, term()} | {:failed, keyword()}) ::
           :ok
   defp settle_child(driver, %Linkage{} = linkage, child_run_id, payload) do
-    with :ok <- record_outcome(driver, child_run_id, payload),
-         {:ok, {:answer, donedata}} <- decide(driver, linkage) do
-      assembled = {:done, donedata}
-      respond_to_parent(driver, linkage, assembled)
-      report_answered(child_run_id, linkage, assembled)
+    case decide(driver, linkage, child_run_id, payload) do
+      {:ok, {:answer, donedata}} ->
+        assembled = {:done, donedata}
+        respond_to_parent(driver, linkage, assembled)
+        report_answered(child_run_id, linkage, assembled)
+
+      _not_yet_or_error ->
+        :ok
     end
 
     :ok
@@ -816,6 +831,9 @@ defmodule StatifierPersistence.Driver do
   # than deriving a new one. `update_run_status/4` is the writer that
   # carries every other stored field, both blobs included, forward
   # verbatim.
+  #
+  # Called from inside `decide/4`'s exclusion, never outside it: see the
+  # section comment above.
   @spec record_outcome(t(), Runs.run_id(), {:done, term()} | {:failed, keyword()}) ::
           :ok | {:error, Storage.error()}
   defp record_outcome(driver, child_run_id, payload) do
@@ -849,19 +867,38 @@ defmodule StatifierPersistence.Driver do
   defp decode_outcome(nil), do: nil
   defp decode_outcome(blob) when is_binary(blob), do: :erlang.binary_to_term(blob)
 
-  # The settlement section. Everything from the projection read to the
-  # assembly runs inside the parent's own serialization strategy, so two
-  # children settling at once do not both read a half-written picture of
-  # the invocation.
-  @spec decide(t(), Linkage.t()) :: {:ok, {:answer, term()} | :not_yet} | {:error, term()}
-  defp decide(driver, %Linkage{} = linkage) do
+  # The settlement section. Everything from this child's own answer being
+  # recorded through the projection read to the assembly runs inside the
+  # parent's own serialization strategy, so two children settling at once
+  # neither read a half-written picture of the invocation nor write their
+  # answers into one.
+  @spec decide(t(), Linkage.t(), Runs.run_id(), {:done, term()} | {:failed, keyword()}) ::
+          {:ok, {:answer, term()} | :not_yet} | {:error, term()}
+  defp decide(driver, %Linkage{} = linkage, child_run_id, payload) do
     {strategy, config} = settlement_strategy(driver)
     match = Linkage.invocation_match(linkage.parent_run_id, linkage.invoke_id)
 
     case strategy.with_run(config, linkage.parent_run_id, fn ->
-           settle(driver, linkage, match)
+           record_and_settle(driver, linkage, match, child_run_id, payload)
          end) do
       {:ok, result} -> result
+      {:error, _reason} = error -> error
+    end
+  end
+
+  # The exclusion's whole body: this child's own answer written, then the
+  # question asked of every index. In this order because the answer is one
+  # of the facts the question is about.
+  @spec record_and_settle(
+          t(),
+          Linkage.t(),
+          Adapter.metadata(),
+          Runs.run_id(),
+          {:done, term()} | {:failed, keyword()}
+        ) :: {:ok, {:answer, term()} | :not_yet} | {:error, term()}
+  defp record_and_settle(driver, %Linkage{} = linkage, match, child_run_id, payload) do
+    case record_outcome(driver, child_run_id, payload) do
+      :ok -> settle(driver, linkage, match)
       {:error, _reason} = error -> error
     end
   end
@@ -958,8 +995,13 @@ defmodule StatifierPersistence.Driver do
   # needs no second query. The list is dense and index-ordered, so a chart
   # reads item `i`'s answer at position `i` whatever order the children
   # finished in.
+  #
+  # It is also the read that turns the projection's necessary condition
+  # into a sufficient one (sp-kl3): an index whose answer has not been
+  # recorded yet halts the whole assembly as `:not_yet`, because a fan-out
+  # answers with every answer or with none.
   @spec assemble(t(), Linkage.t(), [Adapter.run_state()], boolean()) ::
-          {:ok, {:answer, [map()]}} | {:error, term()}
+          {:ok, {:answer, [map()]} | :not_yet} | {:error, term()}
   defp assemble(driver, %Linkage{} = linkage, states, cancelled?) do
     by_index = Map.new(states, &{&1.child_index, &1})
 
@@ -967,27 +1009,35 @@ defmodule StatifierPersistence.Driver do
     |> Enum.reduce_while({:ok, []}, fn index, {:ok, acc} ->
       case entry(driver, linkage, Map.get(by_index, index), index, cancelled?) do
         {:ok, entry} -> {:cont, {:ok, [entry | acc]}}
+        :not_yet -> {:halt, :not_yet}
         {:error, _reason} = error -> {:halt, error}
       end
     end)
     |> case do
       {:ok, entries} -> {:ok, {:answer, Enum.reverse(entries)}}
+      :not_yet -> {:ok, :not_yet}
       {:error, _reason} = error -> error
     end
   end
 
+  # A cancelled index answers from its status alone - it has no answer to
+  # record and never will. Every other terminal index answers from its
+  # recorded outcome, and `:not_yet` when that outcome is not there yet.
   @spec entry(t(), Linkage.t(), Adapter.run_state() | nil, non_neg_integer(), boolean()) ::
-          {:ok, map()} | {:error, term()}
+          {:ok, map()} | :not_yet | {:error, term()}
   defp entry(_driver, _linkage, nil, index, true), do: {:ok, cancelled_entry(index)}
 
   defp entry(_driver, _linkage, %{status: :cancelled}, index, _cancelled?),
     do: {:ok, cancelled_entry(index)}
 
-  defp entry(driver, %Linkage{} = linkage, %{status: status}, index, _cancelled?) do
+  defp entry(driver, %Linkage{} = linkage, %{status: _status}, index, _cancelled?) do
     child_run_id = Linkage.child_run_id(linkage.parent_run_id, linkage.invoke_id, index)
 
     with {:ok, record} <- Storage.fetch_run(driver.store, child_run_id) do
-      {:ok, outcome_entry(index, status, decode_outcome(record.outcome_blob))}
+      case decode_outcome(record.outcome_blob) do
+        nil -> :not_yet
+        outcome -> {:ok, outcome_entry(index, outcome)}
+      end
     end
   end
 
@@ -996,19 +1046,15 @@ defmodule StatifierPersistence.Driver do
   # (`answer_event/3`). A failed entry carries st-ADR-0068's own three
   # keys, so an author reads a failed item exactly as they read a failed
   # single invocation.
-  @spec outcome_entry(
-          non_neg_integer(),
-          Adapter.run_status(),
-          {:done, term()} | {:failed, keyword()} | nil
-        ) :: map()
-  defp outcome_entry(index, _status, {:done, donedata}),
+  # The recorded answer, not the stored status, decides the entry's own
+  # `"status"`: they are written together by `record_outcome/3`, and an
+  # index with no recorded answer never reaches here (`entry/5`).
+  @spec outcome_entry(non_neg_integer(), {:done, term()} | {:failed, keyword()}) :: map()
+  defp outcome_entry(index, {:done, donedata}),
     do: %{"index" => index, "status" => "completed", "donedata" => donedata}
 
-  defp outcome_entry(index, _status, {:failed, failure}),
+  defp outcome_entry(index, {:failed, failure}),
     do: %{"index" => index, "status" => "failed", "failure" => failure_data(failure)}
-
-  defp outcome_entry(index, status, nil),
-    do: %{"index" => index, "status" => Atom.to_string(status), "donedata" => nil}
 
   @spec failure_data(keyword()) :: map()
   defp failure_data(failure) do
