@@ -296,6 +296,23 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
                Storage.fetch_run(store, Linkage.child_run_id("run_sqlite_fanout", "call", 0))
     end
 
+    # sabotage: dropped the supports_metadata?/1 conjunct from both raw
+    # listings in Storage.Ecto, so each issues its containment SQL again ->
+    # red, this case alone ("14 tests, 1 failure") with
+    # `** (Exqlite.Error) unrecognized token: "@"` out of
+    # list_runs_by_metadata/2 - the raise this bead replaces. Verified red,
+    # reverted.
+    test "the raw listings refuse too, rather than raising on SQL this backend cannot parse" do
+      store = sqlite_store()
+      match = Linkage.invocation_match("run_sqlite_absent", "call")
+
+      assert {:error, :metadata_unsupported} =
+               Storage.Ecto.list_runs_by_metadata(store.opts, match)
+
+      assert {:error, :metadata_unsupported} =
+               Storage.Ecto.list_run_states_by_metadata(store.opts, match)
+    end
+
     # sabotage: made Storage.Ecto.supports_run_outcome?/1 answer the same
     # adapter check supports_metadata?/1 does -> red ("Expected truthy,
     # got false"). The column exists on every adapter, and declaring

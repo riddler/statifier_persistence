@@ -321,6 +321,11 @@ if Code.ensure_loaded?(Ecto) do
 
     Takes the same non-empty string-keyed map, with the same
     `ArgumentError` for anything else.
+
+    Off Postgres this refuses with `{:error, :metadata_unsupported}`
+    rather than issuing SQL the backend cannot parse - the same answer
+    `supports_metadata?/1` already gives the facade, given directly to a
+    caller who reached the callback itself.
     """
     @impl Adapter
     @spec list_run_states_by_metadata(Adapter.opts(), Adapter.metadata()) ::
@@ -328,7 +333,7 @@ if Code.ensure_loaded?(Ecto) do
     def list_run_states_by_metadata(opts, metadata) do
       validate_match!(metadata)
 
-      if json_representable?(metadata) do
+      if supports_metadata?(opts) and json_representable?(metadata) do
         reserved = Linkage.reserved_key()
 
         rows =
@@ -383,11 +388,15 @@ if Code.ensure_loaded?(Ecto) do
     `list_runs_by_metadata/2` and `list_run_states_by_metadata/2` are
     `jsonb` containment (`@>`) with a `-> ... ->>` extraction, which a
     non-Postgres backend does not parse. Declaring the capability true
-    there would trade a clean refusal for a raise from the driver, at the
-    far end of a durable subchart or a fan-out that had already started
-    children nothing could then settle (sp-11w). V03's `metadata` index is
-    skipped on the same adapters, for the same reason; sp-5lm tracks this
-    surface.
+    there would strand a durable subchart or a fan-out at the far end of
+    a listing that cannot answer, with children already started that
+    nothing could then settle (sp-11w).
+
+    The two listings consult this answer themselves, so a caller holding
+    the raw callback gets the same `{:error, :metadata_unsupported}` the
+    facade gives rather than a raise from the driver (sp-4eo). V03's
+    `metadata` index is skipped on the same adapters, for the same
+    reason; sp-5lm tracks this surface.
     """
     @impl Adapter
     @spec supports_metadata?(Adapter.opts()) :: boolean()
@@ -418,6 +427,11 @@ if Code.ensure_loaded?(Ecto) do
         )
 
     Returns records in `fetch_run/2`'s shape.
+
+    Off Postgres this refuses with `{:error, :metadata_unsupported}`
+    rather than issuing SQL the backend cannot parse - the same answer
+    `supports_metadata?/1` already gives the facade, given directly to a
+    caller who reached the callback itself.
     """
     @impl Adapter
     @spec list_runs_by_metadata(Adapter.opts(), Adapter.metadata()) ::
@@ -425,7 +439,7 @@ if Code.ensure_loaded?(Ecto) do
     def list_runs_by_metadata(opts, metadata) do
       validate_match!(metadata)
 
-      if json_representable?(metadata) do
+      if supports_metadata?(opts) and json_representable?(metadata) do
         rows =
           repo(opts).all(
             from(r in run_schema(opts),

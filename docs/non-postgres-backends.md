@@ -19,8 +19,8 @@ steps are about a Postgres index.
 | Surface | Why | What happens elsewhere |
 |---|---|---|
 | `lock_run/3` | `SELECT pg_advisory_xact_lock(hashtextextended(...))` plus `FOR UPDATE` | The backend does not parse it. The callback raises |
-| `list_runs_by_metadata/2`, `list_run_states_by_metadata/2` | `jsonb` containment (`@>`) with a `-> ... ->>` extraction | The backend does not parse it. Called directly, the callbacks raise |
-| `supports_metadata?/1` | Declares the `jsonb` column *and* the list helpers as one capability | Already answers `false` off `repo.__adapter__()`, so `StatifierPersistence.Storage` refuses the listings cleanly rather than reaching the raising SQL |
+| `list_runs_by_metadata/2`, `list_run_states_by_metadata/2` | `jsonb` containment (`@>`) with a `-> ... ->>` extraction | The backend does not parse it, so the callbacks never issue it: each consults `supports_metadata?/1` first and answers `{:error, :metadata_unsupported}`, called directly or through the facade |
+| `supports_metadata?/1` | Declares the `jsonb` column *and* the list helpers as one capability | Already answers `false` off `repo.__adapter__()`, so both the facade and the two raw callbacks refuse the listings cleanly rather than reaching the Postgres-only SQL |
 | V03's `GIN jsonb_path_ops` index on `runs.metadata` | Serves the containment query above | The migration helper skips it, so `Migrations.up/1` runs to completion and the `outcome_blob` column arrives |
 | V04's concurrent rebuild of that index | `CREATE INDEX CONCURRENTLY` on the same index | A no-op in both directions: there is no index here to rebuild. The `@disable_ddl_transaction` / `@disable_migration_lock` attributes a Postgres host puts on that migration are not needed here |
 
@@ -135,8 +135,11 @@ excluded:
 Run it once **without** `--exclude postgres` as well, and read the
 failures. Four failures, all four of them the tagged cases, is the proof
 that the tag is excluding what it claims to and not covering for something
-else. Any fifth failure is a real portability problem in your setup, and
-the exclusion would have hidden it.
+else. Two of them fail on unparseable SQL out of `lock_run/3`; the other
+two fail on `{:error, :metadata_unsupported}` where a list was asserted,
+which is the listings declining rather than breaking. Any fifth failure is
+a real portability problem in your setup, and the exclusion would have
+hidden it.
 
 Two things this does not prove, and should not be read as proving. It does
 not prove the lock contract on your backend - you declined that callback,
@@ -158,4 +161,5 @@ conformance and lock case here still runs against a real Postgres server.
 - `test/statifier_persistence/ecto/sqlite_migrations_test.exs`: the
   standing proof, on a real SQLite repo, that V03 applies, that the index
   is skipped, that V04's rebuild of it is a no-op, and that what the index
-  served refuses rather than raises.
+  served refuses rather than raises - through the facade, and through the
+  two raw callbacks a host can reach directly.

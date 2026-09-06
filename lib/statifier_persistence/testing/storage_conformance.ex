@@ -50,8 +50,14 @@ defmodule StatifierPersistence.Testing.StorageConformance do
   Ecto backend but implements all three in Postgres-only SQL
   (`pg_advisory_xact_lock` plus `FOR UPDATE`; `jsonb` containment). Point
   that adapter at a backend that is not Postgres and the four cases those
-  three callbacks generate are generated and fail on SQL the backend does
-  not parse.
+  three callbacks generate are generated and fail: the lock pair on SQL
+  the backend does not parse, the two listings on the refusal they answer
+  with instead. `list_runs_by_metadata/2` and
+  `list_run_states_by_metadata/2` consult `supports_metadata?/1` before
+  they issue anything, so off Postgres they return
+  `{:error, :metadata_unsupported}` rather than raising (sp-4eo) - a
+  cleaner answer, but not the list these two cases assert over, so their
+  tag stays where the raise put it.
 
   So those four carry `@tag :postgres`, and such a host excludes them by
   tag rather than forking the suite:
