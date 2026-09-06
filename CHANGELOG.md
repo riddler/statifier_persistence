@@ -10,6 +10,22 @@ fragment in [`changelog.d/`](changelog.d/README.md); the fragments are assembled
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
 
+## [0.7.2] 2026-09-06
+
+Patch release: a fan-out whose children settle at the same time assembles
+with every child's donedata present. A settlement used to read a sibling's
+status as terminal while that sibling's answer was still in flight, and
+assembled a completed child with a `nil` donedata; a settlement now records
+its own answer under the parent's exclusion and waits for every child's
+recorded answer, not only for every child's terminal status.
+
+### Fixed
+
+- A fan-out invocation whose children settle concurrently no longer answers with
+  a `nil` donedata for a child that completed: a settlement waits for every
+  child's answer to be recorded, not only for every child's status to be
+  terminal, and records its own answer under the parent's exclusion.
+
 ## [0.7.1] 2026-09-05
 
 Patch release: hosts that are not on Postgres can apply the package DDL.
