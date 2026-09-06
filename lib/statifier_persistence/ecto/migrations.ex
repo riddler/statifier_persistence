@@ -22,11 +22,13 @@ if Code.ensure_loaded?(Ecto.Migration) do
     `StatifierPersistence.Ecto.Config.new/1` - one resolver, both doors.
     The two spellings cannot be mixed in one call.
 
-    `version:` selects the target version. `up/1` migrates from V01 through
-    the target (default: the newest this package knows); `down/1` rolls back
-    from the newest through the target (default: V01, i.e. everything).
+    `from:` selects where a call starts and `version:` where it ends, in
+    both directions: `up/1` migrates from `from:` (default: V01) up through
+    `version:` (default: the newest this package knows), and `down/1` rolls
+    back from `from:` (default: the newest) down through `version:`
+    (default: V01, i.e. everything).
 
-    `from:` selects where `up/1` starts (default: V01). It is what a host
+    `from:` is what a host
     already running an older version writes its *next* migration with: a
     host that ran the migration above when this package shipped only V01
     picks up V02 with a second ordinary migration,
@@ -41,6 +43,25 @@ if Code.ensure_loaded?(Ecto.Migration) do
     rather than re-running V01's `CREATE TABLE` against tables that already
     exist. A host migrating a fresh database with the first spelling gets
     every version in one call and needs no second migration at all.
+
+    Each migration's two calls cover the same span, `up/1` upwards and
+    `down/1` downwards, and a *capped* migration needs both bounds spelled
+    out. A host that caps its first migration at `version: 2` - so that a
+    fresh clone and an already-migrated database take the same steps in the
+    same order - caps the rollback to match with `from: 2`:
+
+        defmodule MyApp.Repo.Migrations.AddStatifierPersistence do
+          use Ecto.Migration
+
+          def up, do: StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, version: 2)
+          def down, do: StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence, from: 2)
+        end
+
+    Without that ceiling `down/1` starts at the newest version this package
+    knows however far up the migration beside it went, so
+    `mix ecto.rollback --all` rolls V03 back twice - once from the later
+    migration and once from this one - and the second call fails on a
+    column that is already gone.
 
     When `prefix:` names a Postgres schema, `up/1` creates the schema if it
     does not exist; `down/1` leaves the schema in place (dropping a schema
@@ -82,14 +103,27 @@ if Code.ensure_loaded?(Ecto.Migration) do
     end
 
     @doc """
-    Rolls the tables back from the newest version through `version:`
-    (default: V01, i.e. everything). Takes the same options as `up/1`.
+    Rolls the tables back from `from:` (default: the newest version this
+    package knows) down through `version:` (default: V01, i.e. everything).
+
+    A migration whose `up/1` is capped at `version: N` caps its `down/1`
+    with `from: N`, so the rollback stops at the cap instead of reaching
+    versions a later migration has already rolled back - see the moduledoc.
+
+    Takes the same options as `up/1`.
     """
     @spec down(keyword()) :: :ok
     def down(opts) when is_list(opts) do
+      {from, opts} = Keyword.pop(opts, :from, @current_version)
+      validate_version!(from, "from")
       {config, target} = parse!(opts, @initial_version)
 
-      Enum.each(@current_version..target//-1, fn version ->
+      if from < target do
+        raise ArgumentError,
+              "from: #{from} is below version: #{target}; down/1 does not migrate up"
+      end
+
+      Enum.each(from..target//-1, fn version ->
         Map.fetch!(@migrations, version).down(config)
       end)
     end

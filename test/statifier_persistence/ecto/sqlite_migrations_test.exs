@@ -39,6 +39,37 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
     def down, do: Migrations.down(for: StatifierPersistence.SqliteTestRepo.Host)
   end
 
+  # The README's capped recipe on this adapter, which is where sp-8qq was
+  # measured: the first migration stops at V02 in both directions, the
+  # second carries V03 alone, and its own tables so nothing above collides.
+  defmodule MigrateSqliteCappedV02 do
+    @moduledoc false
+    use Ecto.Migration
+
+    @opts [
+      repo: StatifierPersistence.SqliteTestRepo,
+      key: :uxid,
+      table_prefix: "sq_cap_"
+    ]
+
+    def up, do: Migrations.up(@opts ++ [version: 2])
+    def down, do: Migrations.down(@opts ++ [from: 2])
+  end
+
+  defmodule MigrateSqliteCappedV03 do
+    @moduledoc false
+    use Ecto.Migration
+
+    @opts [
+      repo: StatifierPersistence.SqliteTestRepo,
+      key: :uxid,
+      table_prefix: "sq_cap_"
+    ]
+
+    def up, do: Migrations.up(@opts ++ [from: 3])
+    def down, do: Migrations.down(@opts ++ [version: 3])
+  end
+
   # A pass-through per-run exclusion. `Storage.Ecto.lock_run/3` is
   # `pg_advisory_xact_lock` plus `FOR UPDATE` and raises on SQLite, which
   # is sp-5lm's separate Postgres-only surface and not what these cases
@@ -54,6 +85,8 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
   end
 
   @migration_version 20_260_905_000_201
+
+  @capped_versions [20_260_906_000_301, 20_260_906_000_302]
 
   @parent_source """
   <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="calling">
@@ -133,6 +166,43 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
       :ok = migrate(:up)
 
       assert tables() == ["sq_charts", "sq_positions", "sq_runs"]
+    end
+  end
+
+  describe "the capped recipe from the README" do
+    # sabotage: dropped down/1's `from:` ceiling (back to the unconditional
+    # @current_version start) -> red exactly as the bead reports: the second
+    # rollback re-ran V03.down and failed with
+    # `** (Exqlite.Error) no such column: "outcome_blob"`. Verified red,
+    # reverted.
+    test "a V01-V02 migration and a V03 migration roll all the way back" do
+      [capped_version, v03_version] = @capped_versions
+
+      on_exit(fn ->
+        SQL.query!(SqliteTestRepo, "DROP TABLE IF EXISTS sq_cap_runs", [])
+        SQL.query!(SqliteTestRepo, "DROP TABLE IF EXISTS sq_cap_positions", [])
+        SQL.query!(SqliteTestRepo, "DROP TABLE IF EXISTS sq_cap_charts", [])
+
+        SQL.query!(SqliteTestRepo, "DELETE FROM schema_migrations WHERE version = ?1", [
+          capped_version
+        ])
+
+        SQL.query!(SqliteTestRepo, "DELETE FROM schema_migrations WHERE version = ?1", [
+          v03_version
+        ])
+      end)
+
+      :ok = migrate_capped(:up, capped_version, MigrateSqliteCappedV02)
+      :ok = migrate_capped(:up, v03_version, MigrateSqliteCappedV03)
+
+      assert capped_tables() == ["sq_cap_charts", "sq_cap_positions", "sq_cap_runs"]
+      assert "outcome_blob" in columns("sq_cap_runs")
+
+      # Newest first, which is the order `mix ecto.rollback --all` uses.
+      :ok = migrate_capped(:down, v03_version, MigrateSqliteCappedV03)
+      :ok = migrate_capped(:down, capped_version, MigrateSqliteCappedV02)
+
+      assert capped_tables() == []
     end
   end
 
@@ -230,6 +300,18 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
       :already_up -> :ok
       :already_down -> :ok
     end
+  end
+
+  defp migrate_capped(direction, version, module) do
+    case apply(Migrator, direction, [SqliteTestRepo, version, module, [log: false]]) do
+      :ok -> :ok
+      :already_up -> :ok
+      :already_down -> :ok
+    end
+  end
+
+  defp capped_tables do
+    Enum.filter(tables(), &String.starts_with?(&1, "sq_cap_"))
   end
 
   defp tables do
