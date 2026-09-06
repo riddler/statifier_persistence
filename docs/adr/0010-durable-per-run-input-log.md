@@ -212,7 +212,9 @@ and this package already reserves `event` vocabulary for upstream's struct;
 
 **Note (2026-09-06, `sp-f1s`):** "currently have zero occurrences" was the
 authoring-time ground for the naming choice, not a standing claim about the
-repository: `sp-80g` landed those names, and they occur in `lib/` today.
+repository: `sp-80g` landed the four callback and facade names, and they
+occur in `lib/` today. `Recording` is the exception and stays upstream's -
+decision 8's mapping onto it is named here and built nowhere.
 
 ### 3. An entry is the verbatim event, encoded above the adapter
 
