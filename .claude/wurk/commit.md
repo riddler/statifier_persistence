@@ -13,10 +13,14 @@ narrows it.
 
 Two consequences worth spelling out at commit time:
 
-- **There is no CI and no second reviewer.** The full gate run before the
-  commit is the only thing that ever verifies this branch. A
+- **The local full gate is the only verification the commit itself gets.**
+  `.github/workflows/ci.yml` runs the same "Full quality gate" on the pull
+  request, but that is a second check afterwards, on work already committed,
+  and there is no second reviewer either way - so a red or scoped local gate
+  is a hard stop at commit time, not something CI will catch for you. A
   `--profile loop` green is not the trigger - it skips dialyzer, deps audit,
-  and coverage.
+  and coverage. `.claude/wurk/mr.md`'s "The request is a record, not a review
+  gate" section says the same thing from the request side.
 - **A diff touching no Elixir code has no gate to run** and may commit on
   review of the diff alone (the authority table says so explicitly). The
   manifest's `gate.build_paths` is the boundary: a docs-only or
