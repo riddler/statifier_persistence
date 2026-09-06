@@ -210,6 +210,10 @@ and this package already reserves `event` vocabulary for upstream's struct;
 `log` rather than `history` or `trace` because "trace" is upstream's
 `trace: true` message stream, which this is not.
 
+**Note (2026-09-06, `sp-f1s`):** "currently have zero occurrences" was the
+authoring-time ground for the naming choice, not a standing claim about the
+repository: `sp-80g` landed those names, and they occur in `lib/` today.
+
 ### 3. An entry is the verbatim event, encoded above the adapter
 
 An entry's payload is the `%Statifier.Event{}` the interpreter was handed,

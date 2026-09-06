@@ -791,11 +791,15 @@ defmodule StatifierPersistence.Driver do
     )
   end
 
-  # `entry: :answer_parent` is telemetry only (`docs/telemetry.md`): the
-  # parent's own door is `done_invocation/5` or `failed_invocation/5`, but
-  # what an operator wants to see on the step is that a *child* drove it.
+  # `entry: :answer_parent` names the door the parent's step came through
+  # (`docs/telemetry.md`): the parent's own door is `done_invocation/5` or
+  # `failed_invocation/5`, but what an operator wants to see on the step is
+  # that a *child* drove it. It is not telemetry only - since ADR-0010
+  # decision 5, on an adapter that keeps an input log `entry:` also stamps
+  # the `door` of the entry appended to the *parent's* log, which is where
+  # a replay reads this re-entry back from.
   # `invoke_id:` and `child_count:` ride beside it for the same reason and
-  # are telemetry only too (sp-8wv's ADR-0009 amendment): they are what
+  # are telemetry only (sp-8wv's ADR-0009 amendment): they are what
   # makes the step span carrying a whole fan-out's assembled answer
   # recognisable as that, and not an ordinary invocation answer.
   @spec respond_to_parent(t(), Linkage.t(), {:done, term()} | {:failed, keyword()}) :: result()
