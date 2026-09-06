@@ -624,7 +624,7 @@ still answers its parent with the host-side translation this record deletes,
 and that deletion is a `statifier_examples` bead, not a reopening of this
 amendment.
 
-## Note (2026-09-06, `sp-23z`): what "the floor this package depends on" names in the sp-n8g amendment
+## Note (2026-09-06, sp-23z): what "the floor this package depends on" names in the sp-n8g amendment
 
 Correcting a wording, not a decision. The sp-n8g amendment's decision 1
 says the reserved key survives the whole pipeline as a flat string key

@@ -290,7 +290,7 @@ stays unscheduled: it measures the settlement read cost against a
 GIN-indexed `metadata` column at increasing fan-out widths, which is the
 same index answering the same query whichever statement built it.
 
-## Note (2026-09-06, `sp-23z`): errata on the sp-ajz Note's heading
+## Note (2026-09-06, sp-23z): errata on the sp-ajz Note's heading
 
 Correcting a heading, not a decision and not a body. The sp-ajz Note above
 is headed "the shipped index is built concurrently from V04 on", which
