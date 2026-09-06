@@ -4,6 +4,10 @@ defmodule StatifierPersistence.Storage.InMemory do
   three maps - charts keyed by content hash, positions keyed by session id,
   and runs keyed by run id.
 
+  The chart map is keyed by the content hash alone, as every adapter's is:
+  byte-identical charts stored by two tenants are one entry, and tenant
+  scoping is the host's own (`StatifierPersistence.Storage`'s moduledoc).
+
   It ships in `lib/`, not the test-only `support/` directory, for two
   reasons: the conformance template this package ships in `lib/` (this
   package's own `Testing` namespace) needs a reference implementation to

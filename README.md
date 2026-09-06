@@ -603,6 +603,14 @@ storing something that is not what you handed it. The map is write-once:
 it is set at create and a later step or abandonment carries it forward
 untouched.
 
+A run is the only thing this package scopes for you, and only through that
+map. A chart is not: `StatifierPersistence.Storage.save_chart/3` keys a
+chart on its content hash alone, so two tenants storing byte-identical
+charts share one chart row. Tenant-qualify your own per-chart rows in your
+own tables - folding a namespace into the hash would change what a chart's
+identity is, which is statifier-ex's contract and not an option this
+package offers.
+
 ### Recording a run's inputs, so it can be replayed
 
 A durably stepped run stores a chart, a position and a run record, and
