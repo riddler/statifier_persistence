@@ -28,6 +28,35 @@ defmodule StatifierPersistence.Testing.StorageConformance do
   unaffected: the check is a `function_exported?/3` guard, not a
   requirement.
 
+  That `setup` is the only callback this module registers, and it writes
+  nothing: it opens a handle and, when the adapter exports `isolate/1`,
+  isolates it. Every row a generated case needs it inserts inside the case
+  body, so the first write against the adapter is always the running
+  test's own.
+
+  That matters because ExUnit runs `setup` callbacks in the order they are
+  defined, and the ones this template registers are defined where you write
+  `use`. A host whose adapter needs a per-test binding established before
+  any write - a session parameter, a connection-scoped setting, a sandbox
+  checkout - must define that `setup` **above** the `use`:
+
+      defmodule MyApp.EctoAdapterConformanceTest do
+        setup do
+          MyApp.Tenant.bind!(...)
+          :ok
+        end
+
+        use StatifierPersistence.Testing.StorageConformance,
+          adapter: MyApp.EctoAdapter,
+          opts: [repo: MyApp.Repo]
+      end
+
+  A `setup` written below the `use` runs after every callback this template
+  registers. What the template guarantees such a callback is that no row
+  has been written yet - not that nothing has run: the handle in
+  `context.store` is already open, and already isolated, by the time it is
+  called.
+
   The optional run `metadata` map (ADR-0006) is treated differently again:
   its cases are generated for every adapter and assert the answer this
   adapter gives - a round trip when it declares support through
@@ -793,10 +822,6 @@ defmodule StatifierPersistence.Testing.StorageConformance do
 
       if Code.ensure_loaded?(conformance_adapter) and
            function_exported?(conformance_adapter, :append_input, 3) do
-        setup %{store: store} do
-          %{logged_run: input_log_run(store, "run-conformance-input-log")}
-        end
-
         # sabotage: in the adapter under test's append_input/3, assign a
         # fixed ordinal (0) instead of the run's next one -> red on both
         # adapters and on the SQLite mirror of this case, on the second
@@ -805,7 +830,9 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # Nine cases red across the two conformance modules. Verified red,
         # reverted.
         test "adapter: append_input/3 assigns dense ordinals from zero and lists them in order",
-             %{store: store, logged_run: run_id} do
+             %{store: store} do
+          run_id = input_log_run(store, "run-conformance-input-log")
+
           for {door, index} <- Enum.with_index(["create", "step", "done_invocation"]) do
             assert {:ok, ^index} =
                      @conformance_adapter.append_input(store.opts, run_id, %{
@@ -838,10 +865,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # stored entry rather than the given run's -> red on both
         # conformance modules and on the SQLite mirror: one run's log came
         # back carrying the other's entries. Verified red, reverted.
-        test "adapter: two runs' logs never see each other's entries", %{
-          store: store,
-          logged_run: run_id
-        } do
+        test "adapter: two runs' logs never see each other's entries", %{store: store} do
+          run_id = input_log_run(store, "run-conformance-input-log")
           other = input_log_run(store, "run-conformance-input-log-other")
 
           for door <- ["step", "step"] do
@@ -916,9 +941,10 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # was a binary rather than the equal %Statifier.Event{},
         # caller_context and all. Verified red, reverted.
         test "facade: an event round-trips through the log equal to what was delivered", %{
-          store: store,
-          logged_run: run_id
+          store: store
         } do
+          run_id = input_log_run(store, "run-conformance-input-log")
+
           event = %Statifier.Event{
             name: "done.invoke.call",
             type: :internal,
@@ -941,7 +967,9 @@ defmodule StatifierPersistence.Testing.StorageConformance do
 
         # Inserts a run for the log to hang off, since list_inputs/2 is
         # required to distinguish an empty log from a run that is not
-        # there.
+        # there. Called from inside each case that needs it rather than
+        # from a `setup`, so nothing this template registers writes before
+        # a host's own callbacks have run (see the moduledoc).
         defp input_log_run(store, run_id) do
           {_source, machine} = Charts.chart_a()
 
