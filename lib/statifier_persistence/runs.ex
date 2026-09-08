@@ -122,6 +122,12 @@ defmodule StatifierPersistence.Runs do
   # semantics, kept verbatim). `nil` where no span was opened.
   @typep span :: {integer(), reference()} | nil
 
+  # The `step_reporter:` option's fun, threaded to the persist tail and
+  # called there with the step's whole effect list. `nil` - the ordinary
+  # case, every caller but a `Driver` carrying an `after_step:` - reports
+  # nothing.
+  @typep step_reporter :: ([Statifier.Effect.t()] -> any()) | nil
+
   # The persist tail's executor seam, carried as one term so the
   # effect-execution functions take a `context` and its telemetry
   # companion together rather than four positional arguments.
@@ -215,6 +221,20 @@ defmodule StatifierPersistence.Runs do
     `[:statifier_persistence, :run, :step, :stop]` (the ADR-0009 sp-8wv
     amendment). `child_count` is `nil` for a single-child subchart. They
     change nothing else about the step.
+  - `step_reporter:` - this package's own, never a host's, and the seam
+    ADR-0008's `after_step:` amendment (2026-09-08) needed: a 1-arity fun
+    this call hands the step's WHOLE effect list to - the list this
+    module's persist tail is handed, before it splits the lifecycle
+    effects off - once the persist has landed and before the entry point
+    returns. Set by `StatifierPersistence.Driver` when, and only when,
+    its own `after_step:` is set, and set to a fun that *records* the
+    list rather than acting on it: the driver fires the host's callback
+    itself, after this function has returned and outside the run's own
+    exclusion (the amendment's clause 3). It is a reporter and not the
+    callback because the amendment rules out widening this module's
+    public returns to carry the list, and because nothing a host wrote
+    should run inside a serialized section this package opened. Its
+    return value is discarded and it changes nothing about the step.
   """
   @type opt ::
           {:executor, Executor.t()}
@@ -227,6 +247,7 @@ defmodule StatifierPersistence.Runs do
           | {:entry, entry()}
           | {:invoke_id, String.t()}
           | {:child_count, pos_integer()}
+          | {:step_reporter, ([Statifier.Effect.t()] -> any())}
 
   @typedoc """
   The fixed vocabulary of public doors `entry` names on this package's own
@@ -311,8 +332,18 @@ defmodule StatifierPersistence.Runs do
 
       report_initialized(machine, machine_state, effects, span_start)
 
+      reporter = Keyword.get(opts, :step_reporter)
+
       serialized(store, run_id, :create, opts, fn ->
-        persist_tail(store, run_id, machine_state, effects, executor, {:insert, metadata})
+        persist_tail(
+          store,
+          run_id,
+          machine_state,
+          effects,
+          executor,
+          {:insert, metadata},
+          reporter
+        )
       end)
     end
   end
@@ -879,8 +910,11 @@ defmodule StatifierPersistence.Runs do
     # the step. Nothing has been executed or written yet, so a decline is
     # a discard in the full sense - the position is untouched.
     case resolve_event(event, machine_state) do
-      {:ok, event} -> stepped(store, run_id, machine_state, event, executor, entry)
-      :discard -> discarded(run_record, run_id, entry, :builder_declined)
+      {:ok, event} ->
+        stepped(store, run_id, machine_state, event, executor, entry, opts[:step_reporter])
+
+      :discard ->
+        discarded(run_record, run_id, entry, :builder_declined)
     end
   end
 
@@ -891,9 +925,17 @@ defmodule StatifierPersistence.Runs do
   defp resolve_event(builder, machine_state) when is_function(builder, 1),
     do: builder.(machine_state)
 
-  @spec stepped(Storage.t(), run_id(), MachineState.t(), Event.t(), Executor.t(), entry()) ::
+  @spec stepped(
+          Storage.t(),
+          run_id(),
+          MachineState.t(),
+          Event.t(),
+          Executor.t(),
+          entry(),
+          step_reporter()
+        ) ::
           {:ok, Run.t(), MachineState.t()} | {:discarded, Run.t()} | {:error, error()}
-  defp stepped(store, run_id, machine_state, event, executor, entry) do
+  defp stepped(store, run_id, machine_state, event, executor, entry, reporter) do
     session_id = session_id(machine_state)
     span = open_macrostep(machine_state, session_id, :event, event)
 
@@ -902,7 +944,7 @@ defmodule StatifierPersistence.Runs do
         close_macrostep(span, session_id, :event, stepped_state, event, effects)
 
         with :ok <- append_input(store, run_id, entry, event) do
-          persist_tail(store, run_id, stepped_state, effects, executor, :update)
+          persist_tail(store, run_id, stepped_state, effects, executor, :update, reporter)
         end
 
       {:error, :not_running} ->
@@ -997,9 +1039,10 @@ defmodule StatifierPersistence.Runs do
           MachineState.t(),
           [Statifier.Effect.t()],
           Executor.t(),
-          {:insert, Adapter.metadata()} | :update
+          {:insert, Adapter.metadata()} | :update,
+          step_reporter()
         ) :: {:ok, Run.t(), MachineState.t()} | {:error, error()}
-  defp persist_tail(store, run_id, machine_state, effects, executor, write) do
+  defp persist_tail(store, run_id, machine_state, effects, executor, write, reporter) do
     case Machine.identity(machine_state.machine) do
       nil ->
         Telemetry.identity_refused(
@@ -1028,10 +1071,35 @@ defmodule StatifierPersistence.Runs do
         with :ok <- write_run(write, store, run_id, machine_state, status, lifecycle) do
           report_write(write, run_id, seam.session_id, identity, status, lifecycle)
           report_halt(machine_state, seam.session_id, status, lifecycle)
-          tail_result(run_id, status, identity, lifecycle, machine_state)
+
+          run_id
+          |> tail_result(status, identity, lifecycle, machine_state)
+          |> report_step(reporter, effects)
         end
     end
   end
+
+  # ADR-0008's `after_step:` amendment, clause 1's list and clause 3's
+  # order, on this side of the seam: the whole effect list, reported once
+  # the write has landed and only for a step that actually produced a
+  # result the caller will see. A `{:error, {:budget_exhausted, _}}` tail
+  # result reports nothing - the run is persisted but the entry point
+  # returns an error, and the driver has no step result to hand a host.
+  # The reporter records; it never acts (the `step_reporter:` typedoc).
+  @spec report_step(
+          {:ok, Run.t(), MachineState.t()} | {:error, error()},
+          step_reporter(),
+          [Statifier.Effect.t()]
+        ) :: {:ok, Run.t(), MachineState.t()} | {:error, error()}
+  defp report_step(result, nil, _effects), do: result
+
+  defp report_step({:ok, _run, _machine_state} = result, reporter, effects) do
+    reporter.(effects)
+
+    result
+  end
+
+  defp report_step(result, _reporter, _effects), do: result
 
   # The lifecycle events the persist tail owns, emitted only once the write
   # has actually landed: a create reports `[..., :run, :created]`, and any
