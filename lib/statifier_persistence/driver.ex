@@ -295,6 +295,22 @@ defmodule StatifierPersistence.Driver do
            unstarted_indices :: [non_neg_integer()] ->
              :ok | {:error, term()})
 
+  @typedoc """
+  ADR-0008's `after_step:` callback (the 2026-09-08 amendment): the id of
+  the run that was stepped, the `t:Statifier.MachineState.t/0` that step's
+  result carries, and the whole effect list that step produced - lifecycle
+  effects included, not the executable subset `effects:` sees.
+
+  It is an observer: its return value is discarded, and a raise inside it
+  propagates to the caller rather than being swallowed (the amendment's
+  clause 4).
+  """
+  @type after_step ::
+          (run_id :: Runs.run_id(),
+           machine_state :: MachineState.t(),
+           effects :: [Statifier.Effect.t()] ->
+             any())
+
   @enforce_keys [:store, :machine, :dispatch]
   defstruct [
     :store,
@@ -305,6 +321,7 @@ defmodule StatifierPersistence.Driver do
     :serialization,
     :chart_resolver,
     :child_canceller,
+    :after_step,
     max_turns: 1_000
   ]
 
@@ -317,6 +334,7 @@ defmodule StatifierPersistence.Driver do
           serialization: {module(), term()} | nil,
           chart_resolver: chart_resolver() | nil,
           child_canceller: child_canceller() | nil,
+          after_step: after_step() | nil,
           max_turns: pos_integer()
         }
 
@@ -369,6 +387,21 @@ defmodule StatifierPersistence.Driver do
     settlement reaches the scheduler holding the start jobs of a fan-out's
     not-yet-started children. Defaults to `nil`, "this driver cancels no
     start jobs".
+  - `after_step:` - `t:after_step/0`, called
+    `after_step.(run_id, machine_state, effects)` after every step this
+    driver takes on a caller's behalf, so a host keeping its own record of
+    what a run did can append the steps it never made itself: a durable
+    subchart child's own steps, and the *parent's* step on the answer path
+    (ADR-0008 decision 3 and the `driver:` option on
+    `StatifierPersistence.Runs.fail/4`), neither of which the drive's
+    return value reports. The run id is always the run that was stepped -
+    the parent's, on the answer path. It fires after that step's persist,
+    in the order the steps happened, and outside the exclusion of the run
+    it reports; a step that was discarded, and a `cascade_cancel`, step
+    nothing and fire nothing. Its return is ignored and a raise inside it
+    propagates (the 2026-09-08 amendment's clauses 3 to 5, which also say
+    why this is not ADR-0009's telemetry). Defaults to `nil`, "this driver
+    reports no steps".
   - `max_turns:` - the answer-fed steps one drive will take before
     refusing to take another. Defaults to 1000.
 
@@ -386,6 +419,7 @@ defmodule StatifierPersistence.Driver do
       serialization: Keyword.get(opts, :serialization),
       chart_resolver: Keyword.get(opts, :chart_resolver),
       child_canceller: Keyword.get(opts, :child_canceller),
+      after_step: Keyword.get(opts, :after_step),
       max_turns: Keyword.get(opts, :max_turns, 1_000)
     }
   end
@@ -403,7 +437,12 @@ defmodule StatifierPersistence.Driver do
   def create(%__MODULE__{} = driver, run_id, opts \\ []) do
     ref = make_ref()
     opts = driver |> create_opts(opts) |> Keyword.put_new(:entry, :create)
-    result = Runs.create(driver.store, run_id, driver.machine, run_opts(driver, opts, ref))
+
+    result =
+      driver.store
+      |> Runs.create(run_id, driver.machine, run_opts(driver, opts, ref))
+      |> fire_after_step(driver, run_id, opts, ref)
+
     result = advance(driver, run_id, opts, result, drain(ref, []), 0)
 
     maybe_answer_parent(driver, run_id, result)
@@ -1325,7 +1364,71 @@ defmodule StatifierPersistence.Driver do
   @spec step(t(), Runs.run_id(), keyword(), Event.t() | Runs.event_builder(), reference()) ::
           result()
   defp step(driver, run_id, opts, event, ref) do
-    Runs.step(driver.store, run_id, driver.machine, event, run_opts(driver, opts, ref))
+    driver.store
+    |> Runs.step(run_id, driver.machine, event, run_opts(driver, opts, ref))
+    |> fire_after_step(driver, run_id, opts, ref)
+  end
+
+  # ADR-0008's `after_step:` amendment (2026-09-08), clauses 2 to 4, on
+  # this side of the seam. Every `Runs` entry point this module calls
+  # passes through here or through `create/3`, and both are reached with
+  # the id of the run that was actually stepped - the parent's, on the
+  # answer path, because `answer_parent/3` reaches `reenter/5` on a driver
+  # over the parent's chart and with the parent's run id.
+  #
+  # The effects come back through the mailbox rather than through the
+  # entry point's return value, which the amendment's clause 1 rules out
+  # widening: `run_opts/3` hands `StatifierPersistence.Runs` a
+  # `step_reporter:` that sends the step's whole effect list here, tagged
+  # with this drive's own reference, exactly as `buffer/4` sends a
+  # dispatched invocation's answer. That is what makes the callback fire
+  # from here, after the entry point has returned and outside the stepped
+  # run's exclusion, rather than from inside the persist tail.
+  #
+  # A drive that took no step - a discard, an error, a create the adapter
+  # refused - has no message to read and fires nothing. `nil` reads no
+  # mailbox at all and adds no message to it: `run_opts/3` writes no
+  # `step_reporter:` in that case, so a driver without an `after_step:`
+  # takes exactly the steps and makes exactly the calls it took before
+  # this option existed.
+  @spec fire_after_step(result(), t(), Runs.run_id(), keyword(), reference()) :: result()
+  defp fire_after_step(result, driver, run_id, opts, ref) do
+    case after_step(driver, opts) do
+      nil ->
+        result
+
+      after_step ->
+        report(result, after_step, run_id, drain_steps(ref, []))
+
+        result
+    end
+  end
+
+  @spec report(result(), after_step(), Runs.run_id(), [[Statifier.Effect.t()]]) :: :ok
+  defp report({:ok, _run, machine_state}, after_step, run_id, reported) do
+    Enum.each(reported, fn effects -> after_step.(run_id, machine_state, effects) end)
+  end
+
+  defp report(_result, _after_step, _run_id, _reported), do: :ok
+
+  # The driver's own default, outranked by a per-call `after_step:` in a
+  # `create/3`, `send_event/4` or invocation-door `opts` list - the same
+  # "the caller's opts win" shape `invoke_types:` and `serialization:`
+  # already have, and the widening the amendment's closing section leaves
+  # open to this bead.
+  @spec after_step(t(), keyword()) :: after_step() | nil
+  defp after_step(driver, opts), do: Keyword.get(opts, :after_step, driver.after_step)
+
+  # The `step_reporter:` messages this drive's own `Runs` call left in the
+  # mailbox: one per step that persisted, in the order they were sent.
+  # Shaped so it can never match `drain/2`'s answers, or another drive's.
+  @spec drain_steps(reference(), [[Statifier.Effect.t()]]) :: [[Statifier.Effect.t()]]
+  defp drain_steps(ref, acc) do
+    receive do
+      {^ref, :after_step, effects} -> drain_steps(ref, [effects | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
   end
 
   # `executor:` is this module's to set, never the caller's - it is the
@@ -1336,15 +1439,36 @@ defmodule StatifierPersistence.Driver do
   # with `nil`.
   @spec run_opts(t(), keyword(), reference()) :: keyword()
   defp run_opts(driver, opts, ref) do
+    after_step = after_step(driver, opts)
+
     opts =
       opts
+      |> Keyword.delete(:after_step)
       |> Keyword.put(:executor, executor(driver, ref))
       |> Keyword.put_new(:invoke_types, driver.invoke_types)
+      |> step_reporter_opt(after_step, ref)
 
     case driver.serialization do
       nil -> opts
       serialization -> Keyword.put_new(opts, :serialization, serialization)
     end
+  end
+
+  # `after_step:` is this module's option, not
+  # `StatifierPersistence.Runs`', so it is deleted above rather than
+  # passed on, and what the entry point is handed instead is the reporter
+  # that carries the step's whole effect list back here. Written only when
+  # a callback is actually set: without one the entry point is called with
+  # exactly the options it was called with before this existed.
+  @spec step_reporter_opt(keyword(), after_step() | nil, reference()) :: keyword()
+  defp step_reporter_opt(run_opts, nil, _ref), do: run_opts
+
+  defp step_reporter_opt(run_opts, _after_step, ref) do
+    reader = self()
+
+    Keyword.put(run_opts, :step_reporter, fn effects ->
+      send(reader, {ref, :after_step, effects})
+    end)
   end
 
   # The executor `StatifierPersistence.Runs` calls, once per effect, in the

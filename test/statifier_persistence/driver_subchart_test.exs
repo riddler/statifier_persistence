@@ -451,6 +451,47 @@ defmodule StatifierPersistence.DriverSubchartTest do
       assert parent_reloaded.active_invocations == %{}
     end
 
+    # ADR-0008's `after_step:` amendment (2026-09-08), clause 2's hardest
+    # case and the one the seam exists for: the child's fail steps
+    # nothing, and what the callback reports is the PARENT's step, under
+    # the PARENT's run id - the run the host never named and never drove.
+    # The ordinary-drive cases are in `DriverTest`.
+    #
+    # sabotage: dropped the `fire_after_step/5` call from `Driver`'s
+    # private `step/5`, leaving `create/3`'s - the parent's answer, which
+    # reaches `Runs.step/5` through `reenter/5` and nothing else, reported
+    # nothing at all and this went red, together with `DriverTest`'s count
+    # case. Verified red, reverted.
+    test "with after_step:, the parent's step is reported under the parent's id", %{store: store} do
+      test_pid = self()
+      {:ok, parent_machine} = Statifier.compile(@parent_source)
+      resolver = parent_resolver(parent_machine)
+
+      driver =
+        driver(store, @parent_source, subchart_dispatch(@child_source),
+          chart_resolver: resolver,
+          after_step: fn run_id, machine_state, effects ->
+            send(test_pid, {:after_step, run_id, machine_state, effects})
+          end
+        )
+
+      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+
+      # The create's own reports - the parent's step, and the child's,
+      # which clause 3 says fires while the parent's exclusion is held.
+      assert [_ | _] = drain_after_steps()
+
+      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+
+      assert {:ok, child_run} = Runs.fail(store, child_run_id, "boom", driver: driver)
+      assert child_run.status == :failed
+
+      assert [{"run_1", parent_state, effects}] = drain_after_steps()
+      assert leaves(parent_state) == ["refused"]
+      assert parent_state.datamodel["_event"]["data"]["reason"] == "boom"
+      assert is_list(effects)
+    end
+
     # sabotage: dropped the `chart_resolver: nil` clause of
     # `Driver.answer_resolved/4`, so a driver without a resolver fell to
     # the resolving clause - red, this case alone, with
@@ -760,6 +801,15 @@ defmodule StatifierPersistence.DriverSubchartTest do
     fn
       ^parent_hash -> {:ok, parent_machine}
       _other_hash -> :error
+    end
+  end
+
+  defp drain_after_steps(acc \\ []) do
+    receive do
+      {:after_step, run_id, machine_state, effects} ->
+        drain_after_steps([{run_id, machine_state, effects} | acc])
+    after
+      0 -> Enum.reverse(acc)
     end
   end
 

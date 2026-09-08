@@ -81,6 +81,23 @@ defmodule StatifierPersistence.DriverTest do
   </scxml>
   """
 
+  # Two calls in sequence, each answered where it is dispatched, ending in
+  # a final state: one create and two answer-fed steps, the last of which
+  # produces the `{:done, _}` lifecycle effect no executor ever sees.
+  @three_step_source """
+  <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="first">
+      <state id="first">
+          <invoke id="one" type="myapp:authorize"/>
+          <transition event="done.invoke.one" target="second"/>
+      </state>
+      <state id="second">
+          <invoke id="two" type="myapp:capture"/>
+          <transition event="done.invoke.two" target="settled"/>
+      </state>
+      <final id="settled"/>
+  </scxml>
+  """
+
   setup do
     {:ok, store} = Storage.new(InMemory, [])
     %{store: store}
@@ -361,6 +378,166 @@ defmodule StatifierPersistence.DriverTest do
       assert context.invoke_id == context.invoke.invoke_id
       assert context.run_id == "run_1"
       assert is_binary(context.content_hash)
+    end
+  end
+
+  # ADR-0008's `after_step:` amendment (2026-09-08), the ordinary drive's
+  # half. The parent-answer half - clause 2's sentence about the run id
+  # being the run that was *stepped* - is in `DriverSubchartTest`, where
+  # the linked-child fixtures are.
+  describe "after_step:" do
+    # Sabotage: deleted the `|> fire_after_step(...)` from `create/3`,
+    # leaving the one in the private `step/5` - two reports instead of
+    # three and this went red on the count (and the cases below it with
+    # it, each on its own first report). Verified red, reverted.
+    test "fires once per step of a drive, with the driven run's id", %{store: store} do
+      test_pid = self()
+
+      driver =
+        driver(store, @three_step_source,
+          dispatch: fn _type, _params, _context -> {:ok, %{}} end,
+          after_step: reporter(test_pid)
+        )
+
+      assert {:ok, run, _machine_state} = Driver.create(driver, "run_1")
+      assert run.status == :completed
+
+      reported = reported()
+
+      assert length(reported) == 3
+
+      assert Enum.map(reported, fn {run_id, _ms, _effects} -> run_id end) ==
+               List.duplicate("run_1", 3)
+    end
+
+    # Sabotage: had `Runs.persist_tail/7` report `executable` rather than
+    # the list it was handed - the `{:done, _}` assertion went red while
+    # the count above stayed green, which is the whole distinction clause
+    # 1 draws. Verified red, reverted.
+    test "hands over the whole effect list, lifecycle effects included", %{store: store} do
+      test_pid = self()
+
+      driver =
+        driver(store, @three_step_source,
+          dispatch: fn _type, _params, _context -> {:ok, %{}} end,
+          effects: executor_recording_to(test_pid),
+          after_step: reporter(test_pid)
+        )
+
+      assert {:ok, _run, _machine_state} = Driver.create(driver, "run_1")
+
+      {_run_id, _machine_state, effects} = List.last(reported())
+
+      assert Enum.any?(effects, &match?({:done, _payload}, &1))
+      refute Enum.any?(executed(), &match?({:done, _payload}, &1))
+    end
+
+    # Sabotage: wrapped the `after_step.(...)` call in `Driver.report/4`
+    # in a `try/rescue` returning `:ok` - the drive answered `{:ok, ...}`
+    # and this went red. Verified red, reverted.
+    test "a raise inside the callback propagates to the caller", %{store: store} do
+      driver =
+        driver(store, @three_step_source,
+          dispatch: fn _type, _params, _context -> {:ok, %{}} end,
+          after_step: fn _run_id, _machine_state, _effects -> raise "boom" end
+        )
+
+      assert_raise RuntimeError, "boom", fn -> Driver.create(driver, "run_1") end
+    end
+
+    # Sabotage: had `Runs.step_tail/7`'s terminal-run arm report `[]`
+    # through the `step_reporter:` before discarding, AND relaxed
+    # `Driver.report/4`'s `{:ok, _, _}` head to a catch-all - the discard
+    # fired the host's callback and this went red. Both halves were
+    # needed, which is the point: nothing persisted means nothing to
+    # report, and the driver checks the entry point's own result again on
+    # its side of the seam. Verified red, reverted.
+    test "a discarded delivery fires nothing", %{store: store} do
+      test_pid = self()
+      quiet = driver(store, @one_call_source, dispatch: fn _t, _p, _c -> {:ok, %{}} end)
+
+      assert {:ok, _run, _machine_state} = Driver.create(quiet, "run_1")
+      {:ok, _run} = StatifierPersistence.Runs.fail(store, "run_1", "host:stopped")
+
+      reporting = %{quiet | after_step: reporter(test_pid)}
+
+      assert {:discarded, run} = Driver.send_event(reporting, "run_1", Event.external("go"))
+      assert run.status == :failed
+      assert reported() == []
+    end
+
+    # Sabotage: made `run_opts/3` write the `step_reporter:` option
+    # unconditionally - a driver that reports nothing still filled this
+    # process's mailbox with the reporter's messages and the bare
+    # `refute_received` went red. Verified red, reverted.
+    test "nil takes the same steps and stores the same position", %{store: store} do
+      test_pid = self()
+      dispatch = fn _type, _params, _context -> {:ok, %{}} end
+
+      quiet = driver(store, @three_step_source, dispatch: dispatch)
+      loud = %{quiet | after_step: reporter(test_pid)}
+
+      assert {:ok, quiet_run, quiet_state} =
+               Driver.create(quiet, "run_quiet", initialize: [session_id: "sess"])
+
+      # Not just "no report": a driver with no callback puts nothing in
+      # the mailbox at all, because it asks for no `step_reporter:`.
+      refute_received _anything
+
+      assert {:ok, loud_run, loud_state} =
+               Driver.create(loud, "run_loud", initialize: [session_id: "sess"])
+
+      assert length(reported()) == 3
+      assert quiet_run.status == loud_run.status
+      assert quiet_run.donedata == loud_run.donedata
+      assert quiet_state == loud_state
+    end
+
+    # The widening the amendment's closing section left open to this bead:
+    # the driver's own default, outranked by a per-call `after_step:`.
+    #
+    # Sabotage: had `run_opts/3` read `driver.after_step` rather than the
+    # effective callback when deciding whether to write a
+    # `step_reporter:` - a per-call callback on a driver whose own is
+    # `nil` reported nothing and this went red. Verified red, reverted.
+    test "a per-call after_step: outranks the driver's own", %{store: store} do
+      test_pid = self()
+      driver = driver(store, @three_step_source, dispatch: fn _t, _p, _c -> {:ok, %{}} end)
+
+      assert {:ok, _run, _machine_state} =
+               Driver.create(driver, "run_1", after_step: reporter(test_pid))
+
+      assert length(reported()) == 3
+    end
+  end
+
+  defp reporter(test_pid) do
+    fn run_id, machine_state, effects ->
+      send(test_pid, {:after_step, run_id, machine_state, effects})
+    end
+  end
+
+  defp executor_recording_to(test_pid) do
+    fn effect, _context ->
+      send(test_pid, {:executed, effect})
+      :ok
+    end
+  end
+
+  defp reported(acc \\ []) do
+    receive do
+      {:after_step, run_id, machine_state, effects} ->
+        reported([{run_id, machine_state, effects} | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  defp executed(acc \\ []) do
+    receive do
+      {:executed, effect} -> executed([effect | acc])
+    after
+      0 -> Enum.reverse(acc)
     end
   end
 
