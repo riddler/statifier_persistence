@@ -752,3 +752,192 @@ no `lib/` change and waited for one, and this one ships with its own. The
 conformance pair land in the same pull request as this section, so there is
 no window in which the note describes something that is not on `main` - and
 that is what lets the acceptance be recorded here rather than separately.
+
+## Amendment (2026-09-08, sp-sli): `Driver.new/3` takes an `after_step:` callback, fired after every step the driver drives on a caller's behalf
+
+**Status: proposed (2026-09-08, drafted for `sp-sli` under the operator's
+campaign-SF039 ruling `RQ-SF039-13`).** Additive; decisions 1 to 7 stand
+exactly as accepted, and every amendment and note above is unchanged - the
+sp-y7n note directly above this one names the path this section is mostly
+about. `sp-c48` implements it and `sp-nhl` flips this status line once that
+has landed, in the same posture the sp-n8g amendment above records for
+itself: this section carries no `lib/` change and no test, and waits for
+one. Every code cite below names its anchor and was read at `4e3e2c8`.
+
+**The seam this opens, and who asked for it.** The first production
+embedder keeps an append-only record of run events, which it folds to
+reproduce a position without reading the run's checkpoint. Every delivery
+it makes itself it can append, because it is the caller. The trouble is the
+deliveries it does not make: decision 3's answer steps the *parent* from
+inside the child's drive, with no host call in the loop, and the sp-y7n
+note's `driver:` option steps the parent from inside a `Runs.fail/4` call
+that is about a different run entirely. Those steps happen, they persist,
+and the host has nothing to append for them - so its fold and the stored
+checkpoint disagree for exactly those deliveries, which are the ones a
+subchart's lifecycle is made of.
+
+Two ways out were available. The host could stop using the package's answer
+path and re-implement it - read the linkage, resolve the parent, deliver
+the answer itself - which is the shape the sp-n8g amendment above records
+campaign 031's fan-out proof taking, translating its condition through the
+public `StatifierPersistence.Driver.answer_parent/3`, and which the sp-y7n
+note above names as the explicit host door beside the automatic one. The
+embedder has instead ruled to keep the package route and asked for the
+seam, and this amendment is that seam: a callback the driver fires after
+each step it takes on a caller's behalf, so a host can append what the
+package stepped.
+
+Nothing in this package answers that today. `dispatch` and the `effects:`
+executor (`Driver.new/3`'s options, read at `4e3e2c8`) are per-*effect*
+doors called from inside a step, not after one; the drive's own return
+value reports one step, the last (the `t:StatifierPersistence.Driver.result/0`
+typedoc, read at `4e3e2c8`), and reports nothing at all about a parent
+stepped on the answer path, whose result `maybe_answer_parent/3` discards.
+ADR-0009's telemetry sees every step and is deliberately the wrong tool -
+decision 5 below says why.
+
+**1. `Driver.new/3` takes `after_step:`, a 3-arity function, stored on the
+struct, `nil` by default.** It is called
+`after_step.(run_id, machine_state, effects)`: the id of the run that was
+stepped, the `t:Statifier.MachineState.t/0` that step's result carries, and
+the effects that step produced. It joins the driver's existing optional
+options on the struct (`defstruct` at `driver.ex`'s `@enforce_keys
+[:store, :machine, :dispatch]`, read at `4e3e2c8`, where `effects`,
+`invoke_types`, `serialization`, `chart_resolver` and `child_canceller` all
+already sit as `nil`-defaulting fields beside `max_turns: 1_000`) and is
+read in `new/3` with the same `Keyword.get/2` shape as its neighbours
+(`def new(%Storage{} = store, %Machine{} = machine, opts)`, read at
+`4e3e2c8`). `nil` means "this driver reports no steps", which is what every
+driver built before this option existed keeps meaning.
+
+Which effects, precisely: the whole effect list of that step - the list
+`Runs`' persist tail is handed and reports, before it splits the lifecycle
+effects off from the executable ones (`defp persist_tail(store, run_id,
+machine_state, effects, executor, write)` in `runs.ex`, whose first act on
+that list is `Enum.split_with(effects, &lifecycle_effect?/1)`, read at
+`4e3e2c8`). Not the executable subset that reaches the driver's own
+executor (`defp executor(driver, ref)` in `driver.ex`, read at `4e3e2c8`),
+which by construction never sees a lifecycle effect: a host folding events
+back into a position needs what the step produced, not what happened to be
+executable. This record does not choose the seam that carries that list out
+of a `Runs` entry point and into the driver - that is `sp-c48`'s, and it is
+the one part of this amendment with real implementation cost. What the
+record does rule out is widening the return of a public `StatifierPersistence.Runs`
+function to carry it, which would move every caller of a documented door
+for the benefit of one optional callback. If no seam is reachable under
+that constraint, the answer is a question back to this section, not a
+quietly narrowed third argument.
+
+**2. It fires after every `Runs` entry point this driver calls on a
+caller's behalf.** There are two such entry points, and both are named
+here rather than left to "every step" to read: `Runs.create/4`, called once
+by `create/3`, and `Runs.step/5`, called by the private `step/5`
+(`defp step(driver, run_id, opts, event, ref)`, read at `4e3e2c8`) - which
+is where `create/3`'s and `send_event/4`'s answer loop (`advance/6`) and
+both late-answer doors (`done_invocation/5` and `failed_invocation/5`,
+through `defp reenter(driver, run_id, opts, invoke_id, answer)`, read at
+`4e3e2c8`) all arrive. A drive that takes three turns fires the callback
+three times. `Runs.cascade_cancel/3`, the third `Runs` function this module
+calls (from `maybe_cancel/4` and from `perform/5`'s `:cancel_invoke` arm,
+read at `4e3e2c8`), steps nothing and fires nothing.
+
+The parent's step on the answer path is covered by that sentence and not by
+an exception to it, because the answer path arrives at the same private
+`step/5` through the same doors: `answer_parent/3` routes a single-child
+answer through `respond_to_parent/3`, which calls `done_invocation/5` or
+`failed_invocation/5` on a driver over the *parent's* chart. So the
+callback fires with **the run id of the run that was stepped** - the
+parent's, there - which is the only spelling under which a host can append
+the row to the right run's log. `Runs.fail/4`'s `driver:` path reaches the
+same place: `defp answer_parent_of_failed({:ok, %Run{status: :failed}} =
+result, run_id, reason, opts)` in `runs.ex` (read at `4e3e2c8`) calls
+`Driver.resolve_and_answer_parent/3`, which resolves the parent's chart and
+answers through `answer_parent/3`.
+
+Nothing has to be plumbed for the nested cases, and that is a property of
+how this module already builds its inner drivers rather than a new promise.
+A child is driven by `%{driver | machine: child_machine}` (`defp
+create_child(driver, resolved, context, child_machine, content_hash,
+fan_out)`, read at `4e3e2c8`) and a parent is answered by
+`%{driver | machine: parent_machine}` (`defp resolve_and_answer(driver,
+%Linkage{} = linkage, run_id, payload)`, read at `4e3e2c8`); in both, every
+field but `machine` travels. An `after_step:` therefore reaches a child's
+own steps, a grandchild's, and a grandparent's answer, with the stepped
+run's id each time - which is exactly the set of steps the host cannot
+otherwise see.
+
+**3. It fires after that step's persist, in the order the steps happened,
+and outside the exclusion of the run it reports.** After the persist,
+because a host appending a row for a step that then failed to write would
+be recording a position that does not exist; the callback is reached from
+the driver, once the `Runs` entry point has returned, not from inside
+`persist_tail/6`. In order, because the driver's own loop is sequential -
+`advance/6` recurses one answer at a time - so "the order the steps
+happened" needs nothing to enforce it. And outside the stepped run's own
+exclusion, because `serialized/5` closes before that entry point returns
+(`def fail(%Storage{} = store, run_id, reason, opts \\ [])`, read at
+`4e3e2c8`, is the clearest instance of the shape: it answers the parent
+after its own serialized section, deliberately, for the reason the sp-y7n
+note above gives).
+
+What that guarantee is scoped to is the run being reported, and the scope
+is worth stating because one path makes the difference visible. Decision
+3's single child is created from *inside* the parent's step, through the
+executor, inside the parent's serialization section. The child's create is
+a full drive, so the callback fires for the child's own steps - correctly,
+with the child's run id - while the parent's exclusion is still held. This
+section does not change that ordering, and a host must not read clause 3 as
+a promise that no run lock is held anywhere when its callback runs. What it
+promises is narrower and is the part a host can act on: the callback for a
+given run never runs inside that run's own exclusion, so a callback that
+reads or writes the run it was handed cannot deadlock against the step that
+produced it.
+
+**4. Its return value is ignored, and a raise inside it propagates to the
+caller.** Ignored, because clause 5 makes the callback an observer and a
+returned value would be the first step toward it not being one. Propagating,
+because the callback exists to keep a host's own record in step with this
+package's, and a host whose append failed has exactly the divergence the
+callback was added to prevent - swallowing that would hide it at the one
+moment it is cheap to see. A host that must not fail the drive for it wraps
+its own body in whatever it wants the failure to mean; a host that must not
+*continue* the drive gets that for free. The cost is stated plainly: an
+`after_step:` that raises can leave a drive part-taken, with the steps
+before it persisted, and the recovery is the same at-least-once re-drive
+every other window in this record has.
+
+**5. What it is not.** It is not a telemetry event, and ADR-0009 stays the
+observability seam untouched: telemetry there is a point-in-time report to
+detachable handlers, whose failure is nobody's business but the handler's,
+and this is a decision-carrying, ordered, synchronous callback whose failure
+is the caller's (clause 4). Recording the same steps twice on two seams with
+opposite failure semantics is deliberate, not redundant. And it is not a way
+to alter the step: the machine state and the effects are handed over for
+reading, the return is discarded, and a driver with an `after_step:` and one
+without take the same steps and persist the same positions.
+
+**Worked example.** A durable subchart's child run whose host decides,
+outside the chart, that it has failed. The host calls
+`StatifierPersistence.Runs.fail/4` on the child with `driver:` set (the
+sp-y7n note's option), on a driver carrying both a `chart_resolver:` and an
+`after_step:`. The child's status write commits inside its own serialized
+section. The answer then opens outside it, resolves the parent's chart, and
+delivers `{:failed, reason: reason}` to the parent's `<invoke>` - which
+steps the parent, possibly several times as its own answer loop runs. The
+host's record gains one row per parent step, each carrying the parent's run
+id, and its fold now reproduces the parent's checkpoint. Before this
+option, that call appended nothing at all: the only run the host named was
+the child, and the child was never stepped.
+
+**What this section does not decide.** Whether the callback should also see
+a run whose step was *discarded* (`{:discarded, run}`, where no step
+happened and nothing persisted) - clause 2's "every `Runs` entry point"
+means every call that stepped, and a discarded delivery is not one. Whether
+a host can ask for the callback per call, as `create/3` and `send_event/4`
+already allow for `invoke_types:` and `serialization:`; the option is
+declared on the driver here and `sp-c48` may add the per-call override if
+the same `Keyword.put_new/3` shape carries it, which is a widening of this
+clause rather than a departure from it. And nothing about ADR-0010's input
+log, which records what was *delivered to* a run rather than what the
+package stepped; the two answer different questions and neither is built
+out of the other.
