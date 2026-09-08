@@ -755,8 +755,10 @@ that is what lets the acceptance be recorded here rather than separately.
 
 ## Amendment (2026-09-08, sp-sli): `Driver.new/3` takes an `after_step:` callback, fired after every step the driver drives on a caller's behalf
 
-**Status: proposed (2026-09-08, drafted for `sp-sli` under the operator's
-campaign-SF039 ruling `RQ-SF039-13`).** Additive; decisions 1 to 7 stand
+**Status: accepted (2026-09-08, `sp-nhl`; drafted the same day as `sp-sli`
+under the operator's campaign-SF039 ruling `RQ-SF039-13`, flipped once
+`sp-c48` landed - the Note at the foot of this file names the merge and
+what was re-read against it).** Additive; decisions 1 to 7 stand
 exactly as accepted, and every amendment and note above is unchanged - the
 sp-y7n note directly above this one names the path this section is mostly
 about. `sp-c48` implements it and `sp-nhl` flips this status line once that
@@ -941,3 +943,76 @@ clause rather than a departure from it. And nothing about ADR-0010's input
 log, which records what was *delivered to* a run rather than what the
 package stepped; the two answer different questions and neither is built
 out of the other.
+
+## Note (2026-09-08, sp-nhl): the `after_step:` amendment above is accepted - what landed, and the five things checked before the flip
+
+`sp-c48` has landed - `e3209bd` on `main`, PR 91 - and the amendment above
+is accepted as of that merge. Every clause of it, its worked example and
+its closing "what this section does not decide" were re-read against `main`
+at `3fd45f7` (`e3209bd` plus the 0.11.0 prep, which touches none of this)
+before the flip, and each holds as written. Five things are worth recording
+where the flip is recorded, none of them a change to what was decided.
+
+**The seam clause 1 left open is a package-internal `step_reporter:`.**
+Clause 1 named the list and refused to widen a public
+`StatifierPersistence.Runs` return to carry it, and left the seam itself to
+this bead. What landed is an option, not a return: `step_reporter:` joins
+`StatifierPersistence.Runs`' `t:opt/0` union, documented there as "this
+package's own, never a host's", set by `StatifierPersistence.Driver` only
+when its own `after_step:` is set, and threaded to the persist tail
+(`defp persist_tail(store, run_id, machine_state, effects, executor, write,
+reporter)` in `runs.ex`, read at `e3209bd`). No public return widened, which
+is the constraint clause 1 actually placed. Note the cite in clause 1 itself
+is that same function at its old arity six; it gained the reporter argument
+and nothing else moved.
+
+**Clause 1's "whole list" and clause 2's "two entry points" both hold, and
+are the two claims a reader should check first.** The tail reports the list
+it was handed, not the executable subset: `report_step/3` is reached from
+`persist_tail/7` with that function's own `effects` parameter, which
+`Enum.split_with/2` never rebinds (`runs.ex` at `e3209bd`), and
+`DriverTest`'s "hands over the whole effect list, lifecycle effects
+included" asserts a `{:done, _}` reaches the callback and does not reach the
+executor. And the driver still calls exactly three `StatifierPersistence.Runs`
+functions - `Runs.create/4` from `create/3`, `Runs.step/5` from the private
+`defp step(driver, run_id, opts, event, ref)`, and `Runs.cascade_cancel/3`,
+which steps nothing - so the two step-taking entry points clause 2 names are
+still the whole set. The driver drains the reporter's messages and fires the
+host's callback from those two sites, after the entry point has returned.
+
+**The per-call override landed as `Keyword.get/3` against the driver's own
+default, not `Keyword.put_new/3`.** The closing section allowed the widening
+"if the same `Keyword.put_new/3` shape carries it"; what `driver.ex` holds
+at `e3209bd` is `defp after_step(driver, opts), do: Keyword.get(opts,
+:after_step, driver.after_step)`. The two spell the same rule - the caller's
+option outranks the driver's field - from opposite ends, and the second is
+what the option's own shape asks for, since the value being defaulted lives
+on the struct rather than in the keyword list. The widening is the one the
+section allowed; only the spelling differs, and it is named here rather than
+edited into the clause.
+
+**The discarded delivery is answered the way the closing section said, and a
+test holds it.** "A discarded delivery is not one" is now two independent
+refusals: nothing persisted means the reporter is never called, and
+`Driver`'s own `report/4` matches only `{:ok, _run, _machine_state}` on its
+side of the seam. `DriverTest`'s "a discarded delivery fires nothing" records
+a sabotage that needed both halves broken to go red.
+
+**Clause 3's lock statement holds by construction and no test asserts it.**
+"The callback for a given run never runs inside that run's own exclusion" is
+true because `serialized/5` closes before the `Runs` entry point returns and
+the callback fires after that return - it is a property of where the call
+sits, and there is no test that would go red if it moved. That is recorded
+here rather than papered over: the claim holds as written at `e3209bd`, and
+a future edit that fires the callback from inside `persist_tail/7` would
+falsify it silently.
+
+**Two sentences above that the flip and a reviewer touch.** The amendment's
+own status paragraph says "this section carries no `lib/` change and no
+test, and waits for one"; that is now false, and it is met here rather than
+edited in place - the code and its tests are `e3209bd`. And the closing
+sentence of the seam section reads "ADR-0009's telemetry sees every step and
+is deliberately the wrong tool - decision 5 below says why". Read "decision
+5" there as **clause 5**, the amendment's own fifth clause ("What it is
+not"), which is what the sentence points at; this record's decision 5 is the
+cascade, and the section's other self-references say "clause N".
