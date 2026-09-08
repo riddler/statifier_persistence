@@ -10,6 +10,34 @@ fragment in [`changelog.d/`](changelog.d/README.md); the fragments are assembled
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
 
+## [0.11.0] 2026-09-08
+
+Feature release: a durably stepped run can now report itself as it goes.
+`StatifierPersistence.Driver.new/3` takes an `after_step:` callback, fired
+after every step the driver takes on a caller's behalf - a durable subchart
+child's own steps and the parent's step on the answer path alike - so a host
+can trace, project or checkpoint from one seam instead of wrapping each entry
+point. Alongside it, `StatifierPersistence.Testing.StorageConformance` no
+longer writes from a `setup`, so an adapter's own `setup` runs first.
+
+### Added
+
+- `StatifierPersistence.Driver.new/3` takes `after_step:`, a
+  `(run_id, machine_state, effects -> any)` callback fired after every step
+  the driver takes on a caller's behalf - a durable subchart child's own
+  steps and the parent's step on the answer path included, each under the id
+  of the run that was stepped, with the whole effect list that step produced.
+  It defaults to `nil` and may be overridden per call on `create/3`,
+  `send_event/4`, `done_invocation/5` and `failed_invocation/5`.
+
+### Fixed
+
+- `StatifierPersistence.Testing.StorageConformance` no longer registers a
+  `setup` that writes: the input-log cases build their fixture run inside
+  the case body, so a host's own `setup` - even one written below the
+  `use` - is no longer preceded by a write. The moduledoc states the
+  ordering contract a host binds against.
+
 ## [0.10.0] 2026-09-06
 
 Feature release: a durable subchart child failed from outside the
