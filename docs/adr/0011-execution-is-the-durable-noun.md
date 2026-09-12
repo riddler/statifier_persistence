@@ -224,18 +224,20 @@ That shape is chosen over "walk `Telemetry`'s documented vocabulary" because
 the vocabularies are prose in a moduledoc table and in `docs/telemetry.md`, not
 a value a test can read: `Telemetry.fields/0` is `keyword()` and no public
 `@type` enumerates them, so only the atom literals at the call sites are
-mechanically checkable. On this clause the survivor list is exactly one entry -
-the transitional `Config` alias `:runs` of decision 3 - because the other two
-survivors below are a string key and an English verb, neither of which is an
-atom literal.
+mechanically checkable. On this clause the survivor list is **empty**: after
+decision 3 there is no `:runs` `Config` alias to spare, and the historical
+migrations that used to hold nine further `:runs` atom literals are rewritten
+by that same decision, so no `migrations/` exemption is needed either. Every
+`:run`, `:runs`, `_run` or `_runs` atom literal left in `lib/` is a miss.
 
-That test names its permitted survivors, and there are exactly three:
+That test names its permitted survivors, and there are exactly two - neither
+of them an atom literal, which is why the clause above admits none:
 
 1. the old donedata key `statifier_persistence:run_status`, which decision 4
-   keeps **readable** for one release;
-2. the transitional `Config` option key `:runs`, which decision 3 keeps
-   **accepted as an alias** for one release;
-3. `run` as the ordinary English verb in prose and in a private name, which
+   keeps **readable** for one release. It is a **string** literal, not an
+   atom, so it survives the atom-literal clause by construction and is named
+   here so the broader `run`-spelling arm of the test spares it;
+2. `run` as the ordinary English verb in prose and in a private name, which
    decision 1 keeps.
 
 Anything else the test finds is a surface this rule already renamed and sp-op4
@@ -344,7 +346,9 @@ The `[:statifier_persistence, :adapter, :call]`,
 `[:statifier_persistence, :effect, :failed]`,
 `[:statifier_persistence, :drive, :turns_exhausted]` and the six
 `[:statifier_persistence, :child, ...]` event names keep their own second
-segment; only their `run_id`-shaped metadata keys move, per the rows above.
+segment; their `run_id`-shaped metadata keys move, per the rows above, and
+on `[:statifier_persistence, :identity, :refused]` one metadata *value* moves
+too (the `stage:` row below).
 
 **Telemetry metadata values**
 
@@ -367,7 +371,7 @@ The `docs/telemetry.md` prose that enumerates both vocabularies is updated in
 the same pass.
 
 By contrast the `callback` metadata values on
-`[:statifier_persistence, :adapter, :call]` (`docs/telemetry.md:240-242`,
+`[:statifier_persistence, :adapter, :call]` (`docs/telemetry.md:240-243`,
 @70d86bd) need no row: they *are* the `Storage.Adapter` callback names, so they
 rename transitively with the callback table above.
 
@@ -376,8 +380,9 @@ rename transitively with the callback table above.
 The six documented functions that publish the renamed events rename with them.
 The other ten emitters (`adapter_call/2`, `identity_refused/1`,
 `effect_failed/1`, `drive_turns_exhausted/2` and the six `child_*` emitters,
-`telemetry.ex:279` through `:520`, @70d86bd) keep their names; only their
-`run_id`-shaped metadata keys move.
+`telemetry.ex:279` through `:520`, @70d86bd) keep their names; their
+`run_id`-shaped metadata keys move, and `identity_refused/1`'s `stage:` value
+moves as well (the metadata-value table below).
 
 | Today (@70d86bd) | After |
 |---|---|
@@ -521,9 +526,10 @@ frequently *read* word this package produces. `"exec"` is preferred over
 
 The consequence is stated plainly here rather than left to be discovered:
 
-- New rows carry `exec_...`. **Existing rows keep `run_...`** - decision 3's V06
-  renames the table and the columns and copies **no data**, so every id already
-  stored is unchanged and stays valid.
+- New rows carry `exec_...`. On an upgraded install **existing rows keep
+  `run_...`** - decision 3's V06 renames the table and the columns and copies
+  **no data**, so every id already stored is unchanged and stays valid. A fresh
+  install only ever holds `exec_...`.
 - An id is an opaque string. Nothing in this package parses a prefix, and no
   host should; a host that does must accept **both** spellings indefinitely,
   because both will coexist in the same column forever.
@@ -546,37 +552,97 @@ separately. And `StatifierPersistence.Run.from_record/1` (`run.ex:36`, @70d86bd)
 keeps its function name, travelling to `Execution.from_record/1` with its
 module's row above.
 
-### 3. The tables, the columns, the indexes, the V06 migration, and the `Config` key
+### 3. The tables, the columns, the indexes, the rewritten V01-V05, the conditional V06, and the `Config` key
 
 - The `:runs` table key becomes `:executions`, so `@table_keys`
   (`ecto/config.ex:46`, @70d86bd) becomes
   `[:charts, :positions, :executions, :inputs]` and the shipped default name
   becomes **`statifier_executions`**.
+- **There is no `:runs` alias.** `:executions` is the only spelling the
+  configuration accepts. Supplying `:runs` under `tables:` reaches
+  `Config.table/2`'s `when table in @table_keys` guard (`ecto/config.ex:90`,
+  @70d86bd) and raises like any other unknown key. A one-release alias with a
+  deprecation log line was considered and rejected: it would have to survive
+  in the historical migrations as well as in host configuration, and this
+  package is pre-1.0 - the cutover is taken once, loudly, in `0.12.0`, rather
+  than half-taken and finished in `0.13.0`.
 - The `:inputs` key and the table name `statifier_inputs` are **unchanged**.
 - The `run_id` column becomes `execution_id` in **both** tables: the executions
   table (V01's `add(:run_id, :text, null: false)`, `v01.ex:68`, @70d86bd) and
   the input log (V05's `add(:run_id, :text, null: false)`, `v05.ex:51`,
   @70d86bd).
-- **Migration V06** performs the rename **in place**: the table, the two
-  `run_id` columns, V01's unique index on `(run_id)`, V05's unique index on
-  `(run_id, seq)` and V03/V04's `metadata` GIN index (whose generated name is
-  derived from the table name, `v03.ex:126` and `v04.ex:191`, @70d86bd). It
+- **The historical migrations V01-V05 are rewritten to the new noun.** Every
+  `Config.table(config, :runs)` call site becomes
+  `Config.table(config, :executions)` - nine `:runs` atom literals in all:
+  `v01.ex:64` (`runs = Config.table(config, :runs)`) and `v01.ex:88` (`for
+  name <- [:runs, :positions, :charts]` in `down/1`), `v02.ex:32` and `:42`
+  (`alter table(Config.table(config, :runs), ...)`), `v03.ex:86` and `:108`,
+  and `v04.ex:156`, `:160` and `:165` (the qualified-name helpers and the
+  concurrent rebuild), all @70d86bd. Every `run_id` column and index those
+  versions declare is declared as `execution_id`: V01's column (`v01.ex:68`)
+  and its unique index on `(run_id)` (`v01.ex:80`), and V05's column
+  (`v05.ex:51`) and its unique index on `(run_id, seq)` (`v05.ex:60`), all
+  @70d86bd. The GIN index name V03 and V04 derive from the table name
+  (`v03.ex:126` and `v04.ex:191`, @70d86bd) follows the table.
+- **A fresh install therefore creates the execution tables directly.**
+  Running V01 through V06 against an empty database never creates
+  `statifier_runs` at any point: V01 creates `statifier_executions` with an
+  `execution_id` column, and V06 finds nothing to rename.
+- **Migration V06 is a conditional in-place rename.** When the resolved *old*
+  name (the configured table prefix plus `runs`, or the `tables:` override a
+  host gave for that table) exists, `up/1` renames **in place**: the table,
+  the two `execution_id`-to-be columns, V01's unique index on `(run_id)`,
+  V05's unique index on `(run_id, seq)` and V03/V04's `metadata` GIN index. It
   copies no data - a rename is a catalog operation and this record forbids any
-  variant that reads or writes rows. It ships a `down/0` that restores every old
-  name, and the conformance suite exercises both directions.
-- A host that already set `:tables` or `:table_prefix` explicitly keeps whatever
-  it set; V06 renames from the resolved old name to the resolved new name, which
-  is what makes it correct under ADR-0002 decisions 3 and 4.
-- The `Config` option key becomes `:executions`. `:runs` is **accepted as an
-  alias for one release**: supplying it resolves the executions table and logs a
-  deprecation line naming `:executions`. It is removed in the release named in
-  decision 4.
+  variant that reads or writes rows. When the old name does **not** exist -
+  the fresh install above - `up/1` is a **no-op**.
+- **V06 is a version this package knows either way.** It takes the key `6` in
+  `Migrations`' `@migrations` map (`ecto/migrations.ex:110-116`, @70d86bd),
+  from which `@current_version` (`ecto/migrations.ex:121`, `@migrations |>
+  Map.keys() |> Enum.max()`) and `expected_version/0`
+  (`ecto/migrations.ex:203`) are derived, so
+  `Migrations.up/1` runs it and `expected_version/0` answers `6`. This package
+  writes no versions table, no marker row and no version column
+  (`ecto/migrations.ex:190-195`, @70d86bd: "there is no
+  `assert_version!/1` ... this package records none"), so there is no other sense in
+  which a version is "recorded": the map entry and the host's own
+  `schema_migrations` timestamp are the whole of it.
+- **How V06 tells the two installs apart.** It asks the repo whether the
+  resolved old name exists, and it asks *late*: the probe goes through
+  `Ecto.Migration.execute/1`'s function form, which the migration runner
+  executes in order after the DDL queued ahead of it, rather than running in
+  the body of `up/1`. That is the shape V04 already uses for exactly this
+  reason (`v04.ex:121-132`, @70d86bd: "The check goes through `execute/1`'s
+  function form rather than running here ... asking the runs table anything
+  from the body of `up/1` reaches it before V01 has created it, on every fresh
+  database"). The catalog query itself is sp-j2y's to write per adapter; this
+  record fixes the question, not the SQL.
+- **`down/0` renames back when the executions table exists**, and does nothing
+  when it does not. It does **not** try to tell a fresh install from an
+  upgraded one: nothing in the schema records which path built the database,
+  and a marker that did would be new stored surface bought for one migration.
+  So the rollback is unconditional-on-existence, and the consequence is the
+  next bullet.
+- **Rolling back below V06 on an upgraded install is unsupported.** V06's
+  `down/0` restores `statifier_runs` with `run_id` columns, but V01-V05's
+  `down/1` arms now speak `:executions` and `execution_id`, so they no longer
+  name the tables V06's `down/0` just renamed back. A **fresh** install rolls
+  back normally: nothing renames on the way down, and V01-V05 drop exactly
+  what they created. This record accepts that asymmetry rather than carrying a
+  compatibility shim through the historical migrations: the package is pre-1.0
+  (`mix.exs:4`, `@version "0.11.0"`, @70d86bd), an upgraded install that must
+  go back reaches for its backup or for `0.11.x` with its own `0.11.x`
+  migrations, and the changelog says so in those words.
+- A host that already set `:tables` or `:table_prefix` explicitly keeps
+  whatever it set; V06 renames from the resolved old name to the resolved new
+  name, which is what makes it correct under ADR-0002 decisions 3 and 4.
 - The generated host schema module and the surrogate-key prefix move with the
   table key, and decision 2's last two tables give their rows:
   `MyApp.Persistence.Run` becomes `MyApp.Persistence.Execution` over
   `statifier_executions`, and the UXID prefix for that table becomes `"exec"`.
-  Because V06 copies no data, **existing ids keep their `run_` prefix** while
-  new ids get `exec_`; both are valid, opaque, and coexist permanently.
+  Because V06 copies no data, an **upgraded** install's existing ids keep
+  their `run_` prefix while new ids get `exec_`; both are valid, opaque, and
+  coexist permanently. A fresh install only ever writes `exec_`.
 - The Postgres advisory lock keeps its shape; only the variable it hashes is
   renamed (`storage/ecto.ex:570`, @70d86bd). The lock's identity is the hash of
   the id string, so a rename of the variable changes no lock value and no
@@ -597,8 +663,9 @@ somewhere, and it may be running.
 - The old key is **dropped in `0.13.0`**. This package is at `0.11.0`
   (`mix.exs:4`, `@version "0.11.0"`, @70d86bd) and the rename ships in `0.12.0`
   (sp-8b7), so "one release" is `0.12.0`, and `0.13.0` is the first release that
-  reads only `statifier_persistence:execution_status`. The same release removes
-  decision 3's `:runs` `Config` alias.
+  reads only `statifier_persistence:execution_status`. It is the **only**
+  transitional reader this rename ships: decision 3 takes the configuration and
+  the tables over in one step, with no alias to retire later.
 - The value vocabulary (`"failed"`) is unchanged, and the failure-classed-final
   mechanism ADR-0004 and `runs.ex:33-37` (@70d86bd) describe is unchanged. Only
   the key name moves.
@@ -691,10 +758,11 @@ by the compiler, is cheaper than a synonym the family carries forever.
   then the `statifier_examples` re-pin. The version named for `statifier_oban`
   in this wave is therefore spent: any further `statifier_oban` change this
   rename forces would be `0.10.1`.
-- Two transitional readers exist and both expire in `0.13.0`: the `:runs`
-  `Config` alias (decision 3) and the old donedata key (decision 4). Each logs a
-  deprecation line while it lives, so a host learns it is relying on one without
-  reading a changelog.
+- Exactly **one** transitional reader exists, and it expires in `0.13.0`: the
+  old donedata key (decision 4), which logs a deprecation line while it lives
+  so a host learns it is relying on it without reading a changelog. The
+  configuration takes no alias at all (decision 3), so there is nothing else
+  to retire in `0.13.0`.
 - An out-of-tree storage adapter does not compile against `0.12.0` until it
   renames seven callbacks, and a host-supplied serialization strategy does not
   compile until it renames one. That is the cost decision 6 chose on purpose,
@@ -719,10 +787,21 @@ by the compiler, is cheaper than a synonym the family carries forever.
   parses a prefix and no host should, but a host that does must accept both
   spellings permanently. The changelog says so in the same breath as the
   migration.
-- A running install upgrades by running V06. The migration is a catalog rename
-  with a `down/0`, so the rollback path is real, but an install that rolls the
-  *code* back without rolling the migration back finds a table it cannot name.
-  The changelog says to roll both or neither.
+- **A fresh install** creates the execution tables directly: V01-V05 are
+  rewritten to the new noun, so `statifier_runs` is never created and V06 is a
+  no-op that only advances the version this package expects. **An upgraded
+  install** runs V06, which finds the old table and renames it, its two
+  columns and its three indexes in place, copying no data.
+- **Rolling back below V06 on an upgraded install is unsupported**, because the
+  rewritten V01-V05 `down/1` arms speak the new noun while V06's `down/0` has
+  just restored the old one; a fresh install rolls back normally. The changelog
+  carries this in bold - **Breaking for hosts that rolled back below V06 or
+  that reference the runs table by name** - and says what to do instead: keep a
+  backup, or go back to `0.11.x` and use its migrations.
+- A host that names the table itself - in a raw query, a view, a materialized
+  view, a hand-written Ecto schema or a monitoring dashboard - breaks at
+  `0.12.0` whichever path it took, because the name is `statifier_executions`
+  on both. The changelog names this beside the rollback line.
 - Anything subscribed to `[:statifier_persistence, :run, ...]` goes silent at
   `0.12.0` with no error. Decision 5 accepted that in exchange for not paying the
   break twice; a host that wires its own handlers must grep for the old prefix as
