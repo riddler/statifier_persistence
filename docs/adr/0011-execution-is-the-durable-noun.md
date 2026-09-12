@@ -196,6 +196,10 @@ table below names it. A surface is in scope if it spells `run`, `runs` or
   key inside a `@type`, at any depth, including a type whose name is innocent;
 - a **callback** on either public behaviour;
 - a **telemetry** event name or a metadata key;
+- a public **telemetry metadata value** that belongs to a documented closed
+  vocabulary - a value a host pattern-matches on, enumerated in
+  `StatifierPersistence.Telemetry`'s moduledoc or in `docs/telemetry.md` -
+  even where the key carrying it is innocent;
 - a public **error atom**, including a member of an error union;
 - a **generated** module name or schema field that a host's `use` produces;
 - a surrogate-key **prefix**, or the map key that selects one.
@@ -210,8 +214,22 @@ The **authoritative enumeration** is the changelog fragment **sp-op4** writes.
 It is produced by grep over `lib/` at the SHA the rename lands on, and it is
 pinned by a test in sp-op4 asserting that no public `@type`, `@spec`,
 `@callback`, `def`, `@doc`'d module name, error atom or telemetry name in
-`lib/` spells `run`, `runs` or `run_id`. That test names its permitted
-survivors, and there are exactly three:
+`lib/` spells `run`, `runs` or `run_id`.
+
+That test carries one more clause, for the metadata-value bullet above: **no
+documented telemetry metadata value spells the retired noun**. The checkable
+form is a grep over `lib/` for *atom literals* - `:run`, `:runs`, and any atom
+ending `_run` or `_runs` - failing on every hit outside the named survivors.
+That shape is chosen over "walk `Telemetry`'s documented vocabulary" because
+the vocabularies are prose in a moduledoc table and in `docs/telemetry.md`, not
+a value a test can read: `Telemetry.fields/0` is `keyword()` and no public
+`@type` enumerates them, so only the atom literals at the call sites are
+mechanically checkable. On this clause the survivor list is exactly one entry -
+the transitional `Config` alias `:runs` of decision 3 - because the other two
+survivors below are a string key and an English verb, neither of which is an
+atom literal.
+
+That test names its permitted survivors, and there are exactly three:
 
 1. the old donedata key `statifier_persistence:run_status`, which decision 4
    keeps **readable** for one release;
@@ -327,6 +345,31 @@ The `[:statifier_persistence, :adapter, :call]`,
 `[:statifier_persistence, :drive, :turns_exhausted]` and the six
 `[:statifier_persistence, :child, ...]` event names keep their own second
 segment; only their `run_id`-shaped metadata keys move, per the rows above.
+
+**Telemetry metadata values**
+
+Two metadata *values* spell the noun under keys that do not. Both are members
+of a documented closed vocabulary a host pattern-matches on, so both are in
+scope by the metadata-value bullet of this decision's rule, and both rename:
+
+| Today (@70d86bd) | After |
+|---|---|
+| `stage: :run` on `[:statifier_persistence, :identity, :refused]` (`storage.ex:313` and `:363`, `refuse_unidentified(:run, run_id: run_id)`; `storage.ex:714`, `precheck_identity(..., :run, keys)`; emitted at `storage.ex:830` and `:838` into `Telemetry.identity_refused/1`, `telemetry.ex:304`; documented at `docs/telemetry.md:238` and `:258`, "`stage` is `:position`, `:run` or `:chart`") | `stage: :execution` |
+| `reason: :terminal_run` on `[:statifier_persistence, :run, :discarded]` (`runs.ex:428`, `:527`, `:567`, each `discarded(run_record, run_id, _, :terminal_run)` into `runs.ex:867`; documented at `telemetry.ex:102` and `docs/telemetry.md:291`) | `reason: :terminal_execution` |
+
+The private specs that type the first of these travel with it and are renamed
+in the same pass, without being public surface in their own right: `@spec
+refuse_unidentified(:chart | :position | :run, keyword())` (`storage.ex:827`,
+@70d86bd), `@spec refuse_mismatch(:position | :run, keyword(), Identity.t(),
+Identity.t())` (`storage.ex:835`, @70d86bd), and the `stage :: :position |
+:run` parameter of `@spec precheck_identity/4` (`storage.ex:797`, @70d86bd).
+The `docs/telemetry.md` prose that enumerates both vocabularies is updated in
+the same pass.
+
+By contrast the `callback` metadata values on
+`[:statifier_persistence, :adapter, :call]` (`docs/telemetry.md:240-242`,
+@70d86bd) need no row: they *are* the `Storage.Adapter` callback names, so they
+rename transitively with the callback table above.
 
 **`StatifierPersistence.Telemetry` emitters**
 
@@ -461,10 +504,17 @@ raises for the renamed table.
 
 The **prefix string changes too**, and that is a deliberate choice rather than a
 mechanical consequence: the key could have been respelled while the prefix stayed
-`"run"`. `"exec"` is chosen because ADR-0002 decision 4's stated purpose for the
-prefix is that "a key met in a psql console or a log line names its table"
-(`uxid.ex:5-8`, @70d86bd) - a `run_` prefix on a row in `statifier_executions`
-would defeat exactly that, and it would leave the retired noun as the most
+`"run"`. `"exec"` is chosen because the prefix's stated purpose is that "a key
+met in a psql console or a log line names its table" - a sentence written in
+the generator's own moduledoc (`uxid.ex:5-8`, @70d86bd), which derives it from
+"ADR-0002 decision 4, as amended". ADR-0002 decision 4 itself
+(`docs/adr/0002-configurable-keys-and-table-names.md:88-95`, @70d86bd) settles
+**table** names on that discoverability argument ("someone meeting
+`statifier_runs` in a psql console knows where it came from"); the extension of
+the same argument to key prefixes is the moduledoc's, and it is the moduledoc
+this record relies on. Either way, a `run_` prefix on a row in
+`statifier_executions` would defeat exactly that, and it would leave the
+retired noun as the most
 frequently *read* word this package produces. `"exec"` is preferred over
 `"execution"` for the same reason the map already says `"pos"` and not
 `"position"`: these prefixes are short.
