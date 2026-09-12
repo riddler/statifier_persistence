@@ -186,14 +186,48 @@ naming the durable record.
 
 ### 2. The names
 
-The tables below are the complete list of public names this record changes,
-enumerated from every `defmodule`, `def`, `defstruct`, `@callback`, `@type` and
-`@opaque` in `lib/` at `70d86bd` that spells `run` in its own name or in a key
-of its own shape, minus what carries `@doc false`. The left column is today's
-name at `70d86bd` with today's arity, read off the definition rather than off
-any bead text; the right column is the name after sp-op4. Arity is part of a
-name, so a row whose arity differs on the two sides would be a change of shape
-and not a rename - there is no such row.
+Decision 1 is a **rule**, and the rule - not this section's tables - is what
+binds. It governs **every public surface of this package**, whether or not a
+table below names it. A surface is in scope if it spells `run`, `runs` or
+`run_id` in any of:
+
+- a module or a function **name**;
+- a **type**, either by its own name or in a **key of its own shape** - a map
+  key inside a `@type`, at any depth, including a type whose name is innocent;
+- a **callback** on either public behaviour;
+- a **telemetry** event name or a metadata key;
+- a public **error atom**, including a member of an error union;
+- a **generated** module name or schema field that a host's `use` produces;
+- a surrogate-key **prefix**, or the map key that selects one.
+
+The tables below are **illustrative of that rule, not exhaustive**. They exist
+to show what the rename looks like in each category, to fix the arities, and to
+record the handful of deliberate non-renames; they are not a checklist a later
+reader may treat as complete, and a surface absent from them is renamed all the
+same. Where a table and the rule appear to disagree, the rule wins.
+
+The **authoritative enumeration** is the changelog fragment **sp-op4** writes.
+It is produced by grep over `lib/` at the SHA the rename lands on, and it is
+pinned by a test in sp-op4 asserting that no public `@type`, `@spec`,
+`@callback`, `def`, `@doc`'d module name, error atom or telemetry name in
+`lib/` spells `run`, `runs` or `run_id`. That test names its permitted
+survivors, and there are exactly three:
+
+1. the old donedata key `statifier_persistence:run_status`, which decision 4
+   keeps **readable** for one release;
+2. the transitional `Config` option key `:runs`, which decision 3 keeps
+   **accepted as an alias** for one release;
+3. `run` as the ordinary English verb in prose and in a private name, which
+   decision 1 keeps.
+
+Anything else the test finds is a surface this rule already renamed and sp-op4
+has missed.
+
+Within the tables, the left column is today's name at `70d86bd` with today's
+arity, read off the definition rather than off any bead text; the right column
+is the name after sp-op4. Arity is part of a name, so a row whose arity differs
+on the two sides would be a change of shape and not a rename - there is no such
+row.
 
 Where a definition ends in a default argument it exports two arities, and the
 left column gives the **maximum**. That is the case for `Storage.insert_run/5`
@@ -227,6 +261,17 @@ the adapter's `list_runs_by_metadata/2` (`adapter.ex:422`) and the facade's
 
 The `run_id:` key inside `run_record/0` and `run_state/0` becomes
 `execution_id:` with them.
+
+One more `Storage.Adapter` type is in scope by its *shape* rather than its
+name, and it is the one an out-of-tree adapter builds and reads for ADR-0010's
+two optional callbacks:
+
+| Today (@70d86bd) | After |
+|---|---|
+| `input_record/0`'s `run_id:` key (`adapter.ex:151-156`, `@typedoc` at `:140`) | `execution_id:` |
+
+The type keeps its own name - an input record is still an input record - and
+only its key moves.
 
 **`Storage.Adapter` callbacks**
 
@@ -333,6 +378,7 @@ paragraph of this decision.
 |---|---|
 | `Runs.run_id/0` (`runs.ex:111`) | `Executions.execution_id/0` |
 | `Storage.run_write_opt/0` (`storage.ex:114`) | `Storage.execution_write_opt/0` |
+| `Storage.input/0`'s `run_id:` key (`storage.ex:89-94`, `@typedoc` at `:79`) | `execution_id:` |
 | `Executor.context/0`'s `run_id:` key (`executor.ex:17`) | `execution_id:` |
 | `Ecto.KeyGenerator.table/0` = `:charts \| :positions \| :runs \| :inputs` (`ecto/key_generator.ex:28`) | `:charts \| :positions \| :executions \| :inputs` |
 
@@ -342,6 +388,99 @@ to `:executions`, so leaving this type enumerating `:runs` would type a host
 against a key that no longer exists. `Executor.context/0` is the map an
 `Executor.execute/2` implementation receives, so its key rename is a break for
 every host effect executor, not an internal detail.
+
+**`StatifierPersistence.Driver`**
+
+`Driver` has no `run`-named function, so a name-only sweep misses it; it is in
+scope by the shape of its public type. `dispatch_context/0` is the map handed to
+a **host-supplied** `:dispatch` function, so its key rename is the same silent,
+non-compile-time break class as `Executor.context/0`.
+
+| Today (@70d86bd) | After |
+|---|---|
+| `Driver.dispatch_context/0`'s `run_id:` key (`driver.ex:205-210`) | `execution_id:` |
+
+`Driver`'s nine public functions - `new/3` (`driver.ex:412`), `create/3`
+(`:437`), `send_event/4` (`:484`), `done_invocation/5` (`:520`),
+`failed_invocation/5` (`:545`), `parent_link/2` (`:561`), `answer_parent/3`
+(`:603`), `resolve_and_answer_parent/3` (`:652`) and `start_child_at/6`
+(`:735`), all @70d86bd, arities given as the maximum where the definition ends
+in a default argument - keep their names. Eight of the nine (every one but
+`new/3`) take a `run_id`-shaped parameter typed `Runs.run_id()`; the **type**
+renames by the row above in "Public types outside `Storage.Adapter`", and the
+parameter names follow the closing paragraph of this decision.
+
+**Public error atoms**
+
+Error atoms are returned values a host pattern-matches on, so they break exactly
+like a function name, and being union *members* rather than named types does not
+put them outside decision 1.
+
+| Today (@70d86bd) | After |
+|---|---|
+| `Storage.error/0`'s `:run_position_missing` (`storage.ex:67-77`, member at `:71`) | `:execution_position_missing` |
+| `Storage.error/0`'s `:run_outcome_unsupported` (`storage.ex:74`) | `:execution_outcome_unsupported` |
+| `Storage.error/0`'s `:run_states_unsupported` (`storage.ex:75`) | `:execution_states_unsupported` |
+| `Storage.Adapter.error/0`'s `:run_exists` (`adapter.ex:199-208`, member at `:202`) | `:execution_exists` |
+| `Storage.Adapter.error/0`'s `:run_not_found` (`adapter.ex:203`) | `:execution_not_found` |
+| `Storage.Adapter.error/0`'s `:run_outcome_unsupported` (`adapter.ex:205`) | `:execution_outcome_unsupported` |
+| `Storage.Adapter.error/0`'s `:run_states_unsupported` (`adapter.ex:206`) | `:execution_states_unsupported` |
+
+`Storage.error/0` unions `Adapter.error/0` (`storage.ex:68`, @70d86bd), so the
+last four rows reach the facade through it and are not repeated there. The
+`:refused` forms an adapter answers at open with the same atoms
+(`adapter.ex:432` and `:464`, @70d86bd) carry the renamed atoms too.
+
+**The generated host schema modules**
+
+`use StatifierPersistence.Ecto` generates four Ecto schema modules under the
+host's namespace (`ecto.ex:64`'s `@schema_modules` entry `{Run, :runs}`,
+concatenated at `ecto.ex:128`, documented at `ecto.ex:15-17`, all @70d86bd).
+They are not literal `defmodule`s in this package, but their names are public:
+a host writes `MyApp.Persistence.Run` in its own queries.
+
+| Today (@70d86bd) | After |
+|---|---|
+| `MyApp.Persistence.Run` (`ecto.ex:64`, `:128`, documented `:15-17`) | `MyApp.Persistence.Execution` |
+| the executions schema's `run_id` field (`ecto.ex:91`) | `execution_id` |
+| the inputs schema's `run_id` field (`ecto.ex:102`) | `execution_id` |
+| the table the module binds (`ecto.ex:64`'s `:runs` key) | `:executions`, resolving to `statifier_executions` by decision 3 |
+
+**The surrogate-key prefix**
+
+`Ecto.KeyGenerator.UXID`'s `@prefixes` map (`ecto/key_generator/uxid.ex:18`,
+@70d86bd) is `%{charts: "chart", positions: "pos", runs: "run", inputs:
+"input"}`. Its keys are the same atoms decision 3 renames, so the `:runs` key
+**must** become `:executions` or `Map.fetch!/2` at `uxid.ex:30` (@70d86bd)
+raises for the renamed table.
+
+| Today (@70d86bd) | After |
+|---|---|
+| `@prefixes`' `runs:` key (`uxid.ex:18`) | `executions:` |
+| its prefix string `"run"` (`uxid.ex:18`) | `"exec"` |
+
+The **prefix string changes too**, and that is a deliberate choice rather than a
+mechanical consequence: the key could have been respelled while the prefix stayed
+`"run"`. `"exec"` is chosen because ADR-0002 decision 4's stated purpose for the
+prefix is that "a key met in a psql console or a log line names its table"
+(`uxid.ex:5-8`, @70d86bd) - a `run_` prefix on a row in `statifier_executions`
+would defeat exactly that, and it would leave the retired noun as the most
+frequently *read* word this package produces. `"exec"` is preferred over
+`"execution"` for the same reason the map already says `"pos"` and not
+`"position"`: these prefixes are short.
+
+The consequence is stated plainly here rather than left to be discovered:
+
+- New rows carry `exec_...`. **Existing rows keep `run_...`** - decision 3's V06
+  renames the table and the columns and copies **no data**, so every id already
+  stored is unchanged and stays valid.
+- An id is an opaque string. Nothing in this package parses a prefix, and no
+  host should; a host that does must accept **both** spellings indefinitely,
+  because both will coexist in the same column forever.
+- This is a deliberate breaking change, taken under the pre-1.0 latitude this
+  record relies on throughout. A host that cannot accept it can supply its own
+  key generator - `Ecto.KeyGenerator` is a public behaviour precisely so that
+  the prefix scheme is replaceable.
 
 Private functions, local variables, parameter names, test names and doc prose
 follow the same rename without being enumerated here: the tables fix the
@@ -382,6 +521,12 @@ module's row above.
   alias for one release**: supplying it resolves the executions table and logs a
   deprecation line naming `:executions`. It is removed in the release named in
   decision 4.
+- The generated host schema module and the surrogate-key prefix move with the
+  table key, and decision 2's last two tables give their rows:
+  `MyApp.Persistence.Run` becomes `MyApp.Persistence.Execution` over
+  `statifier_executions`, and the UXID prefix for that table becomes `"exec"`.
+  Because V06 copies no data, **existing ids keep their `run_` prefix** while
+  new ids get `exec_`; both are valid, opaque, and coexist permanently.
 - The Postgres advisory lock keeps its shape; only the variable it hashes is
   renamed (`storage/ecto.ex:570`, @70d86bd). The lock's identity is the hash of
   the id string, so a rename of the variable changes no lock value and no
@@ -485,10 +630,17 @@ by the compiler, is cheaper than a synonym the family carries forever.
 - `statifier_persistence` **0.12.0** is a breaking minor: renamed modules,
   renamed types, renamed callbacks on both public behaviours, a renamed facade,
   a renamed table, renamed telemetry emitters and event names, and a new
-  donedata key. The release order for the family is
-  `sp 0.12.0` then `ots 0.6.0` then `sob 0.10.0`, `sui 0.10.2` and the
-  `statifier-ex` doc corrections, then `sb 0.28.0`, then the
-  `statifier_examples` re-pin.
+  donedata key. The release order for the family is: **`sob 0.10.0` shipped
+  ahead**, on 2026-09-12 (`statifier_oban` CHANGELOG `[0.10.0] 2026-09-12`,
+  @`e3422bb`) - its half is a parameter name and documentation only, it changes
+  no job argument, unique key or telemetry name, and `statifier_oban` takes no
+  `statifier_persistence` dependency at all (`statifier_oban/mix.exs` deps,
+  @`e3422bb`), so nothing made it wait; then `sp 0.12.0`; then `ots 0.6.0` in
+  lockstep with it (decision 5); then `sui 0.10.2` and the `statifier-ex` doc
+  corrections; then `sb 0.28.0`, which carries the donedata key of decision 4;
+  then the `statifier_examples` re-pin. The version named for `statifier_oban`
+  in this wave is therefore spent: any further `statifier_oban` change this
+  rename forces would be `0.10.1`.
 - Two transitional readers exist and both expire in `0.13.0`: the `:runs`
   `Config` alias (decision 3) and the old donedata key (decision 4). Each logs a
   deprecation line while it lives, so a host learns it is relying on one without
@@ -503,7 +655,20 @@ by the compiler, is cheaper than a synonym the family carries forever.
   `context` map it receives arrives with `execution_id:` instead of `run_id:`
   (decision 2's type table). An implementation that pattern-matches `%{run_id:
   id}` raises at the first effect; one that reads the key by name gets `nil`.
-  The changelog names this beside the two behaviours.
+  A host-supplied `:dispatch` function breaks the same way, on
+  `Driver.dispatch_context/0`'s key. The changelog names both beside the two
+  behaviours.
+- A host that pattern-matches this package's **error atoms** breaks quietly in
+  the same class: `{:error, :run_not_found}` becomes
+  `{:error, :execution_not_found}`, and a `case` with no catch-all raises while
+  one with a catch-all silently reclassifies a known refusal as an unknown
+  failure. Decision 2's error-atom table is the list; the changelog reproduces
+  it.
+- **New surrogate ids change prefix** (`run_` to `exec_`) while every stored id
+  keeps the one it has, because V06 copies no data. Nothing in this package
+  parses a prefix and no host should, but a host that does must accept both
+  spellings permanently. The changelog says so in the same breath as the
+  migration.
 - A running install upgrades by running V06. The migration is a catalog rename
   with a `down/0`, so the rollback path is real, but an install that rolls the
   *code* back without rolling the migration back finds a table it cannot name.
