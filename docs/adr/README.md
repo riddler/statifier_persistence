@@ -12,6 +12,7 @@
 | [0008](0008-durable-subchart-child-runs.md) | A durable subchart's child is an ordinary run, linked by reserved metadata carrying a mandatory chart-identity pin, started as a `:pending` dispatch and answered through ADR-0007's doors, and ended by a cascading cancel that retains; nesting is bounded by the resolver's cycle refusal and fan-out is designed for, not built | accepted |
 | [0009](0009-telemetry-events-for-the-durable-stepper.md) | The stepper emits statifier-ex's own `[:statifier, :session, ...]` family through `Statifier.Telemetry` as `driver: :persistence`, plus sixteen `[:statifier_persistence, ...]` storage-phase events keyed on `run_id`; the position blob carries nothing trace-shaped, and resume stitching is the bridge's links and `caller_context` | accepted |
 | [0010](0010-durable-per-run-input-log.md) | A run's inputs are logged through two optional adapter callbacks: the verbatim `%Statifier.Event{}` as an opaque blob, stamped with the public door it entered by and its dense per-run ordinal, capped per run by the host and closed with a marker past the cap; one log per run, and the replay mapping onto `Recording.entry()` is named here and built nowhere | accepted |
+| [0011](0011-execution-is-the-durable-noun.md) | `execution` is the durable noun: the modules, the types, the adapter callbacks, the tables, the V06 rename, the two donedata keys, and the telemetry prefix | proposed |
 
 New ADRs: next number, same three-section format (Context, Decision,
 Consequences). Pick the number against a freshly fetched remote. A bare
