@@ -12,8 +12,8 @@ defmodule StatifierPersistence.DriverFanoutTest do
   alias Statifier.Event
   alias Statifier.Invoke.Types, as: InvokeTypes
   alias Statifier.Machine
-  alias StatifierPersistence.{Driver, Runs, Storage}
-  alias StatifierPersistence.Run.Linkage
+  alias StatifierPersistence.{Driver, Executions, Storage}
+  alias StatifierPersistence.Execution.Linkage
   alias StatifierPersistence.Storage.InMemory
 
   alias StatifierPersistence.Test.LockOrderRecorder
@@ -21,8 +21,8 @@ defmodule StatifierPersistence.DriverFanoutTest do
 
   alias StatifierPersistence.Test.{
     NoChildListingAdapter,
-    NoRunOutcomeAdapter,
-    NoRunStatesAdapter,
+    NoExecutionOutcomeAdapter,
+    NoExecutionStatesAdapter,
     RaisingListingAdapter
   }
 
@@ -47,10 +47,10 @@ defmodule StatifierPersistence.DriverFanoutTest do
   # index, so each child has to answer something different.
   #
   # On "refuse" it instead reaches a failure-classed final - a <final>
-  # whose <donedata> carries the reserved `statifier_persistence:run_status`
+  # whose <donedata> carries the reserved `statifier_persistence:execution_status`
   # key set to "failed" (ADR-0008's 2026-09-06 amendment). That is the
   # chart saying *this one finished badly* in its own words, with no host
-  # translation: the child's own drive takes the run to :failed, and the
+  # translation: the child's own drive takes the execution to :failed, and the
   # automatic answer carries it into the settlement.
   @child_source """
   <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="idle">
@@ -64,7 +64,7 @@ defmodule StatifierPersistence.DriverFanoutTest do
       </final>
       <final id="refused">
           <donedata>
-              <param name="statifier_persistence:run_status" expr="'failed'"/>
+              <param name="statifier_persistence:execution_status" expr="'failed'"/>
               <param name="item" expr="item"/>
           </donedata>
       </final>
@@ -79,16 +79,27 @@ defmodule StatifierPersistence.DriverFanoutTest do
   describe "start_child_at/6" do
     # sabotage: in Driver.child_linkage/3's tuple clause, pass 0 instead of
     # the given index to Linkage.new/6 -> red, both children landed on the
-    # index-0 run id and the second create adopted the first, so the
-    # index-1 fetch below returned :run_not_found. Verified red, reverted.
+    # index-0 execution id and the second create adopted the first, so the
+    # index-1 fetch below returned :execution_not_found. Verified red, reverted.
     test "creates child i of N with the count and policy on its linkage", %{store: store} do
       driver = start_parent(store)
 
-      assert :ok = Driver.start_child_at(driver, "run_1", effect(), 0, 3)
-      assert :ok = Driver.start_child_at(driver, "run_1", effect(), 2, 3, policy: :first_error)
+      assert :ok = Driver.start_child_at(driver, "execution_1", effect(), 0, 3)
 
-      assert {:ok, first} = Storage.fetch_run(store, Linkage.child_run_id("run_1", "call", 0))
-      assert {:ok, third} = Storage.fetch_run(store, Linkage.child_run_id("run_1", "call", 2))
+      assert :ok =
+               Driver.start_child_at(driver, "execution_1", effect(), 2, 3, policy: :first_error)
+
+      assert {:ok, first} =
+               Storage.fetch_execution(
+                 store,
+                 Linkage.child_execution_id("execution_1", "call", 0)
+               )
+
+      assert {:ok, third} =
+               Storage.fetch_execution(
+                 store,
+                 Linkage.child_execution_id("execution_1", "call", 2)
+               )
 
       assert first.status == :active
       assert {:ok, first_linkage} = Linkage.from_metadata(first.metadata)
@@ -105,22 +116,22 @@ defmodule StatifierPersistence.DriverFanoutTest do
       assert first_linkage.content_hash == Machine.identity(child_machine).content_hash
     end
 
-    # sabotage: in Driver.create_child/6, treat {:error, :run_exists} as an
+    # sabotage: in Driver.create_child/6, treat {:error, :execution_exists} as an
     # ordinary refusal (drop the adopt_child/3 clause) -> red, the second
-    # call answered {:refused, :run_exists} instead of :ok. Verified red,
+    # call answered {:refused, :execution_exists} instead of :ok. Verified red,
     # reverted.
     test "a re-delivered start job for the same index adopts rather than duplicating", %{
       store: store
     } do
       driver = start_parent(store)
 
-      assert :ok = Driver.start_child_at(driver, "run_1", effect(), 1, 3)
-      child_run_id = Linkage.child_run_id("run_1", "call", 1)
-      assert {:ok, first} = Storage.fetch_run(store, child_run_id)
+      assert :ok = Driver.start_child_at(driver, "execution_1", effect(), 1, 3)
+      child_execution_id = Linkage.child_execution_id("execution_1", "call", 1)
+      assert {:ok, first} = Storage.fetch_execution(store, child_execution_id)
 
-      assert :ok = Driver.start_child_at(driver, "run_1", effect(), 1, 3)
+      assert :ok = Driver.start_child_at(driver, "execution_1", effect(), 1, 3)
 
-      assert {:ok, second} = Storage.fetch_run(store, child_run_id)
+      assert {:ok, second} = Storage.fetch_execution(store, child_execution_id)
       assert second == first
     end
 
@@ -129,25 +140,25 @@ defmodule StatifierPersistence.DriverFanoutTest do
     #
     # sabotage: in Linkage.new/6, compare child_index against
     # child_count + 1 -> red, index 3 of 3 was accepted here and in
-    # run_linkage_test's own bound case. Verified red, reverted.
+    # execution_linkage_test's own bound case. Verified red, reverted.
     test "an index outside 0..count - 1 raises" do
       {:ok, store} = Storage.new(InMemory, [])
       driver = start_parent(store)
 
       assert_raise ArgumentError, fn ->
-        Driver.start_child_at(driver, "run_1", effect(), 3, 3)
+        Driver.start_child_at(driver, "execution_1", effect(), 3, 3)
       end
     end
 
-    # sabotage: in Driver.start_context/3, ignore the fetch_run/2 refusal
+    # sabotage: in Driver.start_context/3, ignore the fetch_execution/2 refusal
     # and build the context anyway -> red, the call answered :ok and
     # created a child linked to a parent that does not exist. Verified
     # red, reverted.
-    test "a parent id naming no stored run refuses :run_not_found", %{store: store} do
+    test "a parent id naming no stored execution refuses :execution_not_found", %{store: store} do
       driver = start_parent(store)
 
-      assert {:refused, :run_not_found} =
-               Driver.start_child_at(driver, "run_missing", effect(), 0, 1)
+      assert {:refused, :execution_not_found} =
+               Driver.start_child_at(driver, "execution_missing", effect(), 0, 1)
     end
 
     # sabotage: in Driver.settleable/4, collapse the three cond arms to the
@@ -156,17 +167,20 @@ defmodule StatifierPersistence.DriverFanoutTest do
     test "refuses at open on a store that could not settle the invocation" do
       for {adapter, reason} <- [
             {NoChildListingAdapter, :child_listing_unsupported},
-            {NoRunOutcomeAdapter, :run_outcome_unsupported},
-            {NoRunStatesAdapter, :run_states_unsupported}
+            {NoExecutionOutcomeAdapter, :execution_outcome_unsupported},
+            {NoExecutionStatesAdapter, :execution_states_unsupported}
           ] do
         {:ok, store} = Storage.new(adapter, [])
         driver = start_parent(store)
 
-        assert {:refused, ^reason} = Driver.start_child_at(driver, "run_1", effect(), 0, 2),
+        assert {:refused, ^reason} = Driver.start_child_at(driver, "execution_1", effect(), 0, 2),
                "expected #{inspect(adapter)} to refuse with #{inspect(reason)}"
 
-        assert {:error, :run_not_found} =
-                 Storage.fetch_run(store, Linkage.child_run_id("run_1", "call", 0))
+        assert {:error, :execution_not_found} =
+                 Storage.fetch_execution(
+                   store,
+                   Linkage.child_execution_id("execution_1", "call", 0)
+                 )
       end
     end
 
@@ -177,10 +191,13 @@ defmodule StatifierPersistence.DriverFanoutTest do
     test "the single-child subchart path records neither value", %{store: store} do
       driver = driver(store, @parent_source, subchart_dispatch())
 
-      assert {:ok, _run, _machine_state} = Driver.create(driver, "run_single")
+      assert {:ok, _execution, _machine_state} = Driver.create(driver, "execution_single")
 
       assert {:ok, record} =
-               Storage.fetch_run(store, Linkage.child_run_id("run_single", "call", 0))
+               Storage.fetch_execution(
+                 store,
+                 Linkage.child_execution_id("execution_single", "call", 0)
+               )
 
       assert {:ok, linkage} = Linkage.from_metadata(record.metadata)
       refute Linkage.fan_out?(linkage)
@@ -198,13 +215,17 @@ defmodule StatifierPersistence.DriverFanoutTest do
       assert :ok =
                Driver.start_child_at(
                  driver,
-                 "run_1",
+                 "execution_1",
                  {:start_child, invoke, {:invoke, invoke}},
                  0,
                  1
                )
 
-      assert {:ok, _record} = Storage.fetch_run(store, Linkage.child_run_id("run_1", "call", 0))
+      assert {:ok, _record} =
+               Storage.fetch_execution(
+                 store,
+                 Linkage.child_execution_id("execution_1", "call", 0)
+               )
     end
   end
 
@@ -268,9 +289,9 @@ defmodule StatifierPersistence.DriverFanoutTest do
     test "under :all an index whose start job has not run yet is not settled", %{store: store} do
       parent = start_parent(store)
 
-      # Index 2 is still in the scheduler's queue and has no run at all.
-      assert :ok = Driver.start_child_at(parent, "run_1", effect("item-0"), 0, 3)
-      assert :ok = Driver.start_child_at(parent, "run_1", effect("item-1"), 1, 3)
+      # Index 2 is still in the scheduler's queue and has no execution at all.
+      assert :ok = Driver.start_child_at(parent, "execution_1", effect("item-0"), 0, 3)
+      assert :ok = Driver.start_child_at(parent, "execution_1", effect("item-1"), 1, 3)
 
       finish_child(store, 0)
       finish_child(store, 1)
@@ -278,7 +299,7 @@ defmodule StatifierPersistence.DriverFanoutTest do
       assert leaves(reload_parent(store)) == ["calling"]
 
       # It settles when the late child finally starts and finishes.
-      assert :ok = Driver.start_child_at(parent, "run_1", effect("item-2"), 2, 3)
+      assert :ok = Driver.start_child_at(parent, "execution_1", effect("item-2"), 2, 3)
       finish_child(store, 2)
 
       assert leaves(reload_parent(store)) == ["approved"]
@@ -337,7 +358,7 @@ defmodule StatifierPersistence.DriverFanoutTest do
       assert :ok =
                Driver.answer_parent(
                  parent_driver(store),
-                 Linkage.child_run_id("run_1", "call", 0),
+                 Linkage.child_execution_id("execution_1", "call", 0),
                  {:done, "item-0"}
                )
 
@@ -356,12 +377,12 @@ defmodule StatifierPersistence.DriverFanoutTest do
     # to interleave with two separate reads.
     #
     # sabotage: in Driver.decide/4, move record_outcome/3 back out of the
-    # `with_run` callback and into settle_child/4 ahead of it -> red, the
+    # `with_execution` callback and into settle_child/4 ahead of it -> red, the
     # answer was already stored when the settlement's exclusion opened.
     # Verified red, reverted.
     test "a child's answer is recorded inside the parent's exclusion", %{store: store} do
-      child_run_id = Linkage.child_run_id("run_1", "call", 0)
-      strategy = {OutcomeWindowSerialization, {self(), store, child_run_id}}
+      child_execution_id = Linkage.child_execution_id("execution_1", "call", 0)
+      strategy = {OutcomeWindowSerialization, {self(), store, child_execution_id}}
 
       parent = start_parent(store)
       start_children(parent, 1)
@@ -370,7 +391,7 @@ defmodule StatifierPersistence.DriverFanoutTest do
 
       assert leaves(reload_parent(store)) == ["approved"]
 
-      assert_receive {:exclusion, "run_1", false, true}
+      assert_receive {:exclusion, "execution_1", false, true}
     end
 
     # Scoped to the settlement's own question. The listing is legitimately
@@ -379,7 +400,7 @@ defmodule StatifierPersistence.DriverFanoutTest do
     # (ADR-0008 decision 5) - so this drives the two settlements that
     # answer nothing and stops before the one that answers.
     #
-    # sabotage: in Driver.settle/3, ask Storage.list_runs_by_metadata/2
+    # sabotage: in Driver.settle/3, ask Storage.list_executions_by_metadata/2
     # instead of the projection -> red, the adapter raised on the first
     # child's settlement. Verified red, reverted.
     test "the settlement test asks the projection and never the listing" do
@@ -416,19 +437,24 @@ defmodule StatifierPersistence.DriverFanoutTest do
       assert second["failure"]["reason"] == "child-refused"
       assert third == %{"index" => 2, "status" => "cancelled"}
 
-      assert {:ok, record} = Storage.fetch_run(store, Linkage.child_run_id("run_1", "call", 2))
+      assert {:ok, record} =
+               Storage.fetch_execution(
+                 store,
+                 Linkage.child_execution_id("execution_1", "call", 2)
+               )
+
       assert record.status == :cancelled
     end
 
     # The seam ADR-0008's 2026-09-06 amendment closes, end to end: no
-    # Runs.fail/4, no Driver.answer_parent/3, no host in the loop at all.
+    # Executions.fail/4, no Driver.answer_parent/3, no host in the loop at all.
     # The child's own drive reads the tag off its final's <donedata>,
     # persists :failed with "failed_final", and the driver's automatic
     # path answers the parent - which is what makes first_error fire.
     # Campaign 031's fan-out proof had to translate this host-side; that
     # translation is what this case makes unnecessary.
     #
-    # sabotage: in Runs.run_status/2, drop the failure_classed_final?/1
+    # sabotage: in Executions.execution_status/2, drop the failure_classed_final?/1
     # arm -> red, child 1 completed, the settlement waited for child 2,
     # and the parent stayed in "calling". Verified red, reverted.
     test "a chart-authored failure cancels a live sibling with no host translation",
@@ -449,7 +475,12 @@ defmodule StatifierPersistence.DriverFanoutTest do
       assert second["failure"]["reason"] == "failed_final"
       assert third == %{"index" => 2, "status" => "cancelled"}
 
-      assert {:ok, record} = Storage.fetch_run(store, Linkage.child_run_id("run_1", "call", 1))
+      assert {:ok, record} =
+               Storage.fetch_execution(
+                 store,
+                 Linkage.child_execution_id("execution_1", "call", 1)
+               )
+
       assert record.status == :failed
       assert record.failure == "failed_final"
     end
@@ -461,22 +492,22 @@ defmodule StatifierPersistence.DriverFanoutTest do
     test "first_error reports the never-started indices to the scheduler's seam", %{store: store} do
       parent = start_parent(store)
 
-      # Only 0 and 1 ever got a run: index 2's start job is still sitting
+      # Only 0 and 1 ever got an execution: index 2's start job is still sitting
       # in the scheduler's queue, so nothing here can see it.
       assert :ok =
-               Driver.start_child_at(parent, "run_1", effect("item-0"), 0, 3,
+               Driver.start_child_at(parent, "execution_1", effect("item-0"), 0, 3,
                  policy: :first_error
                )
 
       assert :ok =
-               Driver.start_child_at(parent, "run_1", effect("item-1"), 1, 3,
+               Driver.start_child_at(parent, "execution_1", effect("item-1"), 1, 3,
                  policy: :first_error
                )
 
       finish_child(store, 0)
       fail_child(store, 1)
 
-      assert_received {:cancel_unstarted, "run_1", "call", [2]}
+      assert_received {:cancel_unstarted, "execution_1", "call", [2]}
 
       assert leaves(reload_parent(store)) == ["approved"]
       assert [_first, _second, third] = answered(store)
@@ -499,10 +530,10 @@ defmodule StatifierPersistence.DriverFanoutTest do
 
       # The crash-and-re-drive shape: the same terminal child settles
       # again, from a driver that has not seen the parent move.
-      child_run_id = Linkage.child_run_id("run_1", "call", 1)
+      child_execution_id = Linkage.child_execution_id("execution_1", "call", 1)
 
       assert :ok =
-               Driver.answer_parent(parent_driver(store), child_run_id, {:done, "item-1"})
+               Driver.answer_parent(parent_driver(store), child_execution_id, {:done, "item-1"})
 
       assert leaves(reload_parent(store)) == ["approved"]
       assert answered(store) == first_answer
@@ -519,16 +550,16 @@ defmodule StatifierPersistence.DriverFanoutTest do
       parent = start_parent(store)
       start_children(parent, 2)
 
-      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+      child_execution_id = Linkage.child_execution_id("execution_1", "call", 0)
 
       assert :ok =
-               Driver.answer_parent(parent_driver(store), child_run_id, {:done, "explicit"})
+               Driver.answer_parent(parent_driver(store), child_execution_id, {:done, "explicit"})
 
       assert leaves(reload_parent(store)) == ["calling"]
     end
 
     # sp-y7n: the outside-fail answer reaches `answer_parent/3` too, so a
-    # fan-out child failed through `Runs.fail/4` settles rather than
+    # fan-out child failed through `Executions.fail/4` settles rather than
     # completing the invocation on one child's failure.
     #
     # sabotage: had `Driver.answer_resolved/4`'s no-resolver clause call
@@ -536,13 +567,16 @@ defmodule StatifierPersistence.DriverFanoutTest do
     # where the fan-out routing lives - red, this case alone: the one
     # child's failure answered the parent's door and it left "calling".
     # Verified red, reverted.
-    test "Runs.fail/4 with driver: settles a fan-out child rather than answering", %{store: store} do
+    test "Executions.fail/4 with driver: settles a fan-out child rather than answering", %{
+      store: store
+    } do
       parent = start_parent(store)
       start_children(parent, 2)
 
-      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+      child_execution_id = Linkage.child_execution_id("execution_1", "call", 0)
 
-      assert {:ok, _run} = Runs.fail(store, child_run_id, "boom", driver: parent_driver(store))
+      assert {:ok, _execution} =
+               Executions.fail(store, child_execution_id, "boom", driver: parent_driver(store))
 
       assert leaves(reload_parent(store)) == ["calling"]
     end
@@ -558,37 +592,37 @@ defmodule StatifierPersistence.DriverFanoutTest do
     #
     # It is not reachable, and this is why: every exclusion taken while
     # another is held is taken on a STRICT DESCENDANT of the one held.
-    # `Linkage.child_run_id/3` makes a child's run id strictly extend its
-    # parent's, so "descendant" is a prefix test and the run tree is
+    # `Linkage.child_execution_id/3` makes a child's execution id strictly extend its
+    # parent's, so "descendant" is a prefix test and the execution tree is
     # acyclic by construction (ADR-0008 decision 6) - a wait-for relation
-    # that only ever runs parent-to-child down an acyclic tree has no
+    # that only ever executions parent-to-child down an acyclic tree has no
     # cycle in it, on Postgres advisory locks or anywhere else.
     #
     # The upward acquisition - a child answering its parent - is the case
     # that would close a cycle, and it is taken with NOTHING held: the
     # child's own drive commits and releases its own exclusion before
-    # `maybe_answer_parent/3` runs, and `settle_child/4` answers the
+    # `maybe_answer_parent/3` executions, and `settle_child/4` answers the
     # parent's door after `decide/4`'s exclusion has closed, not inside
     # it. Assertion (3) is what pins that.
     #
     # Both sabotages below fail this case by HANGING rather than by
     # tripping an assert, which is the finding rather than a weakness in
-    # them: `Storage.InMemory.lock_run/3` is not reentrant, so an
+    # them: `Storage.InMemory.lock_execution/3` is not reentrant, so an
     # acquisition that is not on a strict descendant is one that can name
-    # a run this process already holds - and then it waits for itself.
+    # an execution this process already holds - and then it waits for itself.
     # That is the shape of the cycle this case exists to rule out, drawn
     # inside one process because a single connection is where it is
     # reproducible.
     #
-    # sabotage: in Driver.decide/4, take the exclusion on `child_run_id`
-    # instead of `linkage.parent_run_id` -> red, the cascade's own cancel
+    # sabotage: in Driver.decide/4, take the exclusion on `child_execution_id`
+    # instead of `linkage.parent_execution_id` -> red, the cascade's own cancel
     # of index 1 asked for the exclusion the settlement was already
-    # holding and the case timed out inside Runs.cascade_cancel/3.
+    # holding and the case timed out inside Executions.cascade_cancel/3.
     # Verified red, reverted.
     # sabotage: in Driver.record_and_settle/5, answer the parent's door
     # from inside the settlement's own exclusion (respond_to_parent/3 on
     # the assembled answer) rather than from settle_child/4 after it
-    # closes -> red, `reenter/5` asked for "run_1" while "run_1" was held
+    # closes -> red, `reenter/5` asked for "execution_1" while "execution_1" was held
     # and the case timed out. Verified red, reverted.
     test "every nested exclusion is taken on a strict descendant of the one held", %{
       store: store
@@ -603,25 +637,26 @@ defmodule StatifierPersistence.DriverFanoutTest do
 
       assert leaves(reload_parent(store)) == ["approved"]
 
-      acquisitions = for {:acquire, run_id, held} <- LockOrderRecorder.trace(), do: {run_id, held}
+      acquisitions =
+        for {:acquire, execution_id, held} <- LockOrderRecorder.trace(), do: {execution_id, held}
 
-      # (1) The direction, over every acquisition the run made.
+      # (1) The direction, over every acquisition the execution made.
       upward =
-        for {run_id, held} <- acquisitions,
+        for {execution_id, held} <- acquisitions,
             holder <- held,
-            not String.starts_with?(run_id, holder <> "/"),
-            do: {holder, run_id}
+            not String.starts_with?(execution_id, holder <> "/"),
+            do: {holder, execution_id}
 
       assert upward == []
 
       # (2) Not vacuous: the settlement really does nest, so (1) is a
       # statement about a relation that exists.
-      assert {Linkage.child_run_id("run_1", "call", 2), ["run_1"]} in acquisitions
+      assert {Linkage.child_execution_id("execution_1", "call", 2), ["execution_1"]} in acquisitions
 
       # (3) Every acquisition of the PARENT's exclusion is taken holding
       # nothing - the child's own exclusion is already closed, so no
       # connection ever holds a child and waits for its parent.
-      parent_acquisitions = for {"run_1", held} <- acquisitions, do: held
+      parent_acquisitions = for {"execution_1", held} <- acquisitions, do: held
 
       assert parent_acquisitions != []
       assert Enum.all?(parent_acquisitions, &(&1 == []))
@@ -633,7 +668,7 @@ defmodule StatifierPersistence.DriverFanoutTest do
   # the scheduler's jobs are what create them.
   defp start_parent(store) do
     driver = driver(store, @parent_source, fn "myapp:map", _params, _context -> :pending end)
-    {:ok, _run, _machine_state} = Driver.create(driver, "run_1")
+    {:ok, _execution, _machine_state} = Driver.create(driver, "execution_1")
     driver
   end
 
@@ -667,13 +702,13 @@ defmodule StatifierPersistence.DriverFanoutTest do
     }
   end
 
-  # Starts `count` children of "run_1" under one policy.
+  # Starts `count` children of "execution_1" under one policy.
   defp start_children(driver, count, opts \\ []) do
     for index <- 0..(count - 1) do
       assert :ok =
                Driver.start_child_at(
                  driver,
-                 "run_1",
+                 "execution_1",
                  effect("item-#{index}"),
                  index,
                  count,
@@ -685,10 +720,14 @@ defmodule StatifierPersistence.DriverFanoutTest do
   # Drives child `index` to its final state. Its own drive is what routes
   # the completion into the settlement, with no explicit call at all.
   defp finish_child(store, index, opts \\ []) do
-    child_run_id = Linkage.child_run_id("run_1", "call", index)
+    child_execution_id = Linkage.child_execution_id("execution_1", "call", index)
 
-    assert {:ok, _run, _machine_state} =
-             Driver.send_event(child_driver(store, opts), child_run_id, Event.external("go"))
+    assert {:ok, _execution, _machine_state} =
+             Driver.send_event(
+               child_driver(store, opts),
+               child_execution_id,
+               Event.external("go")
+             )
 
     :ok
   end
@@ -699,17 +738,17 @@ defmodule StatifierPersistence.DriverFanoutTest do
   # That is the half-written picture a sibling's settlement can observe
   # under a concurrent queue, held still.
   defp finish_child_without_answering(store, index) do
-    child_run_id = Linkage.child_run_id("run_1", "call", index)
+    child_execution_id = Linkage.child_execution_id("execution_1", "call", index)
 
     resolverless =
       driver(store, @child_source, fn _type, _params, _context -> :pending end,
         child_canceller: recording_canceller()
       )
 
-    assert {:ok, run, _machine_state} =
-             Driver.send_event(resolverless, child_run_id, Event.external("go"))
+    assert {:ok, execution, _machine_state} =
+             Driver.send_event(resolverless, child_execution_id, Event.external("go"))
 
-    assert run.status == :completed
+    assert execution.status == :completed
 
     :ok
   end
@@ -718,27 +757,31 @@ defmodule StatifierPersistence.DriverFanoutTest do
   # same shape as `finish_child/3` and nothing more: the whole point of
   # the amendment is that a chart-authored failure needs no second call.
   defp refuse_child(store, index, opts \\ []) do
-    child_run_id = Linkage.child_run_id("run_1", "call", index)
+    child_execution_id = Linkage.child_execution_id("execution_1", "call", index)
 
     assert {:ok, %{status: :failed, failure: "failed_final"}, _machine_state} =
-             Driver.send_event(child_driver(store, opts), child_run_id, Event.external("refuse"))
+             Driver.send_event(
+               child_driver(store, opts),
+               child_execution_id,
+               Event.external("refuse")
+             )
 
     :ok
   end
 
-  # A child whose run has failed: `Runs.fail/4` is the host-driven
+  # A child whose execution has failed: `Executions.fail/4` is the host-driven
   # terminal transition (ADR-0004 decision 6), and the answer that follows
   # it goes through the same public door a host without a chart resolver
   # uses.
   defp fail_child(store, index) do
-    child_run_id = Linkage.child_run_id("run_1", "call", index)
+    child_execution_id = Linkage.child_execution_id("execution_1", "call", index)
 
-    assert {:ok, _run} = Runs.fail(store, child_run_id, "child-refused")
+    assert {:ok, _execution} = Executions.fail(store, child_execution_id, "child-refused")
 
     assert :ok =
              Driver.answer_parent(
                parent_driver(store),
-               child_run_id,
+               child_execution_id,
                {:failed, reason: "child-refused"}
              )
 
@@ -772,7 +815,7 @@ defmodule StatifierPersistence.DriverFanoutTest do
 
   defp reload_parent(store) do
     {:ok, parent_machine} = Statifier.compile(@parent_source)
-    {:ok, machine_state} = Storage.load_run_position(store, "run_1", parent_machine)
+    {:ok, machine_state} = Storage.load_execution_position(store, "execution_1", parent_machine)
     machine_state
   end
 
@@ -797,8 +840,8 @@ defmodule StatifierPersistence.DriverFanoutTest do
   defp recording_canceller do
     test = self()
 
-    fn parent_run_id, invoke_id, indices ->
-      send(test, {:cancel_unstarted, parent_run_id, invoke_id, indices})
+    fn parent_execution_id, invoke_id, indices ->
+      send(test, {:cancel_unstarted, parent_execution_id, invoke_id, indices})
       :ok
     end
   end

@@ -1,6 +1,6 @@
 defmodule StatifierPersistence.Storage.EctoConformanceTest do
   @moduledoc """
-  The lib-shipped conformance suite (ADR-0003 decision 5) run against
+  The lib-shipped conformance suite (ADR-0003 decision 5) execution against
   `StatifierPersistence.Storage.Ecto` over the zero-config Default host -
   the identical suite `InMemory` passes, against real Postgres
   (ADR-0005). Isolation comes from the adapter's own `isolate/1`

@@ -3,7 +3,7 @@ defmodule StatifierPersistence.Demo.Host do
   A demo embedder driving a chart with no `Statifier.Session` process at
   all (`docs/plans/260822-sp-4an.4-restart-demo-host.md`, Phase 1).
 
-  Every effect a stepped run produces reaches the outside world through
+  Every effect a stepped execution produces reaches the outside world through
   `executor/1`'s arity-2 fun and nowhere else - reading this module top to
   bottom, nothing it does to `StatifierPersistence.Demo.Ledger` or
   `StatifierPersistence.Demo.Runtime` happens outside that one function and
@@ -17,7 +17,7 @@ defmodule StatifierPersistence.Demo.Host do
 
   A `%Host{}` carries no `Statifier.MachineState.t()` of its own between
   calls - the durable position lives in `store`, loaded fresh by
-  `StatifierPersistence.Runs` on every `submit/3`/`finish_invocation/4`/
+  `StatifierPersistence.Executions` on every `submit/3`/`finish_invocation/4`/
   `tick/2`, exactly as a stateless embedder process would. `machine` is the
   one piece of compiled, in-memory state a host does keep around: a
   `Statifier.Machine.t()` is a pure compiled artifact, not a position, and
@@ -29,16 +29,16 @@ defmodule StatifierPersistence.Demo.Host do
   alias Statifier.Evaluator.SystemVariables
   alias Statifier.Send.Routes
   alias StatifierPersistence.Demo.{Ledger, Runtime}
-  alias StatifierPersistence.{Run, Runs, Storage}
+  alias StatifierPersistence.{Execution, Executions, Storage}
 
-  @enforce_keys [:store, :ledger, :runtime, :machine, :run_id]
+  @enforce_keys [:store, :ledger, :runtime, :machine, :execution_id]
   defstruct [
     :store,
     :ledger,
     :runtime,
     :machine,
-    :run_id,
-    :run,
+    :execution_id,
+    :execution,
     invoke_handlers: %{},
     invoke_types: nil,
     tape: []
@@ -49,15 +49,15 @@ defmodule StatifierPersistence.Demo.Host do
           ledger: Ledger.t(),
           runtime: Runtime.t(),
           machine: Machine.t(),
-          run_id: Runs.run_id(),
-          run: Run.t() | nil,
+          execution_id: Executions.execution_id(),
+          execution: Execution.t() | nil,
           invoke_handlers: %{String.t() => module()},
           invoke_types: Statifier.Invoke.Types.t() | nil,
           tape: [Event.t()]
         }
 
   @doc """
-  Cold-boots from `run_id` alone: `Storage.fetch_run/2` for the content
+  Cold-boots from `execution_id` alone: `Storage.fetch_execution/2` for the content
   hash, `Storage.fetch_chart/2` for the stored blob, `Chart.from_binary/1`
   to recompile a **freshly interned** `%Machine{}` - never the pre-restart
   struct, which is what makes the identity guard on the next step exercise
@@ -65,7 +65,7 @@ defmodule StatifierPersistence.Demo.Host do
   Discoveries).
 
   Records a `{:chart_fetched, content_hash}` marker on the ledger's own
-  side-effect log every time it runs, so a test can assert that a
+  side-effect log every time it executions, so a test can assert that a
   post-restart boot really re-read the chart rather than reusing a carried
   struct.
 
@@ -75,13 +75,13 @@ defmodule StatifierPersistence.Demo.Host do
   caller re-supplies it (`%{host | invoke_handlers: ..., invoke_types: ...}`)
   before driving the rebuilt host.
   """
-  @spec boot(Storage.t(), Ledger.t(), Runtime.t(), Runs.run_id()) ::
+  @spec boot(Storage.t(), Ledger.t(), Runtime.t(), Executions.execution_id()) ::
           {:ok, t()} | {:error, term()}
-  def boot(%Storage{} = store, ledger, runtime, run_id) do
-    with {:ok, run_record} <- Storage.fetch_run(store, run_id),
-         {:ok, chart_record} <- Storage.fetch_chart(store, run_record.content_hash),
+  def boot(%Storage{} = store, ledger, runtime, execution_id) do
+    with {:ok, execution_record} <- Storage.fetch_execution(store, execution_id),
+         {:ok, chart_record} <- Storage.fetch_chart(store, execution_record.content_hash),
          {:ok, machine} <- Chart.from_binary(chart_record.chart_blob) do
-      :ok = Ledger.record_side_effect(ledger, {:chart_fetched, run_record.content_hash})
+      :ok = Ledger.record_side_effect(ledger, {:chart_fetched, execution_record.content_hash})
 
       {:ok,
        %__MODULE__{
@@ -89,25 +89,32 @@ defmodule StatifierPersistence.Demo.Host do
          ledger: ledger,
          runtime: runtime,
          machine: machine,
-         run_id: run_id,
-         run: Run.from_record(run_record)
+         execution_id: execution_id,
+         execution: Execution.from_record(execution_record)
        }}
     end
   end
 
   @doc """
-  The very-first-boot path, for a `run_id` with no stored run yet: compiles
+  The very-first-boot path, for a `execution_id` with no stored execution yet: compiles
   `source` fresh, `Storage.save_chart/3`s its `Chart.to_binary/1` blob, then
-  `Runs.create/4` through this host's own `executor/1` - so even the
+  `Executions.create/4` through this host's own `executor/1` - so even the
   creation step's effects (an onentry `<send delay>`, an onentry `<invoke>`)
   cross the same seam every later step does.
 
   `opts` accepts `invoke_handlers:` (default `%{}`) and `invoke_types:`
-  (default `nil`), the palette this run's every future step is driven with.
+  (default `nil`), the palette this execution's every future step is driven with.
   """
-  @spec start_run(Storage.t(), Ledger.t(), Runtime.t(), Runs.run_id(), String.t(), keyword()) ::
+  @spec start_execution(
+          Storage.t(),
+          Ledger.t(),
+          Runtime.t(),
+          Executions.execution_id(),
+          String.t(),
+          keyword()
+        ) ::
           {:ok, t()} | {:error, term()}
-  def start_run(%Storage{} = store, ledger, runtime, run_id, source, opts \\ [])
+  def start_execution(%Storage{} = store, ledger, runtime, execution_id, source, opts \\ [])
       when is_binary(source) do
     invoke_handlers = Keyword.get(opts, :invoke_handlers, %{})
     invoke_types = Keyword.get(opts, :invoke_types)
@@ -120,33 +127,33 @@ defmodule StatifierPersistence.Demo.Host do
         ledger: ledger,
         runtime: runtime,
         machine: machine,
-        run_id: run_id,
-        run: nil,
+        execution_id: execution_id,
+        execution: nil,
         invoke_handlers: invoke_handlers,
         invoke_types: invoke_types,
         tape: []
       }
 
-      case Runs.create(store, run_id, machine,
+      case Executions.create(store, execution_id, machine,
              executor: executor(host),
              invoke_types: invoke_types
            ) do
-        {:ok, run, _machine_state} -> {:ok, %{host | run: run}}
+        {:ok, execution, _machine_state} -> {:ok, %{host | execution: execution}}
         {:error, _reason} = error -> error
       end
     end
   end
 
   @doc """
-  The seam: an arity-2 fun `StatifierPersistence.Runs` calls once per
+  The seam: an arity-2 fun `StatifierPersistence.Executions` calls once per
   effect. Every call is recorded onto the ledger's executor call log first,
   unconditionally, then dispatched per the effect table below - so the log
   is complete even for an effect the dispatch itself goes on to fail.
 
   | effect | host action |
   |---|---|
-  | `{:send_delayed, _}` | `Ledger.arm_timer/3` (durable, idempotent on `{run_id, ordinal}`), then `Runtime.arm/3` |
-  | `{:cancel, _}` | `Ledger.cancel_timer/3` by `{run_id, send_id}`, then `Runtime.disarm/2` for each row it removed |
+  | `{:send_delayed, _}` | `Ledger.arm_timer/3` (durable, idempotent on `{execution_id, ordinal}`), then `Runtime.arm/3` |
+  | `{:cancel, _}` | `Ledger.cancel_timer/3` by `{execution_id, send_id}`, then `Runtime.disarm/2` for each row it removed |
   | `{:invoke, _}` | look `type` up in `invoke_handlers`; `handler.start/2`; perform the instructions (`Ledger.record_invocation/3` + `Runtime.start_worker/3`) |
   | `{:cancel_invoke, _}` | the ledger's own recorded `type` for `invoke_id` finds the handler; `handler.cancel/2`; perform (`Ledger.close_invocation/3` + `Runtime.stop_worker/2`) |
   | `{:send, _}` | `Ledger.record_side_effect/2` only - nothing external to reach in a demo |
@@ -177,14 +184,14 @@ defmodule StatifierPersistence.Demo.Host do
       ordinal: payload.ordinal
     }
 
-    :ok = Ledger.arm_timer(host.ledger, host.run_id, row)
+    :ok = Ledger.arm_timer(host.ledger, host.execution_id, row)
     :ok = Runtime.arm(host.runtime, payload.ordinal, due_at_ms)
     :ok
   end
 
   defp handle_effect(host, {:cancel, %Cancel{send_id: send_id}}) do
     host.ledger
-    |> Ledger.cancel_timer(host.run_id, send_id)
+    |> Ledger.cancel_timer(host.execution_id, send_id)
     |> Enum.each(&Runtime.disarm(host.runtime, &1))
 
     :ok
@@ -225,7 +232,7 @@ defmodule StatifierPersistence.Demo.Host do
   @spec handler_ctx(t()) :: Statifier.Invoke.Handler.ctx()
   defp handler_ctx(host) do
     %{
-      session_id: host.run_id,
+      session_id: host.execution_id,
       invoke_types: host.invoke_types,
       invoke_handlers: host.invoke_handlers
     }
@@ -236,14 +243,14 @@ defmodule StatifierPersistence.Demo.Host do
   @spec invocation_type(t(), String.t()) :: String.t() | nil
   defp invocation_type(host, invoke_id) do
     host.ledger
-    |> Ledger.open_invocations(host.run_id)
+    |> Ledger.open_invocations(host.execution_id)
     |> Enum.find_value(fn row -> row.invoke_id == invoke_id and row.type end)
   end
 
   @spec perform_instruction(t(), String.t() | nil, Statifier.Invoke.Handler.instruction()) :: :ok
   defp perform_instruction(host, type, {:handler, _module, {:start, invoke_id, params}}) do
     :ok =
-      Ledger.record_invocation(host.ledger, host.run_id, %{
+      Ledger.record_invocation(host.ledger, host.execution_id, %{
         invoke_id: invoke_id,
         type: type,
         params: params
@@ -254,14 +261,14 @@ defmodule StatifierPersistence.Demo.Host do
   end
 
   defp perform_instruction(host, _type, {:handler, _module, {:cancel, invoke_id}}) do
-    :ok = Ledger.close_invocation(host.ledger, host.run_id, invoke_id)
+    :ok = Ledger.close_invocation(host.ledger, host.execution_id, invoke_id)
     Runtime.stop_worker(host.runtime, invoke_id)
   end
 
   @doc """
   Appends `Event.external(event_name, event_opts)` to `tape`, then
-  `Runs.step/5`. Handles all three result arms: `{:discarded, run}` is
-  recorded onto `run`, not raised - an event delivered to a run that went
+  `Executions.step/5`. Handles all three result arms: `{:discarded, execution}` is
+  recorded onto `execution`, not raised - an event delivered to an execution that went
   terminal on a prior step is exactly what a durable host must tolerate.
   """
   @spec submit(t(), String.t(), keyword()) :: t()
@@ -273,8 +280,8 @@ defmodule StatifierPersistence.Demo.Host do
   Builds the `done.invoke.<invoke_id>` event in the exact shape
   `deps/statifier/lib/statifier/session.ex`'s own construction site builds
   it (the shape `docs/extending.md` documents for a process-less host to
-  match) and submits it. `run_id` stands in for `session_id` - this host has
-  no session, only a run.
+  match) and submits it. `execution_id` stands in for `session_id` - this host has
+  no session, only an execution.
   """
   @spec finish_invocation(t(), String.t(), term(), keyword()) :: t()
   def finish_invocation(%__MODULE__{} = host, invoke_id, donedata, _opts \\ []) do
@@ -282,7 +289,7 @@ defmodule StatifierPersistence.Demo.Host do
       Event.external("done.invoke." <> invoke_id,
         data: donedata,
         invokeid: invoke_id,
-        origin: SystemVariables.scxml_location(host.run_id),
+        origin: SystemVariables.scxml_location(host.execution_id),
         origintype: SystemVariables.scxml_event_processor()
       )
 
@@ -293,9 +300,9 @@ defmodule StatifierPersistence.Demo.Host do
   Advances the mock clock by `delta_ms`. For each ordinal `Runtime.due/2`
   reports, loads that timer's row from the ledger, submits its event, and
   drops the durable row - after the step returns, so a step that discards
-  (a terminal run) still drops the row without having driven the chart at
-  all (`deps/statifier/docs/durable-timers.md:286`'s liveness rule; `Runs`
-  itself checks run status before any position decode).
+  (a terminal execution) still drops the row without having driven the chart at
+  all (`deps/statifier/docs/durable-timers.md:286`'s liveness rule; `Executions`
+  itself checks execution status before any position decode).
   """
   @spec tick(t(), non_neg_integer()) :: t()
   def tick(%__MODULE__{} = host, delta_ms) do
@@ -312,14 +319,14 @@ defmodule StatifierPersistence.Demo.Host do
         row -> submit_event(host, Event.external(row.event, sendid: row.send_id, data: row.data))
       end
 
-    :ok = Ledger.drop_timer(host.ledger, host.run_id, ordinal)
+    :ok = Ledger.drop_timer(host.ledger, host.execution_id, ordinal)
     host
   end
 
   @spec timer_row(t(), Runtime.ordinal()) :: Ledger.timer_row() | nil
   defp timer_row(host, ordinal) do
     host.ledger
-    |> Ledger.open_timers(host.run_id)
+    |> Ledger.open_timers(host.execution_id)
     |> Enum.find(&(&1.ordinal == ordinal))
   end
 
@@ -327,13 +334,13 @@ defmodule StatifierPersistence.Demo.Host do
   defp submit_event(host, event) do
     host = %{host | tape: host.tape ++ [event]}
 
-    case Runs.step(host.store, host.run_id, host.machine, event,
+    case Executions.step(host.store, host.execution_id, host.machine, event,
            executor: executor(host),
            invoke_types: host.invoke_types,
            routes: Routes.new()
          ) do
-      {:ok, run, _machine_state} -> %{host | run: run}
-      {:discarded, run} -> %{host | run: run}
+      {:ok, execution, _machine_state} -> %{host | execution: execution}
+      {:discarded, execution} -> %{host | execution: execution}
     end
   end
 
@@ -343,13 +350,13 @@ defmodule StatifierPersistence.Demo.Host do
   no event - it only repopulates `runtime`/`ledger` state the position
   never carried:
 
-  1. **Timers.** Every `Ledger.open_timers/2` row for this run is
+  1. **Timers.** Every `Ledger.open_timers/2` row for this execution is
      `Runtime.arm/3`ed again, unconditionally - the engine is not
      consulted, because nothing about a pending delayed send survives the
      position (the plan's Key Discoveries).
   2. **Invocations.** For each `{_key, invoke_id}` the durable position's
      `active_invocations` still names *and* the ledger still shows `:open`,
-     `handler.start/2` is re-run and its instructions performed - the
+     `handler.start/2` is re-execution and its instructions performed - the
      engine is the liveness authority (which ids are still active), the
      ledger is the payload source (the `type`/`params` that id started
      with); an id either side has dropped is left alone. Re-running
@@ -363,13 +370,13 @@ defmodule StatifierPersistence.Demo.Host do
   @spec recover(t()) :: t()
   def recover(%__MODULE__{} = host) do
     host.ledger
-    |> Ledger.open_timers(host.run_id)
+    |> Ledger.open_timers(host.execution_id)
     |> Enum.each(fn row -> Runtime.arm(host.runtime, row.ordinal, row.due_at_ms) end)
 
     {:ok, machine_state} = position(host)
 
     open_invoke_ids =
-      host.ledger |> Ledger.open_invocations(host.run_id) |> MapSet.new(& &1.invoke_id)
+      host.ledger |> Ledger.open_invocations(host.execution_id) |> MapSet.new(& &1.invoke_id)
 
     machine_state.active_invocations
     |> Map.values()
@@ -413,12 +420,12 @@ defmodule StatifierPersistence.Demo.Host do
   @spec invocation_params(t(), String.t()) :: term()
   defp invocation_params(host, invoke_id) do
     host.ledger
-    |> Ledger.open_invocations(host.run_id)
+    |> Ledger.open_invocations(host.execution_id)
     |> Enum.find_value(fn row -> row.invoke_id == invoke_id and row.params end)
   end
 
   @doc """
-  Simulates the node coming back up knowing only `run_id`: `Runtime.stop/1`
+  Simulates the node coming back up knowing only `execution_id`: `Runtime.stop/1`
   the old (dead-by-assumption) runtime, discard the old `%Host{}`, start a
   fresh `Runtime`, `boot/4`, `recover/1`. Returns a new struct rather than
   mutating one, so a test that keeps using the pre-restart binding is a
@@ -433,7 +440,7 @@ defmodule StatifierPersistence.Demo.Host do
     :ok = Runtime.stop(host.runtime)
     {:ok, runtime} = Runtime.start_link([])
 
-    with {:ok, rebooted} <- boot(host.store, host.ledger, runtime, host.run_id) do
+    with {:ok, rebooted} <- boot(host.store, host.ledger, runtime, host.execution_id) do
       rebooted = %{
         rebooted
         | invoke_handlers: host.invoke_handlers,
@@ -444,16 +451,16 @@ defmodule StatifierPersistence.Demo.Host do
     end
   end
 
-  @doc "The last-observed run record - `nil` before `start_run/6`/`boot/4`."
-  @spec run(t()) :: Run.t() | nil
-  def run(%__MODULE__{run: run}), do: run
+  @doc "The last-observed execution record - `nil` before `start_execution/6`/`boot/4`."
+  @spec execution(t()) :: Execution.t() | nil
+  def execution(%__MODULE__{execution: execution}), do: execution
 
   @doc "The current durable position, reloaded from `store` (never cached on the struct)."
   @spec position(t()) :: {:ok, MachineState.t()} | {:error, term()}
   def position(%__MODULE__{} = host),
-    do: Storage.load_run_position(host.store, host.run_id, host.machine)
+    do: Storage.load_execution_position(host.store, host.execution_id, host.machine)
 
-  @doc "The active leaf states as sorted string ids - `runs_test.exs`'s `active_ids/1` shape, off the durable position."
+  @doc "The active leaf states as sorted string ids - `executions_test.exs`'s `active_ids/1` shape, off the durable position."
   @spec config(t()) :: [String.t()]
   def config(%__MODULE__{} = host) do
     {:ok, machine_state} = position(host)

@@ -223,16 +223,16 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
       assert TestRepo.get!(KxUxid.Position, position.id).session_id == "sess-kx-uxid"
 
       run =
-        TestRepo.insert!(%KxUxid.Run{
-          run_id: "run-kx-uxid",
+        TestRepo.insert!(%KxUxid.Execution{
+          execution_id: "run-kx-uxid",
           status: "running",
           content_hash: "sha256:kx-uxid-chart",
           identity_blob: <<1, 2, 3>>
         })
 
-      assert String.starts_with?(run.id, "run_")
-      fetched_run = TestRepo.get!(KxUxid.Run, run.id)
-      assert fetched_run.run_id == "run-kx-uxid"
+      assert String.starts_with?(run.id, "exec_")
+      fetched_run = TestRepo.get!(KxUxid.Execution, run.id)
+      assert fetched_run.execution_id == "run-kx-uxid"
       assert fetched_run.position_blob == nil
       assert fetched_run.failure == nil
       assert fetched_run.session_id == nil
@@ -253,14 +253,14 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
       assert TestRepo.get!(KxUuid.Chart, chart.id).content_hash == "sha256:kx-uuid-chart"
 
       run =
-        TestRepo.insert!(%KxUuid.Run{
-          run_id: "run-kx-uuid",
+        TestRepo.insert!(%KxUuid.Execution{
+          execution_id: "run-kx-uuid",
           status: "completed",
           content_hash: "sha256:kx-uuid-chart",
           identity_blob: <<9>>
         })
 
-      assert TestRepo.get!(KxUuid.Run, run.id).run_id == "run-kx-uuid"
+      assert TestRepo.get!(KxUuid.Execution, run.id).execution_id == "run-kx-uuid"
     end
 
     # sabotage: hardcoded V01's pk_type to :text -> insert red (no db-assigned key)
@@ -401,10 +401,10 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     # the duplicate insert below succeeded instead of raising, and red on
     # the index-shape case above. Verified red, reverted.
     test "a duplicate (run_id, seq) insert violates the unique index" do
-      TestRepo.insert!(%KxUxid.Input{run_id: "run-mig-input-dup", seq: 0, door: "step"})
+      TestRepo.insert!(%KxUxid.Input{execution_id: "run-mig-input-dup", seq: 0, door: "step"})
 
       assert_raise Ecto.ConstraintError, ~r/run_id_seq/, fn ->
-        TestRepo.insert!(%KxUxid.Input{run_id: "run-mig-input-dup", seq: 0, door: "step"})
+        TestRepo.insert!(%KxUxid.Input{execution_id: "run-mig-input-dup", seq: 0, door: "step"})
       end
     end
 
@@ -458,16 +458,16 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
 
     # sabotage: removed V01's runs unique_index -> duplicate insert red
     test "a duplicate run_id insert violates the runs unique index" do
-      TestRepo.insert!(%KxUuid.Run{
-        run_id: "run-kx-dup",
+      TestRepo.insert!(%KxUuid.Execution{
+        execution_id: "run-kx-dup",
         status: "running",
         content_hash: "sha256:kx-dup",
         identity_blob: <<1>>
       })
 
       assert_raise Ecto.ConstraintError, ~r/run_id/, fn ->
-        TestRepo.insert!(%KxUuid.Run{
-          run_id: "run-kx-dup",
+        TestRepo.insert!(%KxUuid.Execution{
+          execution_id: "run-kx-dup",
           status: "failed",
           content_hash: "sha256:kx-dup",
           identity_blob: <<1>>

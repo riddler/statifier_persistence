@@ -3,7 +3,7 @@ defmodule StatifierPersistence.Storage do
   The guarded entry point from a storage adapter to a
   `Statifier.MachineState.t()`.
 
-  Every load runs through `load_position/3` or `load_run_position/3`, and
+  Every load executions through `load_position/3` or `load_execution_position/3`, and
   every load is checked against the exact chart revision that produced the
   stored position (ADR-0003 decision 2). No adapter callback ever holds
   both the stored identity and a caller-supplied `Statifier.Machine.t()` at
@@ -13,7 +13,7 @@ defmodule StatifierPersistence.Storage do
   position blob.
 
   Every writer taking a machine or machine state - `save_chart/3`,
-  `save_position/3`, `insert_run/5`, `update_run/5` - derives a chart's
+  `save_position/3`, `insert_execution/5`, `update_execution/5` - derives a chart's
   `content_hash` and `identity_blob` from `Machine.identity/1` on the
   machine it is given - never from a caller-supplied value - and refuses an
   unidentified machine with `{:error, :unidentified_chart}` rather than
@@ -28,8 +28,8 @@ defmodule StatifierPersistence.Storage do
 
   A multi-tenant host therefore tenant-qualifies its own per-chart rows, in
   its own tables, rather than expecting this package to do it. The package
-  stores nothing per tenant; a run's opaque `metadata` map (ADR-0006) is
-  where a host tags a run with the scope it already keys its own tables by,
+  stores nothing per tenant; an execution's opaque `metadata` map (ADR-0006) is
+  where a host tags an execution with the scope it already keys its own tables by,
   and any narrower scoping stays the host's.
 
   Folding a namespace into the hash would change what a chart's identity
@@ -68,11 +68,11 @@ defmodule StatifierPersistence.Storage do
           Adapter.error()
           | :not_a_statifier_blob
           | :unidentified_chart
-          | :run_position_missing
+          | :execution_position_missing
           | :metadata_unsupported
           | :child_listing_unsupported
-          | :run_outcome_unsupported
-          | :run_states_unsupported
+          | :execution_outcome_unsupported
+          | :execution_states_unsupported
           | {:unsupported_format_version, term()}
           | {:identity_mismatch, Identity.t(), Identity.t() | nil}
 
@@ -82,36 +82,36 @@ defmodule StatifierPersistence.Storage do
   decoded back into the `%Statifier.Event{}` the interpreter saw.
 
   A `nil` `event` is the closed marker the cap wrote (decision 6) and
-  nothing else. `door` is one of `t:StatifierPersistence.Runs.entry/0`'s
+  nothing else. `door` is one of `t:StatifierPersistence.Executions.entry/0`'s
   seven atoms, as its string - the key decision 8's replay mapping is
   written against.
   """
   @type input :: %{
-          run_id: Adapter.run_id(),
+          execution_id: Adapter.execution_id(),
           seq: Adapter.seq(),
           door: Adapter.door(),
           event: Event.t() | nil
         }
 
   @typedoc """
-  Options the run writers (`insert_run/5`, `update_run/5`) accept:
+  Options the execution writers (`insert_execution/5`, `update_execution/5`) accept:
 
-  - `failure:` - the short reason stored on a `:failed` run; defaults to
+  - `failure:` - the short reason stored on a `:failed` execution; defaults to
     `nil`.
   - `position:` - `:persist` (the default) encodes the given machine state
-    with `Position.to_binary/1` and stores it as the run's `position_blob`;
+    with `Position.to_binary/1` and stores it as the execution's `position_blob`;
     `:skip` stores `nil` on insert and carries the currently stored blob
     forward verbatim on update.
-  - `metadata:` - `insert_run/5` only: the optional opaque map of host
-    identities stored beside the run (ADR-0006 decision 1), defaulting to
-    `%{}`. It is write-once - `update_run/5` and `update_run_status/4`
+  - `metadata:` - `insert_execution/5` only: the optional opaque map of host
+    identities stored beside the execution (ADR-0006 decision 1), defaulting to
+    `%{}`. It is write-once - `update_execution/5` and `update_execution_status/4`
     carry the stored map forward and accept no `metadata:` of their own.
-  - `outcome_blob:` - `update_run_status/4` only: the run's own opaque
+  - `outcome_blob:` - `update_execution_status/4` only: the execution's own opaque
     answer, written once when it reaches a terminal status. Defaults to
     `nil`, which carries the stored value forward rather than clearing it,
     so every other writer leaves an answer already recorded alone.
   """
-  @type run_write_opt ::
+  @type execution_write_opt ::
           {:failure, String.t() | nil}
           | {:position, :persist | :skip}
           | {:metadata, Adapter.metadata()}
@@ -211,7 +211,7 @@ defmodule StatifierPersistence.Storage do
   `Statifier.MachineState.t()` walking `machine`, refusing a chart-revision
   mismatch instead of silently resuming the wrong configuration.
 
-  Runs in this order, and the order is the contract:
+  Executions in this order, and the order is the contract:
 
   1. `fetch_position/2` on the adapter. `:position_not_found` and
      `{:adapter, term()}` pass straight through.
@@ -264,18 +264,18 @@ defmodule StatifierPersistence.Storage do
   end
 
   @doc """
-  Inserts a run record for `run_id`, keyed by the content hash and identity
+  Inserts an execution record for `execution_id`, keyed by the content hash and identity
   envelope of `machine_state.machine`'s own `Machine.identity/1` - never a
   caller-supplied hash - and refusing an unidentified machine with
   `{:error, :unidentified_chart}` before calling the adapter.
 
-  Writers always take a `MachineState`: even a run failed at creation has
+  Writers always take a `MachineState`: even an execution failed at creation has
   one, because `Statifier.Interpreter.initialize/2` cannot fail (ADR-0004
   decision 1). Under `position: :persist` (the default) the state is
-  encoded with `Position.to_binary/1` and stored as the run's
+  encoded with `Position.to_binary/1` and stored as the execution's
   `position_blob`; under `position: :skip` the blob is stored `nil` - the
-  arm for a run with no quiescent position to store. Uniqueness comes from
-  the adapter's `insert_run/2` `:run_exists` refusal, not a pre-check here.
+  arm for an execution with no quiescent position to store. Uniqueness comes from
+  the adapter's `insert_execution/2` `:execution_exists` refusal, not a pre-check here.
 
   `metadata:` is the optional opaque map of host identities ADR-0006
   decision 1 grants, defaulting to `%{}`. Create is the only place it is
@@ -294,142 +294,142 @@ defmodule StatifierPersistence.Storage do
   at rest in the clear. Nothing in this package can enforce that - the map
   is opaque - so the contract states it and the host keeps it.
   """
-  @spec insert_run(
+  @spec insert_execution(
           store :: t(),
-          run_id :: Adapter.run_id(),
+          execution_id :: Adapter.execution_id(),
           machine_state :: MachineState.t(),
-          status :: Adapter.run_status(),
-          opts :: [run_write_opt()]
+          status :: Adapter.execution_status(),
+          opts :: [execution_write_opt()]
         ) :: :ok | {:error, error()}
-  def insert_run(
+  def insert_execution(
         %__MODULE__{} = store,
-        run_id,
+        execution_id,
         %MachineState{} = machine_state,
         status,
         opts \\ []
       ) do
     case Machine.identity(machine_state.machine) do
       nil ->
-        refuse_unidentified(:run, run_id: run_id)
+        refuse_unidentified(:execution, execution_id: execution_id)
 
       identity ->
         metadata = metadata_opt!(opts)
-        keys = [run_id: run_id, content_hash: identity.content_hash]
+        keys = [execution_id: execution_id, content_hash: identity.content_hash]
 
         with :ok <- check_metadata_supported(store, metadata),
              {:ok, position_blob} <- insert_position_blob(machine_state, position_opt(opts)) do
-          record = run_record(run_id, status, identity, position_blob, metadata, opts)
-          write(store, :insert_run, keys, record)
+          record = execution_record(execution_id, status, identity, position_blob, metadata, opts)
+          write(store, :insert_execution, keys, record)
         end
     end
   end
 
   @doc """
-  Overwrites the run stored under `run_id` with a full record derived the
-  same way `insert_run/5` derives one: identity always from
+  Overwrites the execution stored under `execution_id` with a full record derived the
+  same way `insert_execution/5` derives one: identity always from
   `machine_state.machine`'s own `Machine.identity/1`, refusal of an
   unidentified machine, `position_blob` encoded under `position: :persist`
   (the default).
 
   Under `position: :skip` the currently stored `position_blob` is carried
-  forward verbatim: because the adapter's `update_run/2` is a full-record
+  forward verbatim: because the adapter's `update_execution/2` is a full-record
   overwrite, this function fetches the current record and reuses its blob
   bytes unchanged, so a status-only update (a failed step, an abandonment)
-  never touches the stored position. Returns `{:error, :run_not_found}`
-  when no run exists for the id.
+  never touches the stored position. Returns `{:error, :execution_not_found}`
+  when no execution exists for the id.
 
-  A run's `metadata` is write-once (ADR-0006 decision 1 grants a map at
+  An execution's `metadata` is write-once (ADR-0006 decision 1 grants a map at
   create and no way to change it), so this function accepts no `metadata:`
   option and passes `%{}` in the record; the adapter carries the stored map
   forward verbatim, as
-  `c:StatifierPersistence.Storage.Adapter.update_run/2` records.
+  `c:StatifierPersistence.Storage.Adapter.update_execution/2` records.
   """
-  @spec update_run(
+  @spec update_execution(
           store :: t(),
-          run_id :: Adapter.run_id(),
+          execution_id :: Adapter.execution_id(),
           machine_state :: MachineState.t(),
-          status :: Adapter.run_status(),
-          opts :: [run_write_opt()]
+          status :: Adapter.execution_status(),
+          opts :: [execution_write_opt()]
         ) :: :ok | {:error, error()}
-  def update_run(
+  def update_execution(
         %__MODULE__{} = store,
-        run_id,
+        execution_id,
         %MachineState{} = machine_state,
         status,
         opts \\ []
       ) do
     case Machine.identity(machine_state.machine) do
       nil ->
-        refuse_unidentified(:run, run_id: run_id)
+        refuse_unidentified(:execution, execution_id: execution_id)
 
       identity ->
-        keys = [run_id: run_id, content_hash: identity.content_hash]
+        keys = [execution_id: execution_id, content_hash: identity.content_hash]
 
         with {:ok, position_blob} <-
-               update_position_blob(store, run_id, machine_state, position_opt(opts)) do
-          record = run_record(run_id, status, identity, position_blob, %{}, opts)
-          write(store, :update_run, keys, record)
+               update_position_blob(store, execution_id, machine_state, position_opt(opts)) do
+          record = execution_record(execution_id, status, identity, position_blob, %{}, opts)
+          write(store, :update_execution, keys, record)
         end
     end
   end
 
   @doc """
-  Overwrites only the status and failure of the run stored under `run_id`,
+  Overwrites only the status and failure of the execution stored under `execution_id`,
   carrying every other stored field - both blobs included - forward
   verbatim.
 
   This is the writer for a host-driven terminal transition that has no
-  `MachineState` in hand (`StatifierPersistence.Runs.fail/4`, ADR-0004
+  `MachineState` in hand (`StatifierPersistence.Executions.fail/4`, ADR-0004
   decision 6): nothing is derived, decoded, or re-encoded, so the identity
   guard is preserved by construction - the stored `identity_blob` and
   `position_blob` bytes never change. `opts` accepts `failure:` and
   `outcome_blob:` (both default `nil`). Returns
-  `{:error, :run_not_found}` when no run exists for the id.
+  `{:error, :execution_not_found}` when no execution exists for the id.
 
-  `outcome_blob:` is the one writer of a run's own answer, and this is the
-  right writer for it: an answer is recorded exactly when a run reaches a
+  `outcome_blob:` is the one writer of an execution's own answer, and this is the
+  right writer for it: an answer is recorded exactly when an execution reaches a
   terminal status, which is the transition this function exists for, and
   nothing else about the record is touched. A `nil` (the default) carries
   the stored blob forward, so a status-only update never erases an answer.
   """
-  @spec update_run_status(
+  @spec update_execution_status(
           store :: t(),
-          run_id :: Adapter.run_id(),
-          status :: Adapter.run_status(),
-          opts :: [run_write_opt()]
+          execution_id :: Adapter.execution_id(),
+          status :: Adapter.execution_status(),
+          opts :: [execution_write_opt()]
         ) :: :ok | {:error, error()}
-  def update_run_status(%__MODULE__{} = store, run_id, status, opts \\ []) do
-    with {:ok, run_record} <- fetch_run(store, run_id) do
+  def update_execution_status(%__MODULE__{} = store, execution_id, status, opts \\ []) do
+    with {:ok, execution_record} <- fetch_execution(store, execution_id) do
       updated = %{
-        run_record
+        execution_record
         | status: status,
           failure: Keyword.get(opts, :failure),
           outcome_blob: Keyword.get(opts, :outcome_blob)
       }
 
-      keys = [run_id: run_id, content_hash: run_record.content_hash]
-      write(store, :update_run, keys, updated)
+      keys = [execution_id: execution_id, content_hash: execution_record.content_hash]
+      write(store, :update_execution, keys, updated)
     end
   end
 
   @doc """
-  Fetches the run record stored under `run_id`.
+  Fetches the execution record stored under `execution_id`.
   """
-  @spec fetch_run(store :: t(), run_id :: Adapter.run_id()) ::
-          {:ok, Adapter.run_record()} | {:error, error()}
-  def fetch_run(%__MODULE__{} = store, run_id) do
-    adapter_call(store.adapter, :fetch_run, [run_id: run_id], fn ->
-      store.adapter.fetch_run(store.opts, run_id)
+  @spec fetch_execution(store :: t(), execution_id :: Adapter.execution_id()) ::
+          {:ok, Adapter.execution_record()} | {:error, error()}
+  def fetch_execution(%__MODULE__{} = store, execution_id) do
+    adapter_call(store.adapter, :fetch_execution, [execution_id: execution_id], fn ->
+      store.adapter.fetch_execution(store.opts, execution_id)
     end)
   end
 
   @doc """
-  Whether `store`'s adapter can store a run's opaque `metadata` map
+  Whether `store`'s adapter can store an execution's opaque `metadata` map
   (ADR-0006 decision 3).
 
   True when the adapter exports the optional
   `c:StatifierPersistence.Storage.Adapter.supports_metadata?/1` and it
-  answers `true` for this handle. This is the predicate `insert_run/5`'s
+  answers `true` for this handle. This is the predicate `insert_execution/5`'s
   refusal-at-open consults, exposed because a host choosing between an
   adapter's scope query and its own side table wants the answer before it
   writes, and because the conformance suite branches on it.
@@ -444,13 +444,13 @@ defmodule StatifierPersistence.Storage do
   end
 
   @doc """
-  Whether `store`'s adapter can list runs by a metadata match (ADR-0008
+  Whether `store`'s adapter can list executions by a metadata match (ADR-0008
   decision 5).
 
   True when the adapter exports the optional
-  `c:StatifierPersistence.Storage.Adapter.list_runs_by_metadata/2` **and**
+  `c:StatifierPersistence.Storage.Adapter.list_executions_by_metadata/2` **and**
   `metadata_supported?/1` holds for this store. This is the predicate
-  `list_runs_by_metadata/2` consults for its own refusal-at-open, exposed
+  `list_executions_by_metadata/2` consults for its own refusal-at-open, exposed
   because a caller with work to do before the query - such as
   `StatifierPersistence.Driver` refusing to start a child it could never
   enumerate for cancellation - wants the answer before it acts.
@@ -467,27 +467,27 @@ defmodule StatifierPersistence.Storage do
   @spec child_listing_supported?(store :: t()) :: boolean()
   def child_listing_supported?(%__MODULE__{} = store) do
     Code.ensure_loaded?(store.adapter) and
-      function_exported?(store.adapter, :list_runs_by_metadata, 2) and
+      function_exported?(store.adapter, :list_executions_by_metadata, 2) and
       metadata_supported?(store)
   end
 
   @doc """
-  Whether `store`'s adapter can store a run's own `outcome_blob` (sp-t57,
+  Whether `store`'s adapter can store an execution's own `outcome_blob` (sp-t57,
   ruling C3).
 
   True when the adapter exports the optional
-  `c:StatifierPersistence.Storage.Adapter.supports_run_outcome?/1` and it
+  `c:StatifierPersistence.Storage.Adapter.supports_execution_outcome?/1` and it
   answers `true` - the same shape `metadata_supported?/1` checks. This is
   half of `StatifierPersistence.Driver.start_child_at/6`'s refusal at
   open: a fan-out child whose answer could never be read back could never
   settle its invocation.
   """
-  @spec run_outcome_supported?(store :: t()) :: boolean()
-  def run_outcome_supported?(%__MODULE__{} = store) do
+  @spec execution_outcome_supported?(store :: t()) :: boolean()
+  def execution_outcome_supported?(%__MODULE__{} = store) do
     Code.ensure_loaded?(store.adapter) and
-      function_exported?(store.adapter, :supports_run_outcome?, 1) and
-      adapter_call(store.adapter, :supports_run_outcome?, [], fn ->
-        store.adapter.supports_run_outcome?(store.opts)
+      function_exported?(store.adapter, :supports_execution_outcome?, 1) and
+      adapter_call(store.adapter, :supports_execution_outcome?, [], fn ->
+        store.adapter.supports_execution_outcome?(store.opts)
       end) == true
   end
 
@@ -496,27 +496,27 @@ defmodule StatifierPersistence.Storage do
   (sp-t57, ruling C5).
 
   True when the adapter exports the optional
-  `c:StatifierPersistence.Storage.Adapter.list_run_states_by_metadata/2`
+  `c:StatifierPersistence.Storage.Adapter.list_execution_states_by_metadata/2`
   and `metadata_supported?/1` holds - the same pair
   `child_listing_supported?/1` checks, and for the same reason: the
   projection is the same metadata match, narrowed to three columns. The
   other half of `start_child_at/6`'s refusal at open.
   """
-  @spec run_states_supported?(store :: t()) :: boolean()
-  def run_states_supported?(%__MODULE__{} = store) do
+  @spec execution_states_supported?(store :: t()) :: boolean()
+  def execution_states_supported?(%__MODULE__{} = store) do
     Code.ensure_loaded?(store.adapter) and
-      function_exported?(store.adapter, :list_run_states_by_metadata, 2) and
+      function_exported?(store.adapter, :list_execution_states_by_metadata, 2) and
       metadata_supported?(store)
   end
 
   @doc """
   The indexed status projection over the same match
-  `list_runs_by_metadata/2` takes (sp-t57, ruling C5).
+  `list_executions_by_metadata/2` takes (sp-t57, ruling C5).
 
   Delegates to the adapter's optional
-  `c:StatifierPersistence.Storage.Adapter.list_run_states_by_metadata/2`
-  when `run_states_supported?/1` is true; returns
-  `{:error, :run_states_unsupported}` otherwise, without calling the
+  `c:StatifierPersistence.Storage.Adapter.list_execution_states_by_metadata/2`
+  when `execution_states_supported?/1` is true; returns
+  `{:error, :execution_states_unsupported}` otherwise, without calling the
   adapter at all.
 
   This is the read a fan-out's settlement uses to ask whether every child
@@ -524,34 +524,34 @@ defmodule StatifierPersistence.Storage do
   question does not cost N whole records - blobs included - once per
   child.
   """
-  @spec list_run_states_by_metadata(store :: t(), metadata :: Adapter.metadata()) ::
-          {:ok, [Adapter.run_state()]} | {:error, error()}
-  def list_run_states_by_metadata(%__MODULE__{} = store, metadata) do
-    if run_states_supported?(store) do
-      adapter_call(store.adapter, :list_run_states_by_metadata, [], fn ->
-        store.adapter.list_run_states_by_metadata(store.opts, metadata)
+  @spec list_execution_states_by_metadata(store :: t(), metadata :: Adapter.metadata()) ::
+          {:ok, [Adapter.execution_state()]} | {:error, error()}
+  def list_execution_states_by_metadata(%__MODULE__{} = store, metadata) do
+    if execution_states_supported?(store) do
+      adapter_call(store.adapter, :list_execution_states_by_metadata, [], fn ->
+        store.adapter.list_execution_states_by_metadata(store.opts, metadata)
       end)
     else
-      {:error, :run_states_unsupported}
+      {:error, :execution_states_unsupported}
     end
   end
 
   @doc """
-  Lists the runs whose stored `metadata` contains every key/value pair in
+  Lists the executions whose stored `metadata` contains every key/value pair in
   `metadata` (ADR-0008 decision 5).
 
   Delegates to the adapter's optional
-  `c:StatifierPersistence.Storage.Adapter.list_runs_by_metadata/2` when
+  `c:StatifierPersistence.Storage.Adapter.list_executions_by_metadata/2` when
   `child_listing_supported?/1` is true; returns
   `{:error, :child_listing_unsupported}` for an adapter that does not
   export it, without calling the adapter at all.
   """
-  @spec list_runs_by_metadata(store :: t(), metadata :: Adapter.metadata()) ::
-          {:ok, [Adapter.run_record()]} | {:error, error()}
-  def list_runs_by_metadata(%__MODULE__{} = store, metadata) do
+  @spec list_executions_by_metadata(store :: t(), metadata :: Adapter.metadata()) ::
+          {:ok, [Adapter.execution_record()]} | {:error, error()}
+  def list_executions_by_metadata(%__MODULE__{} = store, metadata) do
     if child_listing_supported?(store) do
-      adapter_call(store.adapter, :list_runs_by_metadata, [], fn ->
-        store.adapter.list_runs_by_metadata(store.opts, metadata)
+      adapter_call(store.adapter, :list_executions_by_metadata, [], fn ->
+        store.adapter.list_executions_by_metadata(store.opts, metadata)
       end)
     else
       {:error, :child_listing_unsupported}
@@ -559,14 +559,14 @@ defmodule StatifierPersistence.Storage do
   end
 
   @doc """
-  Whether `store`'s adapter keeps a run's input log (ADR-0010 decision 1).
+  Whether `store`'s adapter keeps an execution's input log (ADR-0010 decision 1).
 
   True when the adapter exports the optional
   `c:StatifierPersistence.Storage.Adapter.supports_input_log?/1` and it
   answers `true` - the same shape `metadata_supported?/1` checks. Nothing
   refuses on it: an adapter that keeps no log runs every chart exactly as
   it did before ADR-0010, and this predicate is public so a host that
-  needs a replayable run can find out whether it will get one *before* it
+  needs a replayable execution can find out whether it will get one *before* it
   drives one.
   """
   @spec input_log_supported?(store :: t()) :: boolean()
@@ -579,7 +579,7 @@ defmodule StatifierPersistence.Storage do
   end
 
   @doc """
-  Appends `event` to `run_id`'s input log at `door`, returning the ordinal
+  Appends `event` to `execution_id`'s input log at `door`, returning the ordinal
   the adapter assigned (ADR-0010 decisions 2 and 3).
 
   This is the encode site: the `%Statifier.Event{}` the interpreter was
@@ -590,30 +590,31 @@ defmodule StatifierPersistence.Storage do
   struct - and this package mints no serialization format of its own.
 
   `:not_supported` for an adapter that keeps no log, without calling the
-  adapter at all. `{:error, :input_log_full}` once the run's log has
+  adapter at all. `{:error, :input_log_full}` once the execution's log has
   closed itself at the host's cap (decision 6): that arm refuses the
   append and never the step, and the caller carries on.
 
-  `door` is a `t:StatifierPersistence.Runs.entry/0` atom - the fixed
+  `door` is a `t:StatifierPersistence.Executions.entry/0` atom - the fixed
   vocabulary of public doors, stored as its string.
   """
   @spec append_input(
           store :: t(),
-          run_id :: Adapter.run_id(),
+          execution_id :: Adapter.execution_id(),
           door :: atom(),
           event :: Event.t()
         ) :: {:ok, Adapter.seq()} | :not_supported | {:error, error()}
-  def append_input(%__MODULE__{} = store, run_id, door, %Event{} = event) when is_atom(door) do
+  def append_input(%__MODULE__{} = store, execution_id, door, %Event{} = event)
+      when is_atom(door) do
     if input_log_supported?(store) do
       record = %{
-        run_id: run_id,
+        execution_id: execution_id,
         seq: 0,
         door: Atom.to_string(door),
         input_blob: :erlang.term_to_binary(event)
       }
 
-      adapter_call(store.adapter, :append_input, [run_id: run_id], fn ->
-        store.adapter.append_input(store.opts, run_id, record)
+      adapter_call(store.adapter, :append_input, [execution_id: execution_id], fn ->
+        store.adapter.append_input(store.opts, execution_id, record)
       end)
     else
       :not_supported
@@ -621,7 +622,7 @@ defmodule StatifierPersistence.Storage do
   end
 
   @doc """
-  Lists `run_id`'s whole input log in ascending `seq`, decoded (ADR-0010
+  Lists `execution_id`'s whole input log in ascending `seq`, decoded (ADR-0010
   decision 2).
 
   The decode half of `append_input/4`: each stored `input_blob` comes back
@@ -629,19 +630,19 @@ defmodule StatifierPersistence.Storage do
   interpreter saw, `caller_context` and all. An entry whose `event` is
   `nil` is the closed marker the cap wrote (decision 6) and nothing else -
   a reader that maps this log onto a replay refuses on it rather than
-  replaying a run that never happened.
+  replaying an execution that never happened.
 
   `:not_supported` for an adapter that keeps no log;
-  `{:error, :run_not_found}` for a run that does not exist; `{:ok, []}`
-  for a run with no inputs.
+  `{:error, :execution_not_found}` for an execution that does not exist; `{:ok, []}`
+  for an execution with no inputs.
   """
-  @spec list_inputs(store :: t(), run_id :: Adapter.run_id()) ::
+  @spec list_inputs(store :: t(), execution_id :: Adapter.execution_id()) ::
           {:ok, [input()]} | :not_supported | {:error, error()}
-  def list_inputs(%__MODULE__{} = store, run_id) do
+  def list_inputs(%__MODULE__{} = store, execution_id) do
     if input_log_supported?(store) do
       store.adapter
-      |> adapter_call(:list_inputs, [run_id: run_id], fn ->
-        store.adapter.list_inputs(store.opts, run_id)
+      |> adapter_call(:list_inputs, [execution_id: execution_id], fn ->
+        store.adapter.list_inputs(store.opts, execution_id)
       end)
       |> decode_inputs()
     else
@@ -656,11 +657,11 @@ defmodule StatifierPersistence.Storage do
 
   @spec decode_input(Adapter.input_record()) :: input()
   defp decode_input(%{input_blob: nil} = record),
-    do: %{run_id: record.run_id, seq: record.seq, door: record.door, event: nil}
+    do: %{execution_id: record.execution_id, seq: record.seq, door: record.door, event: nil}
 
   defp decode_input(record) do
     %{
-      run_id: record.run_id,
+      execution_id: record.execution_id,
       seq: record.seq,
       door: record.door,
       event: :erlang.binary_to_term(record.input_blob)
@@ -672,29 +673,29 @@ defmodule StatifierPersistence.Storage do
   writing anything: `:ok`, or `{:error, :metadata_unsupported}` for a
   non-empty map an adapter cannot store (ADR-0006 decision 3).
 
-  `insert_run/5` runs this check itself, so a caller writing through the
+  `insert_execution/5` executions this check itself, so a caller writing through the
   facade alone never needs it. It is public for the caller that has work to
   do *before* the write and must not do it for a create that will be
-  refused: `StatifierPersistence.Runs.create/4` runs it ahead of
-  `Statifier.Interpreter.initialize/2` so no effect is executed for a run
-  whose metadata cannot be stored - the same reason `insert_run/5`'s
+  refused: `StatifierPersistence.Executions.create/4` runs it ahead of
+  `Statifier.Interpreter.initialize/2` so no effect is executed for an execution
+  whose metadata cannot be stored - the same reason `insert_execution/5`'s
   identity refusal runs before the position encode. Raises `ArgumentError`
   on a malformed option, exactly as the writers do.
   """
-  @spec check_metadata(store :: t(), opts :: [run_write_opt()]) :: :ok | {:error, error()}
+  @spec check_metadata(store :: t(), opts :: [execution_write_opt()]) :: :ok | {:error, error()}
   def check_metadata(%__MODULE__{} = store, opts) do
     check_metadata_supported(store, metadata_opt!(opts))
   end
 
   @doc """
-  Fetches the run stored under `run_id` and rebuilds its position into a
+  Fetches the execution stored under `execution_id` and rebuilds its position into a
   `Statifier.MachineState.t()` walking `machine`, refusing a chart-revision
   mismatch instead of silently resuming the wrong configuration.
 
-  Runs in `load_position/3`'s order, with one extra arm: the same cheap
+  Executions in `load_position/3`'s order, with one extra arm: the same cheap
   identity pre-check against the stored `identity_blob`, then
-  `{:error, :run_position_missing}` for a run whose `position_blob` is
-  `nil` (a run that failed at creation stores none - ADR-0004 decision 1),
+  `{:error, :execution_position_missing}` for an execution whose `position_blob` is
+  `nil` (an execution that failed at creation stores none - ADR-0004 decision 1),
   then `Position.from_binary/2` as the authoritative check, its result
   returned unchanged.
 
@@ -702,34 +703,34 @@ defmodule StatifierPersistence.Storage do
   `routes` and `invoke_types` (st-ADR-0064); re-stamping them before the
   next drive is the stepper's job, not this function's.
   """
-  @spec load_run_position(
+  @spec load_execution_position(
           store :: t(),
-          run_id :: Adapter.run_id(),
+          execution_id :: Adapter.execution_id(),
           machine :: Machine.t()
         ) :: {:ok, MachineState.t()} | {:error, error()}
-  def load_run_position(%__MODULE__{} = store, run_id, %Machine{} = machine) do
-    keys = [run_id: run_id]
+  def load_execution_position(%__MODULE__{} = store, execution_id, %Machine{} = machine) do
+    keys = [execution_id: execution_id]
 
-    with {:ok, run_record} <- fetch_run(store, run_id),
-         :ok <- precheck_identity(run_record.identity_blob, machine, :run, keys) do
-      case run_record.position_blob do
-        nil -> {:error, :run_position_missing}
+    with {:ok, execution_record} <- fetch_execution(store, execution_id),
+         :ok <- precheck_identity(execution_record.identity_blob, machine, :execution, keys) do
+      case execution_record.position_blob do
+        nil -> {:error, :execution_position_missing}
         position_blob -> Position.from_binary(position_blob, machine)
       end
     end
   end
 
-  @spec run_record(
-          Adapter.run_id(),
-          Adapter.run_status(),
+  @spec execution_record(
+          Adapter.execution_id(),
+          Adapter.execution_status(),
           Identity.t(),
           binary() | nil,
           Adapter.metadata(),
-          [run_write_opt()]
-        ) :: Adapter.run_record()
-  defp run_record(run_id, status, identity, position_blob, metadata, opts) do
+          [execution_write_opt()]
+        ) :: Adapter.execution_record()
+  defp execution_record(execution_id, status, identity, position_blob, metadata, opts) do
     %{
-      run_id: run_id,
+      execution_id: execution_id,
       status: status,
       content_hash: identity.content_hash,
       identity_blob: Identity.to_binary(identity),
@@ -743,7 +744,7 @@ defmodule StatifierPersistence.Storage do
   # ADR-0006 decision 1's whole validation: a map with string keys. Values
   # are never inspected. A malformed option is a caller bug, so it raises
   # rather than joining the error vocabulary.
-  @spec metadata_opt!([run_write_opt()]) :: Adapter.metadata()
+  @spec metadata_opt!([execution_write_opt()]) :: Adapter.metadata()
   defp metadata_opt!(opts) do
     case Keyword.get(opts, :metadata, %{}) do
       metadata when is_map(metadata) ->
@@ -772,7 +773,7 @@ defmodule StatifierPersistence.Storage do
     if metadata_supported?(store), do: :ok, else: {:error, :metadata_unsupported}
   end
 
-  @spec position_opt([run_write_opt()]) :: :persist | :skip
+  @spec position_opt([execution_write_opt()]) :: :persist | :skip
   defp position_opt(opts), do: Keyword.get(opts, :position, :persist)
 
   @spec insert_position_blob(MachineState.t(), :persist | :skip) ::
@@ -780,21 +781,21 @@ defmodule StatifierPersistence.Storage do
   defp insert_position_blob(_machine_state, :skip), do: {:ok, nil}
   defp insert_position_blob(machine_state, :persist), do: Position.to_binary(machine_state)
 
-  @spec update_position_blob(t(), Adapter.run_id(), MachineState.t(), :persist | :skip) ::
+  @spec update_position_blob(t(), Adapter.execution_id(), MachineState.t(), :persist | :skip) ::
           {:ok, binary() | nil} | {:error, error()}
-  defp update_position_blob(_store, _run_id, machine_state, :persist),
+  defp update_position_blob(_store, _execution_id, machine_state, :persist),
     do: Position.to_binary(machine_state)
 
-  defp update_position_blob(store, run_id, _machine_state, :skip) do
-    with {:ok, run_record} <- fetch_run(store, run_id) do
-      {:ok, run_record.position_blob}
+  defp update_position_blob(store, execution_id, _machine_state, :skip) do
+    with {:ok, execution_record} <- fetch_execution(store, execution_id) do
+      {:ok, execution_record.position_blob}
     end
   end
 
   @spec precheck_identity(
           identity_blob :: binary(),
           machine :: Machine.t(),
-          stage :: :position | :run,
+          stage :: :position | :execution,
           keys :: keyword()
         ) ::
           :ok
@@ -817,14 +818,14 @@ defmodule StatifierPersistence.Storage do
 
   # The two identity refusals, each emitted at exactly the site that
   # returns it (ADR-0009 decision 3). `stage` is `:chart`, `:position` or
-  # `:run`; `keys` carries whichever of `run_id` and `session_id` the
+  # `:execution`; `keys` carries whichever of `execution_id` and `session_id` the
   # refusing call is keyed by, and the rest ride as `nil`.
   #
   # Only the two content hashes travel, never the two `Identity` structs
   # the mismatch term carries (ADR-0009 decision 7): a content hash is a
   # digest of a chart document and is the key this package and its host
   # already exchange; the envelope around it is not.
-  @spec refuse_unidentified(:chart | :position | :run, keyword()) ::
+  @spec refuse_unidentified(:chart | :position | :execution, keyword()) ::
           {:error, :unidentified_chart}
   defp refuse_unidentified(stage, keys) do
     Telemetry.identity_refused([stage: stage, reason: :unidentified_chart] ++ identity_keys(keys))
@@ -832,7 +833,7 @@ defmodule StatifierPersistence.Storage do
     {:error, :unidentified_chart}
   end
 
-  @spec refuse_mismatch(:position | :run, keyword(), Identity.t(), Identity.t()) ::
+  @spec refuse_mismatch(:position | :execution, keyword(), Identity.t(), Identity.t()) ::
           {:error, {:identity_mismatch, Identity.t(), Identity.t()}}
   defp refuse_mismatch(stage, keys, stored, supplied) do
     Telemetry.identity_refused(
@@ -849,11 +850,14 @@ defmodule StatifierPersistence.Storage do
 
   @spec identity_keys(keyword()) :: keyword()
   defp identity_keys(keys),
-    do: [run_id: Keyword.get(keys, :run_id), session_id: Keyword.get(keys, :session_id)]
+    do: [
+      execution_id: Keyword.get(keys, :execution_id),
+      session_id: Keyword.get(keys, :session_id)
+    ]
 
   # One timed adapter callback, reported as
   # `[:statifier_persistence, :adapter, :call]` (ADR-0009 decision 3).
-  # `keys` is whichever of `run_id`, `session_id` and `content_hash` this
+  # `keys` is whichever of `execution_id`, `session_id` and `content_hash` this
   # callback is keyed by; the rest ride as `nil`, which is what lets a
   # handler read one shape for every callback.
   #
@@ -872,7 +876,7 @@ defmodule StatifierPersistence.Storage do
       callback: callback,
       outcome: call_outcome(result),
       reason: call_reason(result),
-      run_id: Keyword.get(keys, :run_id),
+      execution_id: Keyword.get(keys, :execution_id),
       session_id: Keyword.get(keys, :session_id),
       content_hash: Keyword.get(keys, :content_hash)
     )

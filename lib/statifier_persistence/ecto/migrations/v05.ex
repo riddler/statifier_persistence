@@ -6,7 +6,7 @@ if Code.ensure_loaded?(Ecto.Migration) do
 
     Four columns beside the surrogate key: `run_id`, the run the entry
     belongs to; `seq`, its dense zero-based ordinal; `door`, the public
-    door it entered by (`t:StatifierPersistence.Runs.entry/0`, as a
+    door it entered by (`t:StatifierPersistence.Executions.entry/0`, as a
     string); and `input_blob`, the opaque payload the facade encoded above
     the adapter. `input_blob` is **nullable**, and a null is not "no
     value": it is decision 6's closed marker, written in the cap's last

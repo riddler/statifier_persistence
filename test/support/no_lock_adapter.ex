@@ -2,7 +2,7 @@ defmodule StatifierPersistence.Test.NoLockAdapter do
   @moduledoc """
   A delegating `StatifierPersistence.Storage.Adapter` wrapping
   `StatifierPersistence.Storage.InMemory` that implements every required
-  callback and deliberately does NOT export the optional `lock_run/3`.
+  callback and deliberately does NOT export the optional `lock_execution/3`.
 
   The fixture for the default serialization strategy's refusal arm:
   `StatifierPersistence.Serialization.AdapterLock` over this adapter must
@@ -29,11 +29,11 @@ defmodule StatifierPersistence.Test.NoLockAdapter do
   defdelegate fetch_position(opts, session_id), to: InMemory
 
   @impl true
-  defdelegate insert_run(opts, run_record), to: InMemory
+  defdelegate insert_execution(opts, execution_record), to: InMemory
 
   @impl true
-  defdelegate fetch_run(opts, run_id), to: InMemory
+  defdelegate fetch_execution(opts, execution_id), to: InMemory
 
   @impl true
-  defdelegate update_run(opts, run_record), to: InMemory
+  defdelegate update_execution(opts, execution_record), to: InMemory
 end

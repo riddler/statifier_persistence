@@ -1,8 +1,8 @@
 defmodule StatifierPersistence.Storage.NoMetadataConformanceTest do
   @moduledoc """
-  The lib-shipped conformance suite run against an adapter that declares no
+  The lib-shipped conformance suite execution against an adapter that declares no
   metadata support - `StatifierPersistence.Test.NoLockAdapter`, which
-  exports neither `lock_run/3` nor `supports_metadata?/1`.
+  exports neither `lock_execution/3` nor `supports_metadata?/1`.
 
   This is the refusal arm of ADR-0006 decision 3 under test: an adapter
   that stores no metadata stays conformant by refusing a non-empty map at

@@ -14,16 +14,16 @@ defmodule StatifierPersistence.DriverRestartRaceTest do
 
   Every "node" here is a separately built `StatifierPersistence.Driver`
   over the same store. Nothing is carried between them in memory: a driver
-  holds no run state, so a fresh one is exactly what a cold node builds,
+  holds no execution state, so a fresh one is exactly what a cold node builds,
   and everything that crosses does so through the persisted position -
   `active_invocations` included (`Statifier.Position`).
 
   ADR-0008 decision 5 extends this file with two more scenarios (sp-nt8
-  Phase 6): a durable subchart's child is itself a run this package
+  Phase 6): a durable subchart's child is itself an execution this package
   started, and it can complete on any node, so the race above happens
   again one level up. `"cancel versus child completion across a parent
   restart"` is ADR-0007's own scenario replayed where the answering party
-  is a child run rather than a bare `:pending` call. `"child completes
+  is a child execution rather than a bare `:pending` call. `"child completes
   while the parent is mid-restart"` is new to ADR-0008: it is not enough
   for the liveness read to happen somewhere before the step, it has to
   fall under the *same* exclusion as the step it gates, so that scenario
@@ -40,7 +40,7 @@ defmodule StatifierPersistence.DriverRestartRaceTest do
   alias Statifier.Event
   alias Statifier.Invoke.Types, as: InvokeTypes
   alias StatifierPersistence.{Driver, Storage}
-  alias StatifierPersistence.Run.Linkage
+  alias StatifierPersistence.Execution.Linkage
   alias StatifierPersistence.Storage.InMemory
   alias StatifierPersistence.Test.BlockingSerialization
 
@@ -75,11 +75,11 @@ defmodule StatifierPersistence.DriverRestartRaceTest do
   setup do
     {:ok, store} = Storage.new(InMemory, [])
 
-    {:ok, _run, machine_state} =
-      Driver.create(cold_node(store), "run_1", initialize: [session_id: "sess_race"])
+    {:ok, _execution, machine_state} =
+      Driver.create(cold_node(store), "execution_1", initialize: [session_id: "sess_race"])
 
     # The premise of every test below: the call was started, nothing
-    # answered it, and the run is durably at rest with it live. Asserted
+    # answered it, and the execution is durably at rest with it live. Asserted
     # twice on purpose - once on what the drive returned, once on what
     # comes back through the guarded load, because only the second says
     # the invocation survived `Statifier.Position`'s encoding. An
@@ -98,34 +98,34 @@ defmodule StatifierPersistence.DriverRestartRaceTest do
 
   # Sabotage: made `late_answer/3` skip its `active_invocations` lookup and
   # always build the event - the cancelled invocation's answer was
-  # delivered and the run landed in "leaked".
+  # delivered and the execution landed in "leaked".
   test "a cancel that lands first discards the completion", %{store: store} do
-    assert {:ok, _run, machine_state} =
-             Driver.send_event(cold_node(store), "run_1", Event.external("timeout"))
+    assert {:ok, _execution, machine_state} =
+             Driver.send_event(cold_node(store), "execution_1", Event.external("timeout"))
 
     assert leaves(machine_state) == ["abandoned"]
 
-    assert {:discarded, run} =
-             Driver.done_invocation(cold_node(store), "run_1", "call", %{"ok" => true})
+    assert {:discarded, execution} =
+             Driver.done_invocation(cold_node(store), "execution_1", "call", %{"ok" => true})
 
-    assert run.status == :active
+    assert execution.status == :active
     assert leaves(position(store)) == ["abandoned"]
   end
 
   # Sabotage: made `late_answer/3` return `:discard` unconditionally - the
-  # completion never reached the chart, the run stayed in "calling", and
+  # completion never reached the chart, the execution stayed in "calling", and
   # the late timeout took it to "abandoned" instead of "settled".
   test "a completion that lands first wins and the late cancel finds it", %{store: store} do
-    assert {:ok, _run, machine_state} =
-             Driver.done_invocation(cold_node(store), "run_1", "call", %{
+    assert {:ok, _execution, machine_state} =
+             Driver.done_invocation(cold_node(store), "execution_1", "call", %{
                "authorization" => "auth_1"
              })
 
     assert leaves(machine_state) == ["approved"]
     assert machine_state.datamodel["_event"]["origin"] == "#_scxml_sess_race"
 
-    assert {:ok, _run, machine_state} =
-             Driver.send_event(cold_node(store), "run_1", Event.external("timeout"))
+    assert {:ok, _execution, machine_state} =
+             Driver.send_event(cold_node(store), "execution_1", Event.external("timeout"))
 
     assert leaves(machine_state) == ["settled"]
   end
@@ -133,8 +133,8 @@ defmodule StatifierPersistence.DriverRestartRaceTest do
   # Sabotage: had `reenter/5` pass `{:done, failure}` for the failing door -
   # the chart took the done transition and this went red on "refused".
   test "the failure door routes error.communication across the restart", %{store: store} do
-    assert {:ok, _run, machine_state} =
-             Driver.failed_invocation(cold_node(store), "run_1", "call",
+    assert {:ok, _execution, machine_state} =
+             Driver.failed_invocation(cold_node(store), "execution_1", "call",
                reason: "timeout",
                attempts: 5
              )
@@ -149,22 +149,23 @@ defmodule StatifierPersistence.DriverRestartRaceTest do
   end
 
   # Sabotage: same `late_answer/3` mutation again - the redelivery was
-  # stepped a second time and the run landed in "leaked". This is the
+  # stepped a second time and the execution landed in "leaked". This is the
   # at-most-once property the seam gets for free from the ordinary
   # answer-and-leave chart, and only for it: a chart that stays in the
   # invoking state after answering has no entry removal to lean on
   # (ADR-0007).
   test "a redelivered completion is discarded once the chart has answered", %{store: store} do
-    assert {:ok, _run, machine_state} =
-             Driver.done_invocation(cold_node(store), "run_1", "call", %{
+    assert {:ok, _execution, machine_state} =
+             Driver.done_invocation(cold_node(store), "execution_1", "call", %{
                "authorization" => "auth_1"
              })
 
     assert leaves(machine_state) == ["approved"]
 
-    assert {:discarded, run} = Driver.done_invocation(cold_node(store), "run_1", "call", %{})
+    assert {:discarded, execution} =
+             Driver.done_invocation(cold_node(store), "execution_1", "call", %{})
 
-    assert run.status == :active
+    assert execution.status == :active
     assert leaves(position(store)) == ["approved"]
   end
 
@@ -198,7 +199,7 @@ defmodule StatifierPersistence.DriverRestartRaceTest do
     """
 
     # A plain child with no invoke of its own - what its content resolves
-    # to is irrelevant to either race below, only that a child run exists
+    # to is irrelevant to either race below, only that a child execution exists
     # under the derived id and can be cancelled.
     @child_source """
     <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="idle">
@@ -210,7 +211,7 @@ defmodule StatifierPersistence.DriverRestartRaceTest do
     """
 
     # sabotage: two independent trials, each reverted before the next.
-    # (1) dropped the `Runs.cascade_cancel/3` call from `perform/5`'s
+    # (1) dropped the `Executions.cascade_cancel/3` call from `perform/5`'s
     # `{:cancel_invoke, _}` clause (`driver.ex`) - the child stayed
     # `:active` after the parent's timeout, and the `child_record.status
     # == :cancelled` assertion went red; (2) flipped `late_answer/3`'s
@@ -219,37 +220,39 @@ defmodule StatifierPersistence.DriverRestartRaceTest do
     # final `leaves(...) == ["abandoned"]` assertion went red. Both
     # verified red independently, both reverted.
     test "cancel versus child completion across a parent restart", %{store: store} do
-      assert {:ok, _run, machine_state} = Driver.create(cold_subchart_node(store), "run_parent")
+      assert {:ok, _execution, machine_state} =
+               Driver.create(cold_subchart_node(store), "execution_parent")
+
       assert leaves(machine_state) == ["calling"]
 
-      child_run_id = Linkage.child_run_id("run_parent", "call", 0)
-      assert {:ok, child_record} = Storage.fetch_run(store, child_run_id)
+      child_execution_id = Linkage.child_execution_id("execution_parent", "call", 0)
+      assert {:ok, child_record} = Storage.fetch_execution(store, child_execution_id)
       assert child_record.status == :active
 
-      assert {:ok, _run, machine_state} =
+      assert {:ok, _execution, machine_state} =
                Driver.send_event(
                  cold_subchart_node(store),
-                 "run_parent",
+                 "execution_parent",
                  Event.external("timeout")
                )
 
       assert leaves(machine_state) == ["abandoned"]
 
-      assert {:ok, child_record} = Storage.fetch_run(store, child_run_id)
+      assert {:ok, child_record} = Storage.fetch_execution(store, child_execution_id)
       assert child_record.status == :cancelled
 
-      assert {:discarded, run} =
-               Driver.done_invocation(cold_subchart_node(store), "run_parent", "call", %{
+      assert {:discarded, execution} =
+               Driver.done_invocation(cold_subchart_node(store), "execution_parent", "call", %{
                  "ok" => true
                })
 
-      assert run.status == :active
+      assert execution.status == :active
       assert leaves(parent_position(store)) == ["abandoned"]
     end
 
     # Sabotage: moved the liveness read out of the event builder
     # (`late_answer/3`) and into `reenter/5`, reading
-    # `Storage.load_run_position/3` once at the top of the function -
+    # `Storage.load_execution_position/3` once at the top of the function -
     # before `step/5`, before `BlockingSerialization` ever signals entry
     # - instead of inside the builder the step itself calls. The
     # precomputed read still saw the invocation live (nothing had
@@ -257,24 +260,24 @@ defmodule StatifierPersistence.DriverRestartRaceTest do
     # completion was delivered into the now-abandoned parent's "leaked"
     # transition instead of being discarded. Verified red, reverted.
     test "child completes while the parent is mid-restart", %{store: store} do
-      # `create/3` runs under the ordinary default serialization - only
+      # `create/3` executions under the ordinary default serialization - only
       # the answering `done_invocation/5` call below is paused, via a
       # per-call `serialization:` override rather than a driver-level
       # one, so this line does not block on its own caller.
       driver = cold_subchart_node(store)
-      assert {:ok, _run, _ms} = Driver.create(driver, "run_parent")
+      assert {:ok, _execution, _ms} = Driver.create(driver, "execution_parent")
 
       test_pid = self()
 
       task_a =
         Task.async(fn ->
-          Driver.done_invocation(driver, "run_parent", "call", %{"ok" => true},
+          Driver.done_invocation(driver, "execution_parent", "call", %{"ok" => true},
             serialization: {BlockingSerialization, {test_pid, store}}
           )
         end)
 
-      # The rendezvous: `BlockingSerialization` has entered `with_run/3`
-      # and is paused before it touches the real per-run exclusion or
+      # The rendezvous: `BlockingSerialization` has entered `with_execution/3`
+      # and is paused before it touches the real per-execution exclusion or
       # reads the position at all.
       assert_receive {:entered, blocked_pid}, 1_000
 
@@ -287,23 +290,23 @@ defmodule StatifierPersistence.DriverRestartRaceTest do
 
       task_b =
         Task.async(fn ->
-          Driver.send_event(driver_b, "run_parent", Event.external("timeout"))
+          Driver.send_event(driver_b, "execution_parent", Event.external("timeout"))
         end)
 
-      assert {:ok, _run, ms_b} = Task.await(task_b)
+      assert {:ok, _execution, ms_b} = Task.await(task_b)
       assert leaves(ms_b) == ["abandoned"]
 
-      child_run_id = Linkage.child_run_id("run_parent", "call", 0)
-      assert {:ok, child_record} = Storage.fetch_run(store, child_run_id)
+      child_execution_id = Linkage.child_execution_id("execution_parent", "call", 0)
+      assert {:ok, child_record} = Storage.fetch_execution(store, child_execution_id)
       assert child_record.status == :cancelled
 
       send(blocked_pid, :go_ahead)
 
       # The completion's read happens only now, inside the one exclusion
-      # that also runs Task B's cancel - so it sees the cancellation and
+      # that also executions Task B's cancel - so it sees the cancellation and
       # discards, exactly as the ordinary restart case above does.
-      assert {:discarded, run} = Task.await(task_a)
-      assert run.status == :active
+      assert {:discarded, execution} = Task.await(task_a)
+      assert execution.status == :active
       assert leaves(parent_position(store)) == ["abandoned"]
     end
 
@@ -350,13 +353,13 @@ defmodule StatifierPersistence.DriverRestartRaceTest do
     # counterpart of `position/1` above.
     defp parent_position(store) do
       {:ok, machine} = Statifier.compile(@parent_source)
-      {:ok, machine_state} = Storage.load_run_position(store, "run_parent", machine)
+      {:ok, machine_state} = Storage.load_execution_position(store, "execution_parent", machine)
 
       machine_state
     end
   end
 
-  # One cold node: a driver that has never seen this run, dispatching every
+  # One cold node: a driver that has never seen this execution, dispatching every
   # call asynchronously and answering none of them in the drive.
   defp cold_node(store) do
     {:ok, machine} = Statifier.compile(@source)
@@ -367,12 +370,12 @@ defmodule StatifierPersistence.DriverRestartRaceTest do
     )
   end
 
-  # What the run is durably at, read back through the guarded load rather
+  # What the execution is durably at, read back through the guarded load rather
   # than taken from a return value - a discard that returned the right
   # tuple while writing the wrong position would pass otherwise.
   defp position(store) do
     {:ok, machine} = Statifier.compile(@source)
-    {:ok, machine_state} = Storage.load_run_position(store, "run_1", machine)
+    {:ok, machine_state} = Storage.load_execution_position(store, "execution_1", machine)
 
     machine_state
   end

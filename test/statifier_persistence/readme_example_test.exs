@@ -1,6 +1,6 @@
 defmodule StatifierPersistence.ReadmeExampleTest do
   @moduledoc """
-  The README's "A worked run" section, executed.
+  The README's "A worked execution" section, executed.
 
   This project has no doctests (the public functions take a live store, not
   values a doctest can print), so a README snippet has nothing checking it
@@ -13,7 +13,7 @@ defmodule StatifierPersistence.ReadmeExampleTest do
 
   alias Statifier.{Chart, Event, Machine, MachineState}
   alias Statifier.Invoke.Types, as: InvokeTypes
-  alias StatifierPersistence.{Runs, Storage}
+  alias StatifierPersistence.{Executions, Storage}
 
   @source """
   <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="authorizing">
@@ -31,10 +31,10 @@ defmodule StatifierPersistence.ReadmeExampleTest do
   </scxml>
   """
 
-  # sabotage: made `run_status/2` return `:active` where it returns `:completed`
-  # for a `:done` machine state (runs.ex) - the final `run.status == :completed`
+  # sabotage: made `execution_status/2` return `:active` where it returns `:completed`
+  # for a `:done` machine state (executions.ex) - the final `execution.status == :completed`
   # assertion went red, and reverting brought it back.
-  test "the README's worked run drives a transaction to settled across a restart" do
+  test "the README's worked execution drives a transaction to settled across a restart" do
     {:ok, machine} = Statifier.compile(@source)
     {:ok, chart_blob} = Chart.to_binary(machine)
 
@@ -45,7 +45,7 @@ defmodule StatifierPersistence.ReadmeExampleTest do
 
     executor = fn
       {:invoke, %Statifier.Effect.Invoke{type: "myapp:authorize"} = invoke}, ctx ->
-        send(parent, {:authorized, ctx.run_id, invoke.invoke_id})
+        send(parent, {:authorized, ctx.execution_id, invoke.invoke_id})
         :ok
 
       _effect, _ctx ->
@@ -54,13 +54,13 @@ defmodule StatifierPersistence.ReadmeExampleTest do
 
     opts = [executor: executor, invoke_types: InvokeTypes.new(types: ["myapp:authorize"])]
 
-    {:ok, run, state} = Runs.create(store, "txn_01H8", machine, opts)
-    assert run.status == :active
+    {:ok, execution, state} = Executions.create(store, "txn_01H8", machine, opts)
+    assert execution.status == :active
     assert config(state) == ["authorizing"]
     assert_received {:authorized, "txn_01H8", "authorize"}
 
-    {:ok, run, state} =
-      Runs.step(
+    {:ok, execution, state} =
+      Executions.step(
         store,
         "txn_01H8",
         machine,
@@ -68,22 +68,24 @@ defmodule StatifierPersistence.ReadmeExampleTest do
         opts
       )
 
-    assert run.status == :active
+    assert execution.status == :active
     assert config(state) == ["awaiting_capture"]
 
-    # The restart: only the run id survives.
-    {:ok, record} = Storage.fetch_run(store, "txn_01H8")
+    # The restart: only the execution id survives.
+    {:ok, record} = Storage.fetch_execution(store, "txn_01H8")
     {:ok, %{chart_blob: blob}} = Storage.fetch_chart(store, record.content_hash)
     {:ok, rebooted} = Chart.from_binary(blob)
 
-    {:ok, run, state} =
-      Runs.step(store, "txn_01H8", rebooted, Event.external("capture.requested"), opts)
+    {:ok, execution, state} =
+      Executions.step(store, "txn_01H8", rebooted, Event.external("capture.requested"), opts)
 
-    assert run.status == :active
+    assert execution.status == :active
     assert config(state) == ["settling"]
 
-    {:ok, run, state} = Runs.step(store, "txn_01H8", rebooted, Event.external("ack"), opts)
-    assert run.status == :completed
+    {:ok, execution, state} =
+      Executions.step(store, "txn_01H8", rebooted, Event.external("ack"), opts)
+
+    assert execution.status == :completed
     assert config(state) == []
   end
 

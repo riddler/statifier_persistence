@@ -3,7 +3,7 @@ defmodule StatifierPersistence.DriverSubchartTest do
   The `start_child` clause on `StatifierPersistence.Driver` (ADR-0008
   decision 3, sp-nt8 Phase 3): `:dispatch` answering
   `{:start_child, invoke, {:invoke, invoke}}` creates the child as an
-  ordinary run under the parent's own exclusion, links it under the
+  ordinary execution under the parent's own exclusion, links it under the
   reserved metadata namespace, and rests the parent at `:pending` with the
   invocation live.
   """
@@ -13,8 +13,8 @@ defmodule StatifierPersistence.DriverSubchartTest do
   alias Statifier.Event
   alias Statifier.Invoke.Types, as: InvokeTypes
   alias Statifier.Machine
-  alias StatifierPersistence.{Driver, Runs, Storage}
-  alias StatifierPersistence.Run.Linkage
+  alias StatifierPersistence.{Driver, Executions, Storage}
+  alias StatifierPersistence.Execution.Linkage
   alias StatifierPersistence.Storage.InMemory
   alias StatifierPersistence.Test.NoChildListingAdapter
 
@@ -113,15 +113,15 @@ defmodule StatifierPersistence.DriverSubchartTest do
       driver =
         driver(store, @src_parent_source, resolving_dispatch(%{@document_id => @child_source}))
 
-      assert {:ok, _run, machine_state} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, machine_state} = Driver.create(driver, "execution_1")
 
       assert leaves(machine_state) == ["calling"]
 
-      child_run_id = Linkage.child_run_id("run_1", "call", 0)
-      assert {:ok, run_record} = Storage.fetch_run(store, child_run_id)
-      assert run_record.status == :active
+      child_execution_id = Linkage.child_execution_id("execution_1", "call", 0)
+      assert {:ok, execution_record} = Storage.fetch_execution(store, child_execution_id)
+      assert execution_record.status == :active
 
-      assert {:ok, linkage} = Linkage.from_metadata(run_record.metadata)
+      assert {:ok, linkage} = Linkage.from_metadata(execution_record.metadata)
       {:ok, child_machine} = Statifier.compile(@child_source)
       assert linkage.content_hash == Machine.identity(child_machine).content_hash
     end
@@ -129,18 +129,20 @@ defmodule StatifierPersistence.DriverSubchartTest do
 
   describe "start_child" do
     # Sabotage: had `create_child/5` return `:ok` without calling `create/3`
-    # at all (the child-exists case's mirror) - the run was never inserted
-    # and `Storage.fetch_run/2` on the derived id returned `{:error,
-    # :run_not_found}`.
-    test "the child run exists under the derived id after the parent's create", %{store: store} do
+    # at all (the child-exists case's mirror) - the execution was never inserted
+    # and `Storage.fetch_execution/2` on the derived id returned `{:error,
+    # :execution_not_found}`.
+    test "the child execution exists under the derived id after the parent's create", %{
+      store: store
+    } do
       driver = driver(store, @parent_source, subchart_dispatch(@child_source))
 
-      assert {:ok, _run, _machine_state} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, _machine_state} = Driver.create(driver, "execution_1")
 
-      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+      child_execution_id = Linkage.child_execution_id("execution_1", "call", 0)
 
-      assert {:ok, run_record} = Storage.fetch_run(store, child_run_id)
-      assert run_record.status == :active
+      assert {:ok, execution_record} = Storage.fetch_execution(store, child_execution_id)
+      assert execution_record.status == :active
     end
 
     # Sabotage: dropped `content_hash` out of `create_child/5`'s call to
@@ -150,13 +152,13 @@ defmodule StatifierPersistence.DriverSubchartTest do
     test "the child's metadata carries all four linkage values and the pin", %{store: store} do
       driver = driver(store, @parent_source, subchart_dispatch(@child_source))
 
-      assert {:ok, _run, _machine_state} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, _machine_state} = Driver.create(driver, "execution_1")
 
-      child_run_id = Linkage.child_run_id("run_1", "call", 0)
-      assert {:ok, run_record} = Storage.fetch_run(store, child_run_id)
-      assert {:ok, linkage} = Linkage.from_metadata(run_record.metadata)
+      child_execution_id = Linkage.child_execution_id("execution_1", "call", 0)
+      assert {:ok, execution_record} = Storage.fetch_execution(store, child_execution_id)
+      assert {:ok, linkage} = Linkage.from_metadata(execution_record.metadata)
 
-      assert linkage.parent_run_id == "run_1"
+      assert linkage.parent_execution_id == "execution_1"
       assert linkage.invoke_id == "call"
       assert linkage.child_index == 0
 
@@ -171,130 +173,140 @@ defmodule StatifierPersistence.DriverSubchartTest do
     test "the parent is at rest with the invocation live", %{store: store} do
       driver = driver(store, @parent_source, subchart_dispatch(@child_source))
 
-      assert {:ok, _run, _machine_state} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, _machine_state} = Driver.create(driver, "execution_1")
 
       {:ok, parent_machine} = Statifier.compile(@parent_source)
-      assert {:ok, reloaded} = Storage.load_run_position(store, "run_1", parent_machine)
+
+      assert {:ok, reloaded} =
+               Storage.load_execution_position(store, "execution_1", parent_machine)
 
       assert leaves(reloaded) == ["calling"]
       assert Map.values(reloaded.active_invocations) == ["call"]
     end
 
-    # Sabotage: treated `{:error, :run_exists}` as any other refusal in
+    # Sabotage: treated `{:error, :execution_exists}` as any other refusal in
     # `create_child/5` (removed the `adopt_child/3` clause) - the re-drive
-    # refused with `child_run_creation_failed` (the parent landed in
+    # refused with `child_execution_creation_failed` (the parent landed in
     # "refused") instead of resting normally in "calling", and this
     # assertion on the parent's leaf went red.
-    test "a second identical drive does not create a second run and does not refuse", %{
+    test "a second identical drive does not create a second execution and does not refuse", %{
       store: store
     } do
       driver = driver(store, @parent_source, subchart_dispatch(@child_source))
-      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+      child_execution_id = Linkage.child_execution_id("execution_1", "call", 0)
 
       {:ok, child_machine} = Statifier.compile(@child_source)
       content_hash = Machine.identity(child_machine).content_hash
-      linkage = Linkage.new("run_1", "call", 0, content_hash)
+      linkage = Linkage.new("execution_1", "call", 0, content_hash)
 
       # Simulates the crash window ADR-0004 decision 3 names: the child
       # from an earlier, interrupted attempt already exists under the
       # derived id, with the matching linkage, when the parent's own
-      # `create/3` re-drives from a driver that has never seen either run.
-      assert {:ok, _run, _machine_state} =
-               StatifierPersistence.Runs.create(store, child_run_id, child_machine,
+      # `create/3` re-drives from a driver that has never seen either execution.
+      assert {:ok, _execution, _machine_state} =
+               StatifierPersistence.Executions.create(store, child_execution_id, child_machine,
                  executor: fn _effect, _context -> :ok end,
                  linkage: linkage
                )
 
-      assert {:ok, pre_redrive} = Storage.fetch_run(store, child_run_id)
+      assert {:ok, pre_redrive} = Storage.fetch_execution(store, child_execution_id)
 
-      assert {:ok, _run, machine_state} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, machine_state} = Driver.create(driver, "execution_1")
 
       assert leaves(machine_state) == ["calling"]
       assert Map.values(machine_state.active_invocations) == ["call"]
 
       # Not created a second time: the fetched record is byte-identical to
       # what the pre-existing child already held.
-      assert {:ok, post_redrive} = Storage.fetch_run(store, child_run_id)
+      assert {:ok, post_redrive} = Storage.fetch_execution(store, child_execution_id)
       assert post_redrive == pre_redrive
     end
 
     # Sabotage: had `resolve_child/3` swallow the compile error and return
     # `:ok` unconditionally - the refusal never fired and this assertion on
     # `error.communication.invoke.call`'s reason went red.
-    test "an unresolvable content refuses with child_run_creation_failed", %{store: store} do
+    test "an unresolvable content refuses with child_execution_creation_failed", %{store: store} do
       driver = driver(store, @parent_source, subchart_dispatch("<not scxml at all"))
 
-      assert {:ok, _run, machine_state} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, machine_state} = Driver.create(driver, "execution_1")
 
       assert leaves(machine_state) == ["refused"]
 
-      assert machine_state.datamodel["_event"]["data"]["reason"] == "child_run_creation_failed"
+      assert machine_state.datamodel["_event"]["data"]["reason"] ==
+               "child_execution_creation_failed"
     end
 
     # Sabotage: dropped the `Storage.child_listing_supported?/1` pre-check
     # from `start_child/3` - the child was created anyway against an
     # adapter that cannot enumerate it, and this assertion on "no child
-    # written" went red (the run existed under the derived id).
+    # written" went red (the execution existed under the derived id).
     test "a store whose adapter cannot enumerate children refuses and writes no child" do
       {:ok, store} = Storage.new(NoChildListingAdapter, [])
       driver = driver(store, @parent_source, subchart_dispatch(@child_source))
 
-      assert {:ok, _run, machine_state} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, machine_state} = Driver.create(driver, "execution_1")
 
       assert leaves(machine_state) == ["refused"]
-      assert machine_state.datamodel["_event"]["data"]["reason"] == "child_run_creation_failed"
 
-      child_run_id = Linkage.child_run_id("run_1", "call", 0)
-      assert {:error, :run_not_found} = Storage.fetch_run(store, child_run_id)
+      assert machine_state.datamodel["_event"]["data"]["reason"] ==
+               "child_execution_creation_failed"
+
+      child_execution_id = Linkage.child_execution_id("execution_1", "call", 0)
+      assert {:error, :execution_not_found} = Storage.fetch_execution(store, child_execution_id)
     end
 
     # Sabotage: had `create_child/5` drive the child through a bare
-    # `Runs.create/4` call (a no-op executor) instead of this module's own
+    # `Executions.create/4` call (a no-op executor) instead of this module's own
     # `create/3` - the child's own `<invoke>` never reached `:dispatch`, no
-    # grandchild was created, and `fetch_run/2` on the grandchild id went
-    # red on `:run_not_found`.
-    test "a child that itself invokes a grandchild produces a three-run tree", %{store: store} do
+    # grandchild was created, and `fetch_execution/2` on the grandchild id went
+    # red on `:execution_not_found`.
+    test "a child that itself invokes a grandchild produces a three-execution tree", %{
+      store: store
+    } do
       driver = driver(store, @parent_source, nesting_dispatch())
 
-      assert {:ok, _run, machine_state} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, machine_state} = Driver.create(driver, "execution_1")
       assert leaves(machine_state) == ["calling"]
 
-      child_run_id = Linkage.child_run_id("run_1", "call", 0)
-      grandchild_run_id = Linkage.child_run_id(child_run_id, "nested", 0)
+      child_execution_id = Linkage.child_execution_id("execution_1", "call", 0)
+      grandchild_execution_id = Linkage.child_execution_id(child_execution_id, "nested", 0)
 
-      assert {:ok, child_record} = Storage.fetch_run(store, child_run_id)
-      assert {:ok, grandchild_record} = Storage.fetch_run(store, grandchild_run_id)
+      assert {:ok, child_record} = Storage.fetch_execution(store, child_execution_id)
+      assert {:ok, grandchild_record} = Storage.fetch_execution(store, grandchild_execution_id)
 
       assert {:ok, child_linkage} = Linkage.from_metadata(child_record.metadata)
-      assert child_linkage.parent_run_id == "run_1"
+      assert child_linkage.parent_execution_id == "execution_1"
       assert child_linkage.invoke_id == "call"
 
       assert {:ok, grandchild_linkage} = Linkage.from_metadata(grandchild_record.metadata)
-      assert grandchild_linkage.parent_run_id == child_run_id
+      assert grandchild_linkage.parent_execution_id == child_execution_id
       assert grandchild_linkage.invoke_id == "nested"
     end
   end
 
   describe "completion" do
     # Sabotage: had `done_effect/1` return `nil` unconditionally - the
-    # assertion `run.donedata == "child-result"` went red (got `nil`).
-    test "a run that reaches a top-level final with donedata carries it on run.donedata", %{
-      store: store
-    } do
+    # assertion `execution.donedata == "child-result"` went red (got `nil`).
+    test "an execution that reaches a top-level final with donedata carries it on execution.donedata",
+         %{
+           store: store
+         } do
       {:ok, machine} = Statifier.compile(@child_done_source)
       driver = Driver.new(store, machine, dispatch: fn _type, _params, _ctx -> :pending end)
 
-      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
-      assert {:ok, run, _ms} = Driver.send_event(driver, "run_1", Event.external("go"))
+      assert {:ok, _execution, _ms} = Driver.create(driver, "execution_1")
 
-      assert run.status == :completed
-      assert run.donedata == "child-result"
+      assert {:ok, execution, _ms} =
+               Driver.send_event(driver, "execution_1", Event.external("go"))
+
+      assert execution.status == :completed
+      assert execution.donedata == "child-result"
     end
 
     # Sabotage: in `respond_to_parent/3`'s `{:done, donedata}` clause,
-    # called `done_invocation(driver, run_id, ...)` (the *child's* own run
-    # id) instead of `linkage.parent_run_id` - `Storage.load_run_position/3`
-    # on "run_1" still showed "calling" and the assertion on `leaves/1` went
+    # called `done_invocation(driver, execution_id, ...)` (the *child's* own execution
+    # id) instead of `linkage.parent_execution_id` - `Storage.load_execution_position/3`
+    # on "execution_1" still showed "calling" and the assertion on `leaves/1` went
     # red.
     test "with a chart_resolver, completing the child moves the parent and carries donedata", %{
       store: store
@@ -308,18 +320,20 @@ defmodule StatifierPersistence.DriverSubchartTest do
           chart_resolver: resolver
         )
 
-      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, _ms} = Driver.create(driver, "execution_1")
 
-      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+      child_execution_id = Linkage.child_execution_id("execution_1", "call", 0)
       child_driver = %{driver | machine: child_machine}
 
-      assert {:ok, child_run, _child_ms} =
-               Driver.send_event(child_driver, child_run_id, Event.external("go"))
+      assert {:ok, child_execution, _child_ms} =
+               Driver.send_event(child_driver, child_execution_id, Event.external("go"))
 
-      assert child_run.status == :completed
-      assert child_run.donedata == "child-result"
+      assert child_execution.status == :completed
+      assert child_execution.donedata == "child-result"
 
-      assert {:ok, parent_reloaded} = Storage.load_run_position(store, "run_1", parent_machine)
+      assert {:ok, parent_reloaded} =
+               Storage.load_execution_position(store, "execution_1", parent_machine)
+
       assert leaves(parent_reloaded) == ["approved"]
       assert parent_reloaded.datamodel["_event"]["data"] == "child-result"
     end
@@ -333,24 +347,27 @@ defmodule StatifierPersistence.DriverSubchartTest do
     } do
       driver = driver(store, @parent_source, subchart_dispatch(@child_done_source))
 
-      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, _ms} = Driver.create(driver, "execution_1")
 
-      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+      child_execution_id = Linkage.child_execution_id("execution_1", "call", 0)
       {:ok, child_machine} = Statifier.compile(@child_done_source)
       child_driver = %{driver | machine: child_machine}
 
-      assert {:ok, child_run, _child_ms} =
-               Driver.send_event(child_driver, child_run_id, Event.external("go"))
+      assert {:ok, child_execution, _child_ms} =
+               Driver.send_event(child_driver, child_execution_id, Event.external("go"))
 
-      assert child_run.status == :completed
+      assert child_execution.status == :completed
 
       {:ok, parent_machine} = Statifier.compile(@parent_source)
-      assert {:ok, parent_reloaded} = Storage.load_run_position(store, "run_1", parent_machine)
+
+      assert {:ok, parent_reloaded} =
+               Storage.load_execution_position(store, "execution_1", parent_machine)
+
       assert leaves(parent_reloaded) == ["calling"]
       assert Map.values(parent_reloaded.active_invocations) == ["call"]
 
-      assert {:ok, linkage} = Driver.parent_link(store, child_run_id)
-      assert linkage.parent_run_id == "run_1"
+      assert {:ok, linkage} = Driver.parent_link(store, child_execution_id)
+      assert linkage.parent_execution_id == "execution_1"
       assert linkage.invoke_id == "call"
     end
 
@@ -364,15 +381,15 @@ defmodule StatifierPersistence.DriverSubchartTest do
       {:ok, parent_machine} = Statifier.compile(@parent_source)
       driver = driver(store, @parent_source, subchart_dispatch(@child_source))
 
-      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, _ms} = Driver.create(driver, "execution_1")
 
-      child_run_id = Linkage.child_run_id("run_1", "call", 0)
-      assert {:ok, _run} = Runs.fail(store, child_run_id, "boom")
+      child_execution_id = Linkage.child_execution_id("execution_1", "call", 0)
+      assert {:ok, _execution} = Executions.fail(store, child_execution_id, "boom")
 
       parent_driver = %{driver | machine: parent_machine}
 
-      assert {:ok, _run, machine_state} =
-               Driver.answer_parent(parent_driver, child_run_id, {:failed, reason: "boom"})
+      assert {:ok, _execution, machine_state} =
+               Driver.answer_parent(parent_driver, child_execution_id, {:failed, reason: "boom"})
 
       assert leaves(machine_state) == ["refused"]
       assert machine_state.datamodel["_event"]["data"]["reason"] == "boom"
@@ -382,9 +399,10 @@ defmodule StatifierPersistence.DriverSubchartTest do
     # `resolve_and_answer/4` call with a bare `:ok` (skipping
     # `answer_parent/3` entirely) - the parent stayed in "calling" and the
     # assertion on `leaves/1` == `["approved"]` went red.
-    test "the completion path works across a restart, with a driver that has seen neither run", %{
-      store: store
-    } do
+    test "the completion path works across a restart, with a driver that has seen neither execution",
+         %{
+           store: store
+         } do
       {:ok, parent_machine} = Statifier.compile(@parent_source)
       {:ok, child_machine} = Statifier.compile(@child_done_source)
       resolver = parent_resolver(parent_machine)
@@ -394,12 +412,12 @@ defmodule StatifierPersistence.DriverSubchartTest do
           chart_resolver: resolver
         )
 
-      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, _ms} = Driver.create(driver, "execution_1")
 
-      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+      child_execution_id = Linkage.child_execution_id("execution_1", "call", 0)
 
       # A cold node: a fresh driver over only the child's own chart, built
-      # with no knowledge of the parent's run or the drive that started it -
+      # with no knowledge of the parent's execution or the drive that started it -
       # only the store and the chart_resolver.
       cold_driver =
         Driver.new(store, child_machine,
@@ -407,25 +425,27 @@ defmodule StatifierPersistence.DriverSubchartTest do
           chart_resolver: resolver
         )
 
-      assert {:ok, child_run, _ms} =
-               Driver.send_event(cold_driver, child_run_id, Event.external("go"))
+      assert {:ok, child_execution, _ms} =
+               Driver.send_event(cold_driver, child_execution_id, Event.external("go"))
 
-      assert child_run.status == :completed
-      assert child_run.donedata == "child-result"
+      assert child_execution.status == :completed
+      assert child_execution.donedata == "child-result"
 
-      assert {:ok, parent_reloaded} = Storage.load_run_position(store, "run_1", parent_machine)
+      assert {:ok, parent_reloaded} =
+               Storage.load_execution_position(store, "execution_1", parent_machine)
+
       assert leaves(parent_reloaded) == ["approved"]
       assert parent_reloaded.datamodel["_event"]["data"] == "child-result"
     end
   end
 
   # sp-y7n / RQ-SF035-9: a child failed from *outside* the interpreter,
-  # through `Runs.fail/4`, answers its parent when it is handed a driver -
+  # through `Executions.fail/4`, answers its parent when it is handed a driver -
   # the seam ADR-0008's note of 2026-09-06 records. The Ecto and SQLite
   # variants of the first case live in `DriverSubchartEctoTest` and
-  # `Ecto.SqliteMigrationsTest`; everything here runs over `InMemory`.
+  # `Ecto.SqliteMigrationsTest`; everything here executions over `InMemory`.
   describe "an outside fail on a linked child" do
-    # sabotage: in `Runs.answer_parent_of_failed/4`, replaced the `driver`
+    # sabotage: in `Executions.answer_parent_of_failed/4`, replaced the `driver`
     # clause's `Driver.resolve_and_answer_parent/3` call with a bare
     # `result` - the parent stayed in "calling" and the assertion on
     # `leaves/1` == `["refused"]` went red, together with the two cases
@@ -437,15 +457,19 @@ defmodule StatifierPersistence.DriverSubchartTest do
       driver =
         driver(store, @parent_source, subchart_dispatch(@child_source), chart_resolver: resolver)
 
-      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, _ms} = Driver.create(driver, "execution_1")
 
-      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+      child_execution_id = Linkage.child_execution_id("execution_1", "call", 0)
 
-      assert {:ok, child_run} = Runs.fail(store, child_run_id, "boom", driver: driver)
-      assert child_run.status == :failed
-      assert child_run.failure == "boom"
+      assert {:ok, child_execution} =
+               Executions.fail(store, child_execution_id, "boom", driver: driver)
 
-      assert {:ok, parent_reloaded} = Storage.load_run_position(store, "run_1", parent_machine)
+      assert child_execution.status == :failed
+      assert child_execution.failure == "boom"
+
+      assert {:ok, parent_reloaded} =
+               Storage.load_execution_position(store, "execution_1", parent_machine)
+
       assert leaves(parent_reloaded) == ["refused"]
       assert parent_reloaded.datamodel["_event"]["data"]["reason"] == "boom"
       assert parent_reloaded.active_invocations == %{}
@@ -454,12 +478,12 @@ defmodule StatifierPersistence.DriverSubchartTest do
     # ADR-0008's `after_step:` amendment (2026-09-08), clause 2's hardest
     # case and the one the seam exists for: the child's fail steps
     # nothing, and what the callback reports is the PARENT's step, under
-    # the PARENT's run id - the run the host never named and never drove.
+    # the PARENT's execution id - the execution the host never named and never drove.
     # The ordinary-drive cases are in `DriverTest`.
     #
     # sabotage: dropped the `fire_after_step/5` call from `Driver`'s
     # private `step/5`, leaving `create/3`'s - the parent's answer, which
-    # reaches `Runs.step/5` through `reenter/5` and nothing else, reported
+    # reaches `Executions.step/5` through `reenter/5` and nothing else, reported
     # nothing at all and this went red, together with `DriverTest`'s count
     # case. Verified red, reverted.
     test "with after_step:, the parent's step is reported under the parent's id", %{store: store} do
@@ -470,23 +494,25 @@ defmodule StatifierPersistence.DriverSubchartTest do
       driver =
         driver(store, @parent_source, subchart_dispatch(@child_source),
           chart_resolver: resolver,
-          after_step: fn run_id, machine_state, effects ->
-            send(test_pid, {:after_step, run_id, machine_state, effects})
+          after_step: fn execution_id, machine_state, effects ->
+            send(test_pid, {:after_step, execution_id, machine_state, effects})
           end
         )
 
-      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, _ms} = Driver.create(driver, "execution_1")
 
       # The create's own reports - the parent's step, and the child's,
       # which clause 3 says fires while the parent's exclusion is held.
       assert [_ | _] = drain_after_steps()
 
-      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+      child_execution_id = Linkage.child_execution_id("execution_1", "call", 0)
 
-      assert {:ok, child_run} = Runs.fail(store, child_run_id, "boom", driver: driver)
-      assert child_run.status == :failed
+      assert {:ok, child_execution} =
+               Executions.fail(store, child_execution_id, "boom", driver: driver)
 
-      assert [{"run_1", parent_state, effects}] = drain_after_steps()
+      assert child_execution.status == :failed
+
+      assert [{"execution_1", parent_state, effects}] = drain_after_steps()
       assert leaves(parent_state) == ["refused"]
       assert parent_state.datamodel["_event"]["data"]["reason"] == "boom"
       assert is_list(effects)
@@ -501,127 +527,134 @@ defmodule StatifierPersistence.DriverSubchartTest do
       {:ok, parent_machine} = Statifier.compile(@parent_source)
       driver = driver(store, @parent_source, subchart_dispatch(@child_source))
 
-      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, _ms} = Driver.create(driver, "execution_1")
 
-      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+      child_execution_id = Linkage.child_execution_id("execution_1", "call", 0)
       parent_driver = %{driver | machine: parent_machine}
 
-      assert {:ok, _child_run} = Runs.fail(store, child_run_id, "boom", driver: parent_driver)
+      assert {:ok, _child_run} =
+               Executions.fail(store, child_execution_id, "boom", driver: parent_driver)
 
-      assert {:ok, parent_reloaded} = Storage.load_run_position(store, "run_1", parent_machine)
+      assert {:ok, parent_reloaded} =
+               Storage.load_execution_position(store, "execution_1", parent_machine)
+
       assert leaves(parent_reloaded) == ["refused"]
     end
 
     # sabotage: replaced the `nil ->` clause of
-    # `Runs.answer_parent_of_failed/4` - the whole of what a call without
-    # `driver:` runs - with `{:error, :no_driver}`, and this case's
-    # `assert {:ok, child_run}` went red. Verified red, reverted.
+    # `Executions.answer_parent_of_failed/4` - the whole of what a call without
+    # `driver:` executions - with `{:error, :no_driver}`, and this case's
+    # `assert {:ok, child_execution}` went red. Verified red, reverted.
     test "without driver:, no linkage is read and the parent is untouched", %{store: store} do
       {:ok, parent_machine} = Statifier.compile(@parent_source)
       driver = driver(store, @parent_source, subchart_dispatch(@child_source))
 
-      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, _ms} = Driver.create(driver, "execution_1")
 
-      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+      child_execution_id = Linkage.child_execution_id("execution_1", "call", 0)
 
-      assert {:ok, child_run} = Runs.fail(store, child_run_id, "boom")
-      assert child_run.status == :failed
+      assert {:ok, child_execution} = Executions.fail(store, child_execution_id, "boom")
+      assert child_execution.status == :failed
 
-      assert {:ok, parent_reloaded} = Storage.load_run_position(store, "run_1", parent_machine)
+      assert {:ok, parent_reloaded} =
+               Storage.load_execution_position(store, "execution_1", parent_machine)
+
       assert leaves(parent_reloaded) == ["calling"]
       assert Map.values(parent_reloaded.active_invocations) == ["call"]
     end
 
     # sabotage: replaced `Driver.resolve_and_answer_parent/3`'s whole
     # `case` with a bare `{:ok, linkage} = parent_link(...)` match, so a
-    # run with no parent is a crash rather than a no-op - red, this case
+    # execution with no parent is a crash rather than a no-op - red, this case
     # and the SQLite one in `Ecto.SqliteMigrationsTest`, both with
     # `** (MatchError) no match of right hand side value: :no_parent`.
     # Verified red, reverted.
-    test "an unlinked run's fail/4 is unchanged, driver: or not", %{store: store} do
+    test "an unlinked execution's fail/4 is unchanged, driver: or not", %{store: store} do
       {:ok, machine} = Statifier.compile(@child_source)
       driver = driver(store, @parent_source, subchart_dispatch(@child_source))
 
       machine_state = Statifier.MachineState.new(machine, session_id: "sess_lone")
-      :ok = Storage.insert_run(store, "run_lone", machine_state, :active)
+      :ok = Storage.insert_execution(store, "execution_lone", machine_state, :active)
 
-      assert {:ok, run} = Runs.fail(store, "run_lone", "boom", driver: driver)
-      assert run.status == :failed
-      assert run.failure == "boom"
-      assert Driver.parent_link(store, "run_lone") == :no_parent
+      assert {:ok, execution} = Executions.fail(store, "execution_lone", "boom", driver: driver)
+      assert execution.status == :failed
+      assert execution.failure == "boom"
+      assert Driver.parent_link(store, "execution_lone") == :no_parent
     end
   end
 
   describe "cascading cancel" do
     # Sabotage: had the `{:cancel_invoke, _}` clause in `perform/5` return
-    # `:ok` unconditionally, never calling `Runs.cascade_cancel/3` - the
+    # `:ok` unconditionally, never calling `Executions.cascade_cancel/3` - the
     # child's status stayed `:active` after the parent's timeout and this
     # assertion went red.
     test "a parent that times out leaves the child cancelled with its position unchanged", %{
       store: store
     } do
       driver = driver(store, @parent_source, subchart_dispatch(@child_source))
-      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, _ms} = Driver.create(driver, "execution_1")
 
-      child_run_id = Linkage.child_run_id("run_1", "call", 0)
-      assert {:ok, before_cancel} = Storage.fetch_run(store, child_run_id)
+      child_execution_id = Linkage.child_execution_id("execution_1", "call", 0)
+      assert {:ok, before_cancel} = Storage.fetch_execution(store, child_execution_id)
       assert before_cancel.status == :active
 
-      assert {:ok, _run, machine_state} =
-               Driver.send_event(driver, "run_1", Event.external("timeout"))
+      assert {:ok, _execution, machine_state} =
+               Driver.send_event(driver, "execution_1", Event.external("timeout"))
 
       assert leaves(machine_state) == ["abandoned"]
 
-      assert {:ok, after_cancel} = Storage.fetch_run(store, child_run_id)
+      assert {:ok, after_cancel} = Storage.fetch_execution(store, child_execution_id)
       assert after_cancel.status == :cancelled
       assert after_cancel.position_blob == before_cancel.position_blob
     end
 
     # Sabotage: in `cancel_and_descend/3`, dropped the recursive
-    # `cascade_cancel(store, Linkage.parent_match(run_id), opts)` call (only
+    # `cascade_cancel(store, Linkage.parent_match(execution_id), opts)` call (only
     # the top-level record was ever cancelled) - the grandchild's status
     # stayed `:active` and this assertion went red.
     test "a three-deep tree is fully cancelled from one parent timeout", %{store: store} do
       driver = driver(store, @parent_source, nesting_dispatch())
-      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, _ms} = Driver.create(driver, "execution_1")
 
-      child_run_id = Linkage.child_run_id("run_1", "call", 0)
-      grandchild_run_id = Linkage.child_run_id(child_run_id, "nested", 0)
+      child_execution_id = Linkage.child_execution_id("execution_1", "call", 0)
+      grandchild_execution_id = Linkage.child_execution_id(child_execution_id, "nested", 0)
 
-      assert {:ok, _run, machine_state} =
-               Driver.send_event(driver, "run_1", Event.external("timeout"))
+      assert {:ok, _execution, machine_state} =
+               Driver.send_event(driver, "execution_1", Event.external("timeout"))
 
       assert leaves(machine_state) == ["abandoned"]
 
-      assert {:ok, child_record} = Storage.fetch_run(store, child_run_id)
-      assert {:ok, grandchild_record} = Storage.fetch_run(store, grandchild_run_id)
+      assert {:ok, child_record} = Storage.fetch_execution(store, child_execution_id)
+      assert {:ok, grandchild_record} = Storage.fetch_execution(store, grandchild_execution_id)
       assert child_record.status == :cancelled
       assert grandchild_record.status == :cancelled
     end
 
-    # Sabotage: in `cancel_counted/3`, called `Storage.update_run_status/4`
-    # with `:cancelled` unconditionally instead of `cancel/3` - a re-run
-    # over an already-cancelled subtree then counted every run again
+    # Sabotage: in `cancel_counted/3`, called `Storage.update_execution_status/4`
+    # with `:cancelled` unconditionally instead of `cancel/3` - a re-execution
+    # over an already-cancelled subtree then counted every execution again
     # instead of discarding, and the `{:ok, 0}` assertion went red (got
     # `{:ok, 2}`).
     test "re-running the cascade over an already-cancelled subtree writes nothing", %{
       store: store
     } do
       driver = driver(store, @parent_source, nesting_dispatch())
-      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, _ms} = Driver.create(driver, "execution_1")
 
-      assert {:ok, _run, _ms} = Driver.send_event(driver, "run_1", Event.external("timeout"))
+      assert {:ok, _execution, _ms} =
+               Driver.send_event(driver, "execution_1", Event.external("timeout"))
 
-      child_run_id = Linkage.child_run_id("run_1", "call", 0)
-      grandchild_run_id = Linkage.child_run_id(child_run_id, "nested", 0)
+      child_execution_id = Linkage.child_execution_id("execution_1", "call", 0)
+      grandchild_execution_id = Linkage.child_execution_id(child_execution_id, "nested", 0)
 
-      assert {:ok, before_child} = Storage.fetch_run(store, child_run_id)
-      assert {:ok, before_grandchild} = Storage.fetch_run(store, grandchild_run_id)
+      assert {:ok, before_child} = Storage.fetch_execution(store, child_execution_id)
+      assert {:ok, before_grandchild} = Storage.fetch_execution(store, grandchild_execution_id)
 
-      assert {:ok, 0} = Runs.cascade_cancel(store, Linkage.invocation_match("run_1", "call"))
+      assert {:ok, 0} =
+               Executions.cascade_cancel(store, Linkage.invocation_match("execution_1", "call"))
 
-      assert {:ok, after_child} = Storage.fetch_run(store, child_run_id)
-      assert {:ok, after_grandchild} = Storage.fetch_run(store, grandchild_run_id)
+      assert {:ok, after_child} = Storage.fetch_execution(store, child_execution_id)
+      assert {:ok, after_grandchild} = Storage.fetch_execution(store, grandchild_execution_id)
       assert after_child == before_child
       assert after_grandchild == before_grandchild
     end
@@ -631,25 +664,26 @@ defmodule StatifierPersistence.DriverSubchartTest do
     # the hand-cancelled child's own children were never walked, the
     # grandchild stayed `:active`, and the `{:ok, 1}` assertion went red
     # (got `{:ok, 0}`).
-    test "a cascade interrupted after the first level completes the rest when re-run", %{
+    test "a cascade interrupted after the first level completes the rest when re-execution", %{
       store: store
     } do
       driver = driver(store, @parent_source, nesting_dispatch())
-      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, _ms} = Driver.create(driver, "execution_1")
 
-      child_run_id = Linkage.child_run_id("run_1", "call", 0)
-      grandchild_run_id = Linkage.child_run_id(child_run_id, "nested", 0)
+      child_execution_id = Linkage.child_execution_id("execution_1", "call", 0)
+      grandchild_execution_id = Linkage.child_execution_id(child_execution_id, "nested", 0)
 
       # Simulates a cascade interrupted right after the first level: the
       # child is cancelled by hand, the grandchild is not.
-      assert {:ok, _run} = Runs.cancel(store, child_run_id)
-      assert {:ok, grandchild_before} = Storage.fetch_run(store, grandchild_run_id)
+      assert {:ok, _execution} = Executions.cancel(store, child_execution_id)
+      assert {:ok, grandchild_before} = Storage.fetch_execution(store, grandchild_execution_id)
       assert grandchild_before.status == :active
 
-      assert {:ok, 1} = Runs.cascade_cancel(store, Linkage.invocation_match("run_1", "call"))
+      assert {:ok, 1} =
+               Executions.cascade_cancel(store, Linkage.invocation_match("execution_1", "call"))
 
-      assert {:ok, child_after} = Storage.fetch_run(store, child_run_id)
-      assert {:ok, grandchild_after} = Storage.fetch_run(store, grandchild_run_id)
+      assert {:ok, child_after} = Storage.fetch_execution(store, child_execution_id)
+      assert {:ok, grandchild_after} = Storage.fetch_execution(store, grandchild_execution_id)
       assert child_after.status == :cancelled
       assert grandchild_after.status == :cancelled
     end
@@ -662,33 +696,33 @@ defmodule StatifierPersistence.DriverSubchartTest do
       store: store
     } do
       driver = driver(store, @parent_source, subchart_dispatch(@child_done_source))
-      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, _ms} = Driver.create(driver, "execution_1")
 
-      child_run_id = Linkage.child_run_id("run_1", "call", 0)
+      child_execution_id = Linkage.child_execution_id("execution_1", "call", 0)
       {:ok, child_machine} = Statifier.compile(@child_done_source)
       child_driver = %{driver | machine: child_machine}
 
       # Completes the child directly (this driver has no `chart_resolver:`,
       # so the parent is never told), so the parent still believes "call"
       # is live when it times out.
-      assert {:ok, child_run, _ms} =
-               Driver.send_event(child_driver, child_run_id, Event.external("go"))
+      assert {:ok, child_execution, _ms} =
+               Driver.send_event(child_driver, child_execution_id, Event.external("go"))
 
-      assert child_run.status == :completed
+      assert child_execution.status == :completed
 
-      assert {:ok, _run, machine_state} =
-               Driver.send_event(driver, "run_1", Event.external("timeout"))
+      assert {:ok, _execution, machine_state} =
+               Driver.send_event(driver, "execution_1", Event.external("timeout"))
 
       assert leaves(machine_state) == ["abandoned"]
 
-      assert {:ok, child_record} = Storage.fetch_run(store, child_run_id)
+      assert {:ok, child_record} = Storage.fetch_execution(store, child_execution_id)
       assert child_record.status == :completed
     end
 
     # No sabotage note: this asserts ADR-0007 decision 3's pre-existing
     # discard mechanism (`late_answer/3`, `driver.ex`), not new Phase 5
     # code - the core empties `active_invocations` on exit regardless of
-    # whether the cascade itself runs, so the discard holds either way.
+    # whether the cascade itself executions, so the discard holds either way.
     # Recorded here because the plan states it as this phase's acceptance
     # criterion.
     # sabotage: flipped late_answer/3's liveness check (driver.ex) so a
@@ -698,20 +732,24 @@ defmodule StatifierPersistence.DriverSubchartTest do
       store: store
     } do
       driver = driver(store, @parent_source, subchart_dispatch(@child_source))
-      assert {:ok, _run, _ms} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, _ms} = Driver.create(driver, "execution_1")
 
-      assert {:ok, _run, machine_state} =
-               Driver.send_event(driver, "run_1", Event.external("timeout"))
+      assert {:ok, _execution, machine_state} =
+               Driver.send_event(driver, "execution_1", Event.external("timeout"))
 
       assert leaves(machine_state) == ["abandoned"]
 
       {:ok, parent_machine} = Statifier.compile(@parent_source)
-      assert {:ok, before} = Storage.load_run_position(store, "run_1", parent_machine)
+      assert {:ok, before} = Storage.load_execution_position(store, "execution_1", parent_machine)
 
-      assert {:discarded, run} = Driver.done_invocation(driver, "run_1", "call", "late")
-      assert run.status == :active
+      assert {:discarded, execution} =
+               Driver.done_invocation(driver, "execution_1", "call", "late")
 
-      assert {:ok, after_completion} = Storage.load_run_position(store, "run_1", parent_machine)
+      assert execution.status == :active
+
+      assert {:ok, after_completion} =
+               Storage.load_execution_position(store, "execution_1", parent_machine)
+
       assert after_completion == before
     end
   end
@@ -806,8 +844,8 @@ defmodule StatifierPersistence.DriverSubchartTest do
 
   defp drain_after_steps(acc \\ []) do
     receive do
-      {:after_step, run_id, machine_state, effects} ->
-        drain_after_steps([{run_id, machine_state, effects} | acc])
+      {:after_step, execution_id, machine_state, effects} ->
+        drain_after_steps([{execution_id, machine_state, effects} | acc])
     after
       0 -> Enum.reverse(acc)
     end

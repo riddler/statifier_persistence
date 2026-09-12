@@ -1,13 +1,13 @@
-defmodule StatifierPersistence.RunLinkageTest do
+defmodule StatifierPersistence.ExecutionLinkageTest do
   @moduledoc """
-  `StatifierPersistence.Run.Linkage` (Phase 2): the reserved metadata
-  namespace, the child run id derivation, the two match maps, and the
+  `StatifierPersistence.Execution.Linkage` (Phase 2): the reserved metadata
+  namespace, the child execution id derivation, the two match maps, and the
   no-linkage arm.
   """
 
   use ExUnit.Case, async: true
 
-  alias StatifierPersistence.Run.Linkage
+  alias StatifierPersistence.Execution.Linkage
 
   describe "to_metadata/1 and from_metadata/1" do
     # sabotage: from_metadata/1 returns {:ok, %Linkage{}} built from
@@ -15,13 +15,13 @@ defmodule StatifierPersistence.RunLinkageTest do
     # this round-trip's asserted values would not equal the original
     # linkage's. Verified red, reverted.
     test "round-trips a linkage through the reserved namespace" do
-      linkage = Linkage.new("run_parent", "call", 0, "sha256:abc")
+      linkage = Linkage.new("execution_parent", "call", 0, "sha256:abc")
 
       metadata = Linkage.to_metadata(linkage)
 
       assert metadata == %{
                "statifier_persistence" => %{
-                 "parent_run_id" => "run_parent",
+                 "parent_execution_id" => "execution_parent",
                  "invoke_id" => "call",
                  "child_index" => 0,
                  "content_hash" => "sha256:abc"
@@ -47,47 +47,47 @@ defmodule StatifierPersistence.RunLinkageTest do
     end
   end
 
-  describe "child_run_id/3" do
-    # sabotage: child_run_id/3 returns "child" regardless of its arguments
+  describe "child_execution_id/3" do
+    # sabotage: child_execution_id/3 returns "child" regardless of its arguments
     # -> red, both the stability and the differs-on-any-input assertions
     # below failed. Verified red, reverted.
     test "is stable for the same inputs and differs when any input differs" do
-      id = Linkage.child_run_id("run_parent", "call", 0)
+      id = Linkage.child_execution_id("execution_parent", "call", 0)
 
-      assert Linkage.child_run_id("run_parent", "call", 0) == id
-      refute Linkage.child_run_id("run_other", "call", 0) == id
-      refute Linkage.child_run_id("run_parent", "other_call", 0) == id
-      refute Linkage.child_run_id("run_parent", "call", 1) == id
+      assert Linkage.child_execution_id("execution_parent", "call", 0) == id
+      refute Linkage.child_execution_id("execution_other", "call", 0) == id
+      refute Linkage.child_execution_id("execution_parent", "other_call", 0) == id
+      refute Linkage.child_execution_id("execution_parent", "call", 1) == id
     end
 
-    # sabotage: child_run_id/3 returns "child" regardless of its arguments
+    # sabotage: child_execution_id/3 returns "child" regardless of its arguments
     # -> red, both assertions below failed. Verified red, reverted.
     test "strictly starts with the parent id (the cascade's acyclicity property)" do
-      id = Linkage.child_run_id("run_parent", "call", 0)
+      id = Linkage.child_execution_id("execution_parent", "call", 0)
 
-      assert String.starts_with?(id, "run_parent")
-      refute id == "run_parent"
+      assert String.starts_with?(id, "execution_parent")
+      refute id == "execution_parent"
     end
   end
 
   describe "parent_match/1 and invocation_match/2" do
-    # sabotage: parent_match/1's inner map key changed from "parent_run_id"
+    # sabotage: parent_match/1's inner map key changed from "parent_execution_id"
     # to "WRONG_KEY" -> red, the assertion below failed on the mismatched
     # key. Verified red, reverted.
-    test "parent_match/1 is a containment map on parent_run_id alone" do
-      assert Linkage.parent_match("run_parent") == %{
-               "statifier_persistence" => %{"parent_run_id" => "run_parent"}
+    test "parent_match/1 is a containment map on parent_execution_id alone" do
+      assert Linkage.parent_match("execution_parent") == %{
+               "statifier_persistence" => %{"parent_execution_id" => "execution_parent"}
              }
     end
 
     # sabotage: invocation_match/2 dropped the "invoke_id" pair from the
     # inner map (ignored the invoke_id argument) -> red, the returned map
-    # was narrowed to parent_run_id alone instead of both keys. Verified
+    # was narrowed to parent_execution_id alone instead of both keys. Verified
     # red, reverted.
     test "invocation_match/2 narrows to one invocation" do
-      assert Linkage.invocation_match("run_parent", "call") == %{
+      assert Linkage.invocation_match("execution_parent", "call") == %{
                "statifier_persistence" => %{
-                 "parent_run_id" => "run_parent",
+                 "parent_execution_id" => "execution_parent",
                  "invoke_id" => "call"
                }
              }
@@ -100,11 +100,11 @@ defmodule StatifierPersistence.RunLinkageTest do
     # "child_count" => nil and "policy" => nil beside the four. Verified
     # red, reverted.
     test "a non-fan-out linkage stores exactly the four keys it always has" do
-      linkage = Linkage.new("run_parent", "call", 0, "sha256:abc")
+      linkage = Linkage.new("execution_parent", "call", 0, "sha256:abc")
 
       assert Linkage.to_metadata(linkage) == %{
                "statifier_persistence" => %{
-                 "parent_run_id" => "run_parent",
+                 "parent_execution_id" => "execution_parent",
                  "invoke_id" => "call",
                  "child_index" => 0,
                  "content_hash" => "sha256:abc"
@@ -119,13 +119,13 @@ defmodule StatifierPersistence.RunLinkageTest do
     # of "all", which is also not JSON-representable. Verified red,
     # reverted.
     test "a fan-out linkage round-trips both values through the reserved map" do
-      linkage = Linkage.new("run_parent", "call", 2, "sha256:abc", 3, :first_error)
+      linkage = Linkage.new("execution_parent", "call", 2, "sha256:abc", 3, :first_error)
 
       metadata = Linkage.to_metadata(linkage)
 
       assert metadata == %{
                "statifier_persistence" => %{
-                 "parent_run_id" => "run_parent",
+                 "parent_execution_id" => "execution_parent",
                  "invoke_id" => "call",
                  "child_index" => 2,
                  "content_hash" => "sha256:abc",
@@ -142,7 +142,7 @@ defmodule StatifierPersistence.RunLinkageTest do
     # below still passed but the non-fan-out assertion in the first test of
     # this block failed. Verified red, reverted.
     test "child_count: 1 is the N=1 fan-out, not a non-fan-out" do
-      linkage = Linkage.new("run_parent", "call", 0, "sha256:abc", 1, :all)
+      linkage = Linkage.new("execution_parent", "call", 0, "sha256:abc", 1, :all)
 
       assert Linkage.fan_out?(linkage)
       assert linkage.child_count == 1
@@ -154,7 +154,7 @@ defmodule StatifierPersistence.RunLinkageTest do
     # Verified red, reverted.
     test "new/6 refuses an index outside 0..child_count - 1" do
       assert_raise ArgumentError, fn ->
-        Linkage.new("run_parent", "call", 3, "sha256:abc", 3, :all)
+        Linkage.new("execution_parent", "call", 3, "sha256:abc", 3, :all)
       end
     end
 
@@ -184,7 +184,7 @@ defmodule StatifierPersistence.RunLinkageTest do
       "statifier_persistence" =>
         Map.merge(
           %{
-            "parent_run_id" => "run_parent",
+            "parent_execution_id" => "execution_parent",
             "invoke_id" => "call",
             "child_index" => 2,
             "content_hash" => "sha256:abc"

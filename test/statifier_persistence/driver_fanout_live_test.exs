@@ -31,7 +31,7 @@ defmodule StatifierPersistence.DriverFanoutLiveTest do
   alias Statifier.Machine
   alias StatifierPersistence.{Driver, Storage}
   alias StatifierPersistence.EctoHosts.Default
-  alias StatifierPersistence.Run.Linkage
+  alias StatifierPersistence.Execution.Linkage
   alias StatifierPersistence.TestRepo
 
   @adapter Storage.Ecto
@@ -73,7 +73,7 @@ defmodule StatifierPersistence.DriverFanoutLiveTest do
     Sandbox.mode(TestRepo, :auto)
 
     on_exit(fn ->
-      TestRepo.delete_all(Default.Run)
+      TestRepo.delete_all(Default.Execution)
       TestRepo.delete_all(Default.Position)
       TestRepo.delete_all(Default.Chart)
       Sandbox.mode(TestRepo, :manual)
@@ -89,14 +89,14 @@ defmodule StatifierPersistence.DriverFanoutLiveTest do
   # completed. Verified red, reverted.
   test "N children settling at once assemble every answer", %{store: store} do
     for round <- 1..@rounds do
-      parent_run_id = "run-fanout-live-#{System.unique_integer([:positive])}-#{round}"
-      parent = start_parent(store, parent_run_id)
+      parent_execution_id = "execution-fanout-live-#{System.unique_integer([:positive])}-#{round}"
+      parent = start_parent(store, parent_execution_id)
 
       for index <- 0..(@children - 1) do
         assert :ok =
                  Driver.start_child_at(
                    parent,
-                   parent_run_id,
+                   parent_execution_id,
                    effect("item-#{index}"),
                    index,
                    @children
@@ -105,12 +105,12 @@ defmodule StatifierPersistence.DriverFanoutLiveTest do
 
       tasks =
         for index <- 0..(@children - 1) do
-          Task.async(fn -> finish_child(store, parent_run_id, index) end)
+          Task.async(fn -> finish_child(store, parent_execution_id, index) end)
         end
 
       assert Enum.all?(Task.await_many(tasks, 30_000), &(&1 == :ok))
 
-      assert leaves(reload_parent(store, parent_run_id)) == ["approved"],
+      assert leaves(reload_parent(store, parent_execution_id)) == ["approved"],
              "round #{round}: the invocation did not settle"
 
       expected =
@@ -118,25 +118,25 @@ defmodule StatifierPersistence.DriverFanoutLiveTest do
           %{"index" => index, "status" => "completed", "donedata" => "item-#{index}"}
         end
 
-      assert answered(store, parent_run_id) == expected,
+      assert answered(store, parent_execution_id) == expected,
              "round #{round}: an answer was lost or assembled out of order"
     end
   end
 
-  defp start_parent(store, parent_run_id) do
+  defp start_parent(store, parent_execution_id) do
     parent = driver(store, @parent_source)
-    {:ok, _run, _machine_state} = Driver.create(parent, parent_run_id)
+    {:ok, _execution, _machine_state} = Driver.create(parent, parent_execution_id)
     parent
   end
 
   # Child `index`'s own drive, in its own task and on its own connection:
   # the terminal status and the settlement that follows it, exactly as a
-  # queue's worker runs them.
-  defp finish_child(store, parent_run_id, index) do
-    child_run_id = Linkage.child_run_id(parent_run_id, "call", index)
+  # queue's worker executions them.
+  defp finish_child(store, parent_execution_id, index) do
+    child_execution_id = Linkage.child_execution_id(parent_execution_id, "call", index)
 
-    {:ok, _run, _machine_state} =
-      Driver.send_event(child_driver(store), child_run_id, Event.external("go"))
+    {:ok, _execution, _machine_state} =
+      Driver.send_event(child_driver(store), child_execution_id, Event.external("go"))
 
     :ok
   end
@@ -153,15 +153,18 @@ defmodule StatifierPersistence.DriverFanoutLiveTest do
     driver(store, @child_source, chart_resolver: resolver)
   end
 
-  defp reload_parent(store, parent_run_id) do
+  defp reload_parent(store, parent_execution_id) do
     {:ok, parent_machine} = Statifier.compile(@parent_source)
-    {:ok, machine_state} = Storage.load_run_position(store, parent_run_id, parent_machine)
+
+    {:ok, machine_state} =
+      Storage.load_execution_position(store, parent_execution_id, parent_machine)
+
     machine_state
   end
 
-  defp answered(store, parent_run_id) do
+  defp answered(store, parent_execution_id) do
     store
-    |> reload_parent(parent_run_id)
+    |> reload_parent(parent_execution_id)
     |> Map.fetch!(:datamodel)
     |> get_in(["_event", "data"])
   end

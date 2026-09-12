@@ -36,7 +36,7 @@ defmodule StatifierPersistence.Telemetry do
     nests inside it. `span_ref` is a fresh `make_ref/0` per span, carried
     on both halves, and is the only pairing key (`st-ADR-0040` decision 2).
     Everything else is a single point-in-time event.
-  - **`run_id` is the identity key**, never `scope`; `session_id` rides
+  - **`execution_id` is the identity key**, never `scope`; `session_id` rides
     only where a position has already been decoded and is explicitly `nil`
     otherwise.
   - **Emission is unconditional.** There is no config knob and no sampling
@@ -50,22 +50,22 @@ defmodule StatifierPersistence.Telemetry do
   ## The step seam
 
   Brackets one serialized drive - `create/4`, `step/5`, `fail/4` or
-  `cancel/3` inside `StatifierPersistence.Runs`'s own `serialized/5`.
+  `cancel/3` inside `StatifierPersistence.Executions`'s own `serialized/5`.
   Emitted on the calling process. The
   `[:statifier, :session, :macrostep, ...]` span opens and closes inside
   it.
 
   | Event | Measurements | Metadata |
   |---|---|---|
-  | `[:statifier_persistence, :run, :step, :start]` | `system_time`, `monotonic_time` | `run_id`, `entry`, `span_ref` |
-  | `[:statifier_persistence, :run, :step, :stop]` | `duration`, `monotonic_time` | `run_id`, `session_id`, `content_hash`, `entry`, `outcome`, `status`, `reason`, `span_ref`, `invoke_id`, `child_count` |
-  | `[:statifier_persistence, :run, :lock]` | `duration`, `system_time` | `run_id`, `strategy`, `outcome`, `reason` |
+  | `[:statifier_persistence, :execution, :step, :start]` | `system_time`, `monotonic_time` | `execution_id`, `entry`, `span_ref` |
+  | `[:statifier_persistence, :execution, :step, :stop]` | `duration`, `monotonic_time` | `execution_id`, `session_id`, `content_hash`, `entry`, `outcome`, `status`, `reason`, `span_ref`, `invoke_id`, `child_count` |
+  | `[:statifier_persistence, :execution, :lock]` | `duration`, `system_time` | `execution_id`, `strategy`, `outcome`, `reason` |
 
   `entry` is which public door was used: `:create`, `:step`,
   `:done_invocation`, `:failed_invocation`, `:answer_parent`, `:fail`,
   `:cancel`. `outcome` on the stop is `:ok`, `:discarded` or `:error`.
-  `[:statifier_persistence, :run, :lock]`'s `duration` is the **wait** for
-  the per-run exclusion, not the held time, and its `outcome` is
+  `[:statifier_persistence, :execution, :lock]`'s `duration` is the **wait** for
+  the per-execution exclusion, not the held time, and its `outcome` is
   `:acquired` or `:unavailable`.
 
   `invoke_id` and `child_count` on the stop are `nil` on every ordinary
@@ -78,28 +78,28 @@ defmodule StatifierPersistence.Telemetry do
 
   | Event | Measurements | Metadata |
   |---|---|---|
-  | `[:statifier_persistence, :adapter, :call]` | `duration`, `system_time` | `adapter`, `callback`, `outcome`, `reason`, `run_id`, `session_id`, `content_hash` |
-  | `[:statifier_persistence, :identity, :refused]` | `system_time` | `run_id`, `session_id`, `stage`, `reason`, `stored_content_hash`, `supplied_content_hash` |
+  | `[:statifier_persistence, :adapter, :call]` | `duration`, `system_time` | `adapter`, `callback`, `outcome`, `reason`, `execution_id`, `session_id`, `content_hash` |
+  | `[:statifier_persistence, :identity, :refused]` | `system_time` | `execution_id`, `session_id`, `stage`, `reason`, `stored_content_hash`, `supplied_content_hash` |
 
   `callback` is the `StatifierPersistence.Storage.Adapter` callback name, a
   closed vocabulary fixed by the behaviour. `stage` on a refusal is
-  `:position`, `:run` or `:chart`, and `reason` is `:identity_mismatch` or
+  `:position`, `:execution` or `:chart`, and `reason` is `:identity_mismatch` or
   `:unidentified_chart`; **only the two content hashes travel**, never the
   `Statifier.Machine.Identity` structs the error term carries.
 
-  ## The run lifecycle seam
+  ## The execution lifecycle seam
 
   | Event | Measurements | Metadata |
   |---|---|---|
-  | `[:statifier_persistence, :run, :created]` | `system_time` | `run_id`, `session_id`, `content_hash`, `child?`, `metadata?` |
-  | `[:statifier_persistence, :run, :terminated]` | `system_time` | `run_id`, `session_id`, `content_hash`, `status`, `driven_by`, `reason` |
-  | `[:statifier_persistence, :run, :discarded]` | `system_time` | `run_id`, `entry`, `reason`, `repaired?` |
-  | `[:statifier_persistence, :effect, :failed]` | `system_time` | `run_id`, `session_id`, `content_hash`, `kind`, `executor`, `reason`, `reentered?` |
-  | `[:statifier_persistence, :drive, :turns_exhausted]` | `system_time`, `turns` | `run_id`, `entry` |
+  | `[:statifier_persistence, :execution, :created]` | `system_time` | `execution_id`, `session_id`, `content_hash`, `child?`, `metadata?` |
+  | `[:statifier_persistence, :execution, :terminated]` | `system_time` | `execution_id`, `session_id`, `content_hash`, `status`, `driven_by`, `reason` |
+  | `[:statifier_persistence, :execution, :discarded]` | `system_time` | `execution_id`, `entry`, `reason`, `repaired?` |
+  | `[:statifier_persistence, :effect, :failed]` | `system_time` | `execution_id`, `session_id`, `content_hash`, `kind`, `executor`, `reason`, `reentered?` |
+  | `[:statifier_persistence, :drive, :turns_exhausted]` | `system_time`, `turns` | `execution_id`, `entry` |
 
   `driven_by` on `:terminated` is `:chart` or `:host` - `fail/4` and
   `cancel/3` are the `:host` ones, and upstream emits nothing at all for
-  them. `:discarded`'s `reason` is the closed vocabulary `:terminal_run`,
+  them. `:discarded`'s `reason` is the closed vocabulary `:terminal_execution`,
   `:builder_declined`, `:position_terminal`, and only the third sets
   `repaired?: true`.
 
@@ -107,15 +107,15 @@ defmodule StatifierPersistence.Telemetry do
 
   | Event | Measurements | Metadata |
   |---|---|---|
-  | `[:statifier_persistence, :child, :started]` | `system_time` | `parent_run_id`, `child_run_id`, `invoke_id`, `child_index`, `content_hash`, `session_id` |
-  | `[:statifier_persistence, :child, :refused]` | `system_time` | `parent_run_id`, `invoke_id`, `reason` |
-  | `[:statifier_persistence, :child, :recorded]` | `system_time` | `parent_run_id`, `child_run_id`, `invoke_id`, `child_index`, `outcome` |
-  | `[:statifier_persistence, :child, :answered]` | `system_time` | `child_run_id`, `parent_run_id`, `invoke_id`, `outcome`, `child_count`, `failed_count` |
-  | `[:statifier_persistence, :child, :settled]` | `system_time`, `child_count`, `completed`, `failed`, `cancelled`, `unstarted` | `parent_run_id`, `invoke_id`, `policy`, `decision` |
-  | `[:statifier_persistence, :child, :cascade_cancelled]` | `system_time`, `count`, `retained` | `parent_run_id`, `invoke_id` |
+  | `[:statifier_persistence, :child, :started]` | `system_time` | `parent_execution_id`, `child_execution_id`, `invoke_id`, `child_index`, `content_hash`, `session_id` |
+  | `[:statifier_persistence, :child, :refused]` | `system_time` | `parent_execution_id`, `invoke_id`, `reason` |
+  | `[:statifier_persistence, :child, :recorded]` | `system_time` | `parent_execution_id`, `child_execution_id`, `invoke_id`, `child_index`, `outcome` |
+  | `[:statifier_persistence, :child, :answered]` | `system_time` | `child_execution_id`, `parent_execution_id`, `invoke_id`, `outcome`, `child_count`, `failed_count` |
+  | `[:statifier_persistence, :child, :settled]` | `system_time`, `child_count`, `completed`, `failed`, `cancelled`, `unstarted` | `parent_execution_id`, `invoke_id`, `policy`, `decision` |
+  | `[:statifier_persistence, :child, :cascade_cancelled]` | `system_time`, `count`, `retained` | `parent_execution_id`, `invoke_id` |
 
   `content_hash` on `:started` is the child's *pinned* hash (ADR-0008
-  decision 2). `count` on `:cascade_cancelled` is how many runs the sweep
+  decision 2). `count` on `:cascade_cancelled` is how many executions the sweep
   actually cancelled and `retained` is how many it found already terminal
   and left alone; both are legitimately `0`.
 
@@ -131,7 +131,7 @@ defmodule StatifierPersistence.Telemetry do
   ## Cardinality and disclosure
 
   Every metadata key is bounded by the chart or by a closed vocabulary
-  except `run_id` (and `parent_run_id` / `child_run_id`), which is
+  except `execution_id` (and `parent_execution_id` / `child_execution_id`), which is
   host-supplied and is a correlation id for a span or a log line, **never
   a metric dimension**, and `reason`, which carries an arbitrary executor
   or adapter term on some events and must be narrowed before it becomes a
@@ -141,7 +141,7 @@ defmodule StatifierPersistence.Telemetry do
   event** (ADR-0009 decision 7): not the `chart_blob`, the
   `position_blob`, the `identity_blob`, the ADR-0006 `metadata` map, the
   datamodel, an invoke's `params`, or a `:done` effect's `donedata`.
-  `metadata?` on `[:statifier_persistence, :run, :created]` is a boolean -
+  `metadata?` on `[:statifier_persistence, :execution, :created]` is a boolean -
   whether a non-empty host map was supplied - and that is the whole of
   what this contract says about it.
   """
@@ -157,14 +157,14 @@ defmodule StatifierPersistence.Telemetry do
   """
   @type fields :: keyword()
 
-  @run_step_start [:statifier_persistence, :run, :step, :start]
-  @run_step_stop [:statifier_persistence, :run, :step, :stop]
-  @run_lock [:statifier_persistence, :run, :lock]
+  @execution_step_start [:statifier_persistence, :execution, :step, :start]
+  @execution_step_stop [:statifier_persistence, :execution, :step, :stop]
+  @execution_lock [:statifier_persistence, :execution, :lock]
   @adapter_call [:statifier_persistence, :adapter, :call]
   @identity_refused [:statifier_persistence, :identity, :refused]
-  @run_created [:statifier_persistence, :run, :created]
-  @run_terminated [:statifier_persistence, :run, :terminated]
-  @run_discarded [:statifier_persistence, :run, :discarded]
+  @execution_created [:statifier_persistence, :execution, :created]
+  @execution_terminated [:statifier_persistence, :execution, :terminated]
+  @execution_discarded [:statifier_persistence, :execution, :discarded]
   @effect_failed [:statifier_persistence, :effect, :failed]
   @drive_turns_exhausted [:statifier_persistence, :drive, :turns_exhausted]
   @child_started [:statifier_persistence, :child, :started]
@@ -175,14 +175,14 @@ defmodule StatifierPersistence.Telemetry do
   @child_cascade_cancelled [:statifier_persistence, :child, :cascade_cancelled]
 
   @events [
-    @run_step_start,
-    @run_step_stop,
-    @run_lock,
+    @execution_step_start,
+    @execution_step_stop,
+    @execution_lock,
     @adapter_call,
     @identity_refused,
-    @run_created,
-    @run_terminated,
-    @run_discarded,
+    @execution_created,
+    @execution_terminated,
+    @execution_discarded,
     @effect_failed,
     @drive_turns_exhausted,
     @child_started,
@@ -205,8 +205,8 @@ defmodule StatifierPersistence.Telemetry do
   def events, do: @events
 
   @doc """
-  Emits `[:statifier_persistence, :run, :step, :start]` and returns the
-  `System.monotonic_time/0` reading `run_step_stop/2` measures `duration`
+  Emits `[:statifier_persistence, :execution, :step, :start]` and returns the
+  `System.monotonic_time/0` reading `execution_step_stop/2` measures `duration`
   against.
 
   Returning the reading rather than taking one is deliberate: it is the
@@ -214,32 +214,33 @@ defmodule StatifierPersistence.Telemetry do
   `duration` and the two halves' `monotonic_time` values cannot drift
   apart.
   """
-  @spec run_step_start(run_id :: term(), entry :: atom(), span_ref :: reference()) :: integer()
-  def run_step_start(run_id, entry, span_ref) do
+  @spec execution_step_start(execution_id :: term(), entry :: atom(), span_ref :: reference()) ::
+          integer()
+  def execution_step_start(execution_id, entry, span_ref) do
     monotonic_time = System.monotonic_time()
 
     :telemetry.execute(
-      @run_step_start,
+      @execution_step_start,
       %{system_time: System.system_time(), monotonic_time: monotonic_time},
-      %{run_id: run_id, entry: entry, span_ref: span_ref}
+      %{execution_id: execution_id, entry: entry, span_ref: span_ref}
     )
 
     monotonic_time
   end
 
   @doc """
-  Emits `[:statifier_persistence, :run, :step, :stop]`, `duration` in
-  `:native` units measured from `run_step_start/3`'s reading.
+  Emits `[:statifier_persistence, :execution, :step, :stop]`, `duration` in
+  `:native` units measured from `execution_step_start/3`'s reading.
   """
-  @spec run_step_stop(start_time :: integer(), fields :: fields()) :: :ok
-  def run_step_stop(start_time, fields) do
+  @spec execution_step_stop(start_time :: integer(), fields :: fields()) :: :ok
+  def execution_step_stop(start_time, fields) do
     monotonic_time = System.monotonic_time()
 
     :telemetry.execute(
-      @run_step_stop,
+      @execution_step_stop,
       %{duration: monotonic_time - start_time, monotonic_time: monotonic_time},
       %{
-        run_id: fields[:run_id],
+        execution_id: fields[:execution_id],
         session_id: fields[:session_id],
         content_hash: fields[:content_hash],
         entry: fields[:entry],
@@ -254,16 +255,16 @@ defmodule StatifierPersistence.Telemetry do
   end
 
   @doc """
-  Emits `[:statifier_persistence, :run, :lock]`. `duration` is the wait
-  for the per-run exclusion in `:native` units, never the held time.
+  Emits `[:statifier_persistence, :execution, :lock]`. `duration` is the wait
+  for the per-execution exclusion in `:native` units, never the held time.
   """
-  @spec run_lock(duration :: integer(), fields :: fields()) :: :ok
-  def run_lock(duration, fields) do
+  @spec execution_lock(duration :: integer(), fields :: fields()) :: :ok
+  def execution_lock(duration, fields) do
     :telemetry.execute(
-      @run_lock,
+      @execution_lock,
       %{duration: duration, system_time: System.system_time()},
       %{
-        run_id: fields[:run_id],
+        execution_id: fields[:execution_id],
         strategy: fields[:strategy],
         outcome: fields[:outcome],
         reason: fields[:reason]
@@ -285,7 +286,7 @@ defmodule StatifierPersistence.Telemetry do
         callback: fields[:callback],
         outcome: fields[:outcome],
         reason: fields[:reason],
-        run_id: fields[:run_id],
+        execution_id: fields[:execution_id],
         session_id: fields[:session_id],
         content_hash: fields[:content_hash]
       }
@@ -306,7 +307,7 @@ defmodule StatifierPersistence.Telemetry do
       @identity_refused,
       %{system_time: System.system_time()},
       %{
-        run_id: fields[:run_id],
+        execution_id: fields[:execution_id],
         session_id: fields[:session_id],
         stage: fields[:stage],
         reason: fields[:reason],
@@ -316,14 +317,14 @@ defmodule StatifierPersistence.Telemetry do
     )
   end
 
-  @doc "Emits `[:statifier_persistence, :run, :created]`."
-  @spec run_created(fields :: fields()) :: :ok
-  def run_created(fields) do
+  @doc "Emits `[:statifier_persistence, :execution, :created]`."
+  @spec execution_created(fields :: fields()) :: :ok
+  def execution_created(fields) do
     :telemetry.execute(
-      @run_created,
+      @execution_created,
       %{system_time: System.system_time()},
       %{
-        run_id: fields[:run_id],
+        execution_id: fields[:execution_id],
         session_id: fields[:session_id],
         content_hash: fields[:content_hash],
         child?: fields[:child?],
@@ -333,18 +334,18 @@ defmodule StatifierPersistence.Telemetry do
   end
 
   @doc """
-  Emits `[:statifier_persistence, :run, :terminated]`. `driven_by` is
+  Emits `[:statifier_persistence, :execution, :terminated]`. `driven_by` is
   `:chart` for a `:done`/`:budget_exhausted` termination and `:host` for
-  `StatifierPersistence.Runs.fail/4` and `cancel/3`, which no interpreter
+  `StatifierPersistence.Executions.fail/4` and `cancel/3`, which no interpreter
   runs on and which upstream therefore never reports.
   """
-  @spec run_terminated(fields :: fields()) :: :ok
-  def run_terminated(fields) do
+  @spec execution_terminated(fields :: fields()) :: :ok
+  def execution_terminated(fields) do
     :telemetry.execute(
-      @run_terminated,
+      @execution_terminated,
       %{system_time: System.system_time()},
       %{
-        run_id: fields[:run_id],
+        execution_id: fields[:execution_id],
         session_id: fields[:session_id],
         content_hash: fields[:content_hash],
         status: fields[:status],
@@ -354,14 +355,14 @@ defmodule StatifierPersistence.Telemetry do
     )
   end
 
-  @doc "Emits `[:statifier_persistence, :run, :discarded]`."
-  @spec run_discarded(fields :: fields()) :: :ok
-  def run_discarded(fields) do
+  @doc "Emits `[:statifier_persistence, :execution, :discarded]`."
+  @spec execution_discarded(fields :: fields()) :: :ok
+  def execution_discarded(fields) do
     :telemetry.execute(
-      @run_discarded,
+      @execution_discarded,
       %{system_time: System.system_time()},
       %{
-        run_id: fields[:run_id],
+        execution_id: fields[:execution_id],
         entry: fields[:entry],
         reason: fields[:reason],
         repaired?: fields[:repaired?]
@@ -382,7 +383,7 @@ defmodule StatifierPersistence.Telemetry do
       @effect_failed,
       %{system_time: System.system_time()},
       %{
-        run_id: fields[:run_id],
+        execution_id: fields[:execution_id],
         session_id: fields[:session_id],
         content_hash: fields[:content_hash],
         kind: fields[:kind],
@@ -403,7 +404,7 @@ defmodule StatifierPersistence.Telemetry do
     :telemetry.execute(
       @drive_turns_exhausted,
       %{system_time: System.system_time(), turns: turns},
-      %{run_id: fields[:run_id], entry: fields[:entry]}
+      %{execution_id: fields[:execution_id], entry: fields[:entry]}
     )
   end
 
@@ -414,8 +415,8 @@ defmodule StatifierPersistence.Telemetry do
       @child_started,
       %{system_time: System.system_time()},
       %{
-        parent_run_id: fields[:parent_run_id],
-        child_run_id: fields[:child_run_id],
+        parent_execution_id: fields[:parent_execution_id],
+        child_execution_id: fields[:child_execution_id],
         invoke_id: fields[:invoke_id],
         child_index: fields[:child_index],
         content_hash: fields[:content_hash],
@@ -431,7 +432,7 @@ defmodule StatifierPersistence.Telemetry do
       @child_refused,
       %{system_time: System.system_time()},
       %{
-        parent_run_id: fields[:parent_run_id],
+        parent_execution_id: fields[:parent_execution_id],
         invoke_id: fields[:invoke_id],
         reason: fields[:reason]
       }
@@ -440,7 +441,7 @@ defmodule StatifierPersistence.Telemetry do
 
   @doc """
   Emits `[:statifier_persistence, :child, :recorded]` - one fan-out
-  child's own answer, persisted on its own run record inside the parent's
+  child's own answer, persisted on its own execution record inside the parent's
   settlement exclusion.
 
   Every index but the last records an answer that never reaches the
@@ -453,8 +454,8 @@ defmodule StatifierPersistence.Telemetry do
       @child_recorded,
       %{system_time: System.system_time()},
       %{
-        parent_run_id: fields[:parent_run_id],
-        child_run_id: fields[:child_run_id],
+        parent_execution_id: fields[:parent_execution_id],
+        child_execution_id: fields[:child_execution_id],
         invoke_id: fields[:invoke_id],
         child_index: fields[:child_index],
         outcome: fields[:outcome]
@@ -474,8 +475,8 @@ defmodule StatifierPersistence.Telemetry do
       @child_answered,
       %{system_time: System.system_time()},
       %{
-        child_run_id: fields[:child_run_id],
-        parent_run_id: fields[:parent_run_id],
+        child_execution_id: fields[:child_execution_id],
+        parent_execution_id: fields[:parent_execution_id],
         invoke_id: fields[:invoke_id],
         outcome: fields[:outcome],
         child_count: fields[:child_count],
@@ -490,7 +491,7 @@ defmodule StatifierPersistence.Telemetry do
 
   `counts` is the measurement map: `child_count` and the four tallies over
   the invocation's indexes. They partition `child_count` only once every
-  index has a run of its own, which is what makes `unstarted` worth
+  index has an execution of its own, which is what makes `unstarted` worth
   reading - it tells a fan-out still starting from one that is stuck.
   """
   @spec child_settled(counts :: %{atom() => non_neg_integer()}, fields :: fields()) :: :ok
@@ -499,7 +500,7 @@ defmodule StatifierPersistence.Telemetry do
       @child_settled,
       Map.put(counts, :system_time, System.system_time()),
       %{
-        parent_run_id: fields[:parent_run_id],
+        parent_execution_id: fields[:parent_execution_id],
         invoke_id: fields[:invoke_id],
         policy: fields[:policy],
         decision: fields[:decision]
@@ -509,7 +510,7 @@ defmodule StatifierPersistence.Telemetry do
 
   @doc """
   Emits `[:statifier_persistence, :child, :cascade_cancelled]` once per
-  public `StatifierPersistence.Runs.cascade_cancel/3` call, after the
+  public `StatifierPersistence.Executions.cascade_cancel/3` call, after the
   whole sweep - never once per node of the walk.
   """
   @spec child_cascade_cancelled(
@@ -521,7 +522,7 @@ defmodule StatifierPersistence.Telemetry do
     :telemetry.execute(
       @child_cascade_cancelled,
       %{system_time: System.system_time(), count: count, retained: retained},
-      %{parent_run_id: fields[:parent_run_id], invoke_id: fields[:invoke_id]}
+      %{parent_execution_id: fields[:parent_execution_id], invoke_id: fields[:invoke_id]}
     )
   end
 end

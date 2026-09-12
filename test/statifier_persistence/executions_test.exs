@@ -1,5 +1,7 @@
-defmodule StatifierPersistence.RunsTest do
+defmodule StatifierPersistence.ExecutionsTest do
   use ExUnit.Case, async: true
+
+  import ExUnit.CaptureLog
 
   defmodule SpyStrategy do
     @moduledoc false
@@ -10,8 +12,8 @@ defmodule StatifierPersistence.RunsTest do
     @behaviour StatifierPersistence.Serialization
 
     @impl StatifierPersistence.Serialization
-    def with_run(test_pid, run_id, fun) do
-      send(test_pid, {:with_run, run_id})
+    def with_execution(test_pid, execution_id, fun) do
+      send(test_pid, {:with_execution, execution_id})
       {:ok, fun.()}
     end
   end
@@ -31,8 +33,8 @@ defmodule StatifierPersistence.RunsTest do
   alias Statifier.Machine
   alias Statifier.MachineState
   alias Statifier.Send.Routes
-  alias StatifierPersistence.{Run, Runs, Storage}
-  alias StatifierPersistence.Run.Linkage
+  alias StatifierPersistence.{Execution, Executions, Storage}
+  alias StatifierPersistence.Execution.Linkage
   alias StatifierPersistence.Storage.InMemory
   alias StatifierPersistence.Test.{FlakyAdapter, NoLockAdapter, RecordingExecutor}
   alias StatifierPersistence.Testing.Charts
@@ -77,7 +79,7 @@ defmodule StatifierPersistence.RunsTest do
   # The other half of the same exit procedure: a top-level <final> whose
   # <donedata> expression cannot evaluate. The failure raises an
   # error.execution during the exit walk, which the same discard takes with
-  # the rest of the queue - so this terminates quiescent too, and the run
+  # the rest of the queue - so this terminates quiescent too, and the execution
   # completes rather than failing.
   @failing_donedata_chart_source """
   <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="a">
@@ -93,7 +95,7 @@ defmodule StatifierPersistence.RunsTest do
   # ADR-0008's 2026-09-06 amendment: "ok" reaches an ordinary final,
   # "bad" reaches one tagged failure-classed in its own <donedata>, and
   # "shrug" reaches one carrying the reserved key with a value outside the
-  # closed set. One chart, so the three arms of run_status/2 are exercised
+  # closed set. One chart, so the three arms of execution_status/2 are exercised
   # over the same compile.
   @failure_classed_final_source """
   <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="a">
@@ -107,13 +109,13 @@ defmodule StatifierPersistence.RunsTest do
       </final>
       <final id="ended_badly">
           <donedata>
-              <param name="statifier_persistence:run_status" expr="'failed'"/>
+              <param name="statifier_persistence:execution_status" expr="'failed'"/>
               <param name="detail" expr="'declined'"/>
           </donedata>
       </final>
       <final id="ended_vaguely">
           <donedata>
-              <param name="statifier_persistence:run_status" expr="'cancelled'"/>
+              <param name="statifier_persistence:execution_status" expr="'cancelled'"/>
           </donedata>
       </final>
   </scxml>
@@ -166,7 +168,7 @@ defmodule StatifierPersistence.RunsTest do
   </scxml>
   """
 
-  # A <log> the executor can fail - observational, so the run must not
+  # A <log> the executor can fail - observational, so the execution must not
   # take the error.communication transition that would betray a re-entry.
   @log_error_chart_source """
   <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="a">
@@ -206,7 +208,7 @@ defmodule StatifierPersistence.RunsTest do
   """
 
   # Quiescent at "idle"; "boom" enters a raise cycle that spends whatever
-  # macrostep budget the run was created with.
+  # macrostep budget the execution was created with.
   @loop_after_event_source """
   <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="idle">
       <state id="idle">
@@ -302,30 +304,34 @@ defmodule StatifierPersistence.RunsTest do
   end
 
   describe "create/4" do
-    # sabotage: write_run/6 inserts with position: :skip -> red (:run_position_missing)
-    test "persists an :active run whose blob decodes to the initialized configuration",
+    # sabotage: write_execution/6 inserts with position: :skip -> red (:execution_position_missing)
+    test "persists an :active execution whose blob decodes to the initialized configuration",
          %{store: store} do
       {_source, machine} = Charts.chart_a()
 
-      assert {:ok, %Run{run_id: "run-1", status: :active, failure: nil}, %MachineState{} = ms} =
-               Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+      assert {:ok, %Execution{execution_id: "execution-1", status: :active, failure: nil},
+              %MachineState{} = ms} =
+               Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
 
-      assert {:ok, %{status: :active, failure: nil}} = Storage.fetch_run(store, "run-1")
-      assert {:ok, loaded} = Storage.load_run_position(store, "run-1", machine)
+      assert {:ok, %{status: :active, failure: nil}} =
+               Storage.fetch_execution(store, "execution-1")
+
+      assert {:ok, loaded} = Storage.load_execution_position(store, "execution-1", machine)
       assert loaded.configuration == ms.configuration
     end
 
-    # sabotage: persist_tail/6 swallows write_run/6's result and returns {:ok, ...} -> red
-    test "on an existing run id returns {:error, :run_exists}", %{store: store} do
+    # sabotage: persist_tail/6 swallows write_execution/6's result and returns {:ok, ...} -> red
+    test "on an existing execution id returns {:error, :execution_exists}", %{store: store} do
       {_source, machine} = Charts.chart_a()
 
-      assert {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+      assert {:ok, _execution, _ms} =
+               Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
 
-      assert {:error, :run_exists} =
-               Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+      assert {:error, :execution_exists} =
+               Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
     end
 
-    # sabotage: runs.ex's metadata/1 drops the Map.has_key?/2 guard clause
+    # sabotage: executions.ex's metadata/1 drops the Map.has_key?/2 guard clause
     # (falls straight through to the Keyword.get(:linkage) case) -> red, a
     # host-supplied reserved key was accepted silently instead of raising.
     # Verified red, reverted.
@@ -334,29 +340,32 @@ defmodule StatifierPersistence.RunsTest do
       {_source, machine} = Charts.chart_a()
 
       assert_raise ArgumentError, ~r/statifier_persistence.*reserved/, fn ->
-        Runs.create(store, "run-1", machine,
+        Executions.create(store, "execution-1", machine,
           executor: RecordingExecutor,
           metadata: %{"statifier_persistence" => %{"anything" => "at all"}}
         )
       end
 
-      assert {:error, :run_not_found} = Storage.fetch_run(store, "run-1")
+      assert {:error, :execution_not_found} = Storage.fetch_execution(store, "execution-1")
     end
 
-    # sabotage: runs.ex's metadata/1 merge arm changed to `%Linkage{} =
+    # sabotage: executions.ex's metadata/1 merge arm changed to `%Linkage{} =
     # _linkage -> supplied` (drops the Map.merge/2 of Linkage.to_metadata/1)
     # -> red, the reserved namespace never reached the stored record and
     # from_metadata/1 answered :no_linkage instead of {:ok, ^linkage}.
     # Verified red, reverted.
-    test "with linkage: stores the reserved namespace and it reads back through fetch_run/2",
+    test "with linkage: stores the reserved namespace and it reads back through fetch_execution/2",
          %{store: store} do
       {_source, machine} = Charts.chart_a()
-      linkage = Linkage.new("run_parent", "call", 0, "sha256:child")
+      linkage = Linkage.new("execution_parent", "call", 0, "sha256:child")
 
-      assert {:ok, %Run{run_id: "run-1"}, _ms} =
-               Runs.create(store, "run-1", machine, executor: RecordingExecutor, linkage: linkage)
+      assert {:ok, %Execution{execution_id: "execution-1"}, _ms} =
+               Executions.create(store, "execution-1", machine,
+                 executor: RecordingExecutor,
+                 linkage: linkage
+               )
 
-      assert {:ok, %{metadata: metadata}} = Storage.fetch_run(store, "run-1")
+      assert {:ok, %{metadata: metadata}} = Storage.fetch_execution(store, "execution-1")
       assert {:ok, ^linkage} = Linkage.from_metadata(metadata)
     end
 
@@ -368,45 +377,50 @@ defmodule StatifierPersistence.RunsTest do
     test "merges a host's metadata: with linkage: rather than dropping either",
          %{store: store} do
       {_source, machine} = Charts.chart_a()
-      linkage = Linkage.new("run_parent", "call", 0, "sha256:child")
+      linkage = Linkage.new("execution_parent", "call", 0, "sha256:child")
 
-      assert {:ok, _run, _ms} =
-               Runs.create(store, "run-1", machine,
+      assert {:ok, _execution, _ms} =
+               Executions.create(store, "execution-1", machine,
                  executor: RecordingExecutor,
                  metadata: %{"tenant_id" => "acct_1"},
                  linkage: linkage
                )
 
-      assert {:ok, %{metadata: metadata}} = Storage.fetch_run(store, "run-1")
+      assert {:ok, %{metadata: metadata}} = Storage.fetch_execution(store, "execution-1")
       assert metadata["tenant_id"] == "acct_1"
       assert {:ok, ^linkage} = Linkage.from_metadata(metadata)
     end
   end
 
   describe "step/5" do
-    # sabotage: write_run/6 updates with position: :skip -> red (stored config stays initial)
+    # sabotage: write_execution/6 updates with position: :skip -> red (stored config stays initial)
     test "advances the position and persists it", %{store: store} do
       {_source, machine} = Charts.chart_a()
-      {:ok, _run, initial} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
 
-      assert {:ok, %Run{status: :active}, %MachineState{} = stepped} =
-               Runs.step(store, "run-1", machine, Event.external("go"),
+      {:ok, _execution, initial} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      assert {:ok, %Execution{status: :active}, %MachineState{} = stepped} =
+               Executions.step(store, "execution-1", machine, Event.external("go"),
                  executor: RecordingExecutor
                )
 
       refute stepped.configuration == initial.configuration
-      assert {:ok, loaded} = Storage.load_run_position(store, "run-1", machine)
+      assert {:ok, loaded} = Storage.load_execution_position(store, "execution-1", machine)
       assert loaded.configuration == stepped.configuration
     end
 
     # sabotage: execute_effects/3 reverses the effect list before executing -> red
     test "hands effects to the executor in list order, excluding :done", %{store: store} do
       machine = compile!(@final_chart_source)
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
       RecordingExecutor.reset()
 
-      assert {:ok, _run, _ms} =
-               Runs.step(store, "run-1", machine, Event.external("finish"),
+      assert {:ok, _execution, _ms} =
+               Executions.step(store, "execution-1", machine, Event.external("finish"),
                  executor: RecordingExecutor
                )
 
@@ -414,18 +428,20 @@ defmodule StatifierPersistence.RunsTest do
                RecordingExecutor.effects()
     end
 
-    # sabotage: run_status/2 drops the status == :done -> :completed arm -> red
-    test "a chart reaching top-level final completes the run and consumes {:done, _}",
+    # sabotage: execution_status/2 drops the status == :done -> :completed arm -> red
+    test "a chart reaching top-level final completes the execution and consumes {:done, _}",
          %{store: store} do
       machine = compile!(@final_chart_source)
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
 
-      assert {:ok, %Run{status: :completed}, %MachineState{status: :done}} =
-               Runs.step(store, "run-1", machine, Event.external("finish"),
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      assert {:ok, %Execution{status: :completed}, %MachineState{status: :done}} =
+               Executions.step(store, "execution-1", machine, Event.external("finish"),
                  executor: RecordingExecutor
                )
 
-      assert {:ok, %{status: :completed}} = Storage.fetch_run(store, "run-1")
+      assert {:ok, %{status: :completed}} = Storage.fetch_execution(store, "execution-1")
       refute Enum.any?(RecordingExecutor.effects(), &match?({:done, _}, &1))
     end
 
@@ -433,95 +449,109 @@ defmodule StatifierPersistence.RunsTest do
     # queue-discard fix (STATIFIER_PATH at 1f865f7^) -> red, the terminated
     # state carries the unprocessed done.state.root and assert_quiescent/2
     # raises "loop bug: non-quiescent MachineState reached the persist tail"
-    # before any run record is written. Verified red, reverted.
-    test "a top-level final reached with a sibling done.state still queued completes the run",
+    # before any execution record is written. Verified red, reverted.
+    test "a top-level final reached with a sibling done.state still queued completes the execution",
          %{store: store} do
       machine = compile!(@queued_done_state_chart_source)
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
 
-      assert {:ok, %Run{status: :completed, failure: nil},
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      assert {:ok, %Execution{status: :completed, failure: nil},
               %MachineState{status: :done} = terminal} =
-               Runs.step(store, "run-1", machine, Event.external("finish"),
+               Executions.step(store, "execution-1", machine, Event.external("finish"),
                  executor: RecordingExecutor
                )
 
       assert MachineState.internal_queue_empty?(terminal)
-      assert {:ok, %{status: :completed}} = Storage.fetch_run(store, "run-1")
+      assert {:ok, %{status: :completed}} = Storage.fetch_execution(store, "execution-1")
 
-      assert {:ok, persisted} = Storage.load_run_position(store, "run-1", machine)
+      assert {:ok, persisted} = Storage.load_execution_position(store, "execution-1", machine)
       assert MachineState.internal_queue_empty?(persisted)
     end
 
     # The failing <donedata> expression leaves Effect.Done's donedata
-    # :undefined upstream, and Runs consumes the {:done, _} effect rather
+    # :undefined upstream, and Executions consumes the {:done, _} effect rather
     # than handing it to the executor, so what this asserts here is the
-    # persistence-visible half: the failure is not a run failure.
+    # persistence-visible half: the failure is not an execution failure.
     #
     # sabotage: same dep mutation as the test above (STATIFIER_PATH at
     # 1f865f7^) -> red, the error.execution the failed expression raises
     # survives on the terminated state's queue and assert_quiescent/2
     # raises. Verified red, reverted.
-    test "a top-level final whose <donedata> expression fails completes the run", %{store: store} do
+    test "a top-level final whose <donedata> expression fails completes the execution", %{
+      store: store
+    } do
       machine = compile!(@failing_donedata_chart_source)
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
 
-      assert {:ok, %Run{status: :completed, failure: nil},
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      assert {:ok, %Execution{status: :completed, failure: nil},
               %MachineState{status: :done} = terminal} =
-               Runs.step(store, "run-1", machine, Event.external("finish"),
+               Executions.step(store, "execution-1", machine, Event.external("finish"),
                  executor: RecordingExecutor
                )
 
       assert MachineState.internal_queue_empty?(terminal)
-      assert {:ok, %{status: :completed}} = Storage.fetch_run(store, "run-1")
+      assert {:ok, %{status: :completed}} = Storage.fetch_execution(store, "execution-1")
 
-      assert {:ok, persisted} = Storage.load_run_position(store, "run-1", machine)
+      assert {:ok, persisted} = Storage.load_execution_position(store, "execution-1", machine)
       assert MachineState.internal_queue_empty?(persisted)
     end
 
-    # sabotage: Run.from_record/1 hardcodes status: :active -> red
-    test "on a completed run discards without invoking the executor", %{store: store} do
+    # sabotage: Execution.from_record/1 hardcodes status: :active -> red
+    test "on a completed execution discards without invoking the executor", %{store: store} do
       machine = compile!(@final_chart_source)
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
 
-      {:ok, %Run{status: :completed}, _ms} =
-        Runs.step(store, "run-1", machine, Event.external("finish"), executor: RecordingExecutor)
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      {:ok, %Execution{status: :completed}, _ms} =
+        Executions.step(store, "execution-1", machine, Event.external("finish"),
+          executor: RecordingExecutor
+        )
 
       RecordingExecutor.reset()
 
-      assert {:discarded, %Run{run_id: "run-1", status: :completed}} =
-               Runs.step(store, "run-1", machine, Event.external("finish"),
+      assert {:discarded, %Execution{execution_id: "execution-1", status: :completed}} =
+               Executions.step(store, "execution-1", machine, Event.external("finish"),
                  executor: RecordingExecutor
                )
 
       assert RecordingExecutor.calls() == []
     end
 
-    # sabotage: repair_terminal/3 skips the Storage.update_run/5 repair -> red (record stays :active)
-    test "a run record whose :active status lies about a terminal position is discarded and repaired",
+    # sabotage: repair_terminal/3 skips the Storage.update_execution/5 repair -> red (record stays :active)
+    test "an execution record whose :active status lies about a terminal position is discarded and repaired",
          %{store: store} do
       machine = compile!(@final_chart_source)
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
 
-      {:ok, _run, terminal_ms} =
-        Runs.step(store, "run-1", machine, Event.external("finish"), executor: RecordingExecutor)
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      {:ok, _execution, terminal_ms} =
+        Executions.step(store, "execution-1", machine, Event.external("finish"),
+          executor: RecordingExecutor
+        )
 
       # Hand-write the lie: a terminal stored position under an :active
       # status, the state a crash between chart completion and record
       # update would leave behind.
-      :ok = Storage.update_run(store, "run-1", terminal_ms, :active)
+      :ok = Storage.update_execution(store, "execution-1", terminal_ms, :active)
       RecordingExecutor.reset()
 
-      assert {:discarded, %Run{status: :completed}} =
-               Runs.step(store, "run-1", machine, Event.external("finish"),
+      assert {:discarded, %Execution{status: :completed}} =
+               Executions.step(store, "execution-1", machine, Event.external("finish"),
                  executor: RecordingExecutor
                )
 
       assert RecordingExecutor.calls() == []
-      assert {:ok, %{status: :completed}} = Storage.fetch_run(store, "run-1")
+      assert {:ok, %{status: :completed}} = Storage.fetch_execution(store, "execution-1")
     end
 
     # sabotage: Executor.run/3's fun clause returns :ok without calling the fun -> red
-    test "accepts an arity-2 fun as executor and passes the run context", %{store: store} do
+    test "accepts an arity-2 fun as executor and passes the execution context", %{store: store} do
       machine = compile!(@final_chart_source)
       parent = self()
 
@@ -530,15 +560,15 @@ defmodule StatifierPersistence.RunsTest do
         :ok
       end
 
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: fun)
+      {:ok, _execution, _ms} = Executions.create(store, "execution-1", machine, executor: fun)
 
-      {:ok, _run, _ms} =
-        Runs.step(store, "run-1", machine, Event.external("finish"), executor: fun)
+      {:ok, _execution, _ms} =
+        Executions.step(store, "execution-1", machine, Event.external("finish"), executor: fun)
 
       content_hash = Machine.identity(machine).content_hash
 
       assert_receive {:executed, {:log, %Log{label: "one"}},
-                      %{run_id: "run-1", content_hash: ^content_hash}}
+                      %{execution_id: "execution-1", content_hash: ^content_hash}}
     end
 
     # sabotage: step_loaded/6 skips the put_routes/2 re-stamp -> red (the :send is emitted anyway)
@@ -550,11 +580,13 @@ defmodule StatifierPersistence.RunsTest do
       # the stamped snapshot, so no :send effect crosses the seam. An
       # unstamped (nil) snapshot would have emitted it - "no determination
       # made" - which is what makes this assert the stamp itself.
-      {:ok, _run, _ms} = Runs.create(store, "run-blocked", machine, executor: RecordingExecutor)
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-blocked", machine, executor: RecordingExecutor)
+
       RecordingExecutor.reset()
 
-      {:ok, _run, _ms} =
-        Runs.step(store, "run-blocked", machine, Event.external("go"),
+      {:ok, _execution, _ms} =
+        Executions.step(store, "execution-blocked", machine, Event.external("go"),
           executor: RecordingExecutor,
           routes: Routes.new()
         )
@@ -562,11 +594,13 @@ defmodule StatifierPersistence.RunsTest do
       refute Enum.any?(RecordingExecutor.effects(), &match?({:send, _}, &1))
 
       # Parent declared reachable: the same chart emits the :send.
-      {:ok, _run, _ms} = Runs.create(store, "run-open", machine, executor: RecordingExecutor)
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-open", machine, executor: RecordingExecutor)
+
       RecordingExecutor.reset()
 
-      {:ok, _run, _ms} =
-        Runs.step(store, "run-open", machine, Event.external("go"),
+      {:ok, _execution, _ms} =
+        Executions.step(store, "execution-open", machine, Event.external("go"),
           executor: RecordingExecutor,
           routes: Routes.new(parent?: true)
         )
@@ -578,80 +612,88 @@ defmodule StatifierPersistence.RunsTest do
     end
 
     # sabotage: step/5's fetch error arm rewrites the reason -> red
-    test "on a missing run returns {:error, :run_not_found}", %{store: store} do
+    test "on a missing execution returns {:error, :execution_not_found}", %{store: store} do
       {_source, machine} = Charts.chart_a()
 
-      assert {:error, :run_not_found} =
-               Runs.step(store, "absent", machine, Event.external("go"),
+      assert {:error, :execution_not_found} =
+               Executions.step(store, "absent", machine, Event.external("go"),
                  executor: RecordingExecutor
                )
     end
   end
 
   describe "error re-entry (ADR-0004 decision 4)" do
-    # sabotage: reentry_origin/1's :invoke clause returns :observational -> red (run stays in b)
+    # sabotage: reentry_origin/1's :invoke clause returns :observational -> red (execution stays in b)
     test "a failed :invoke re-enters as error.communication and the persisted position reflects it",
          %{store: store} do
       machine = compile!(@invoke_chart_source)
       executor = failing_executor([:invoke])
       invoke_types = InvokeTypes.new(types: ["myapp:authorize"])
 
-      {:ok, _run, _ms} =
-        Runs.create(store, "run-1", machine, executor: executor, invoke_types: invoke_types)
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine,
+          executor: executor,
+          invoke_types: invoke_types
+        )
 
-      assert {:ok, %Run{status: :active}, %MachineState{} = stepped} =
-               Runs.step(store, "run-1", machine, Event.external("go"),
+      assert {:ok, %Execution{status: :active}, %MachineState{} = stepped} =
+               Executions.step(store, "execution-1", machine, Event.external("go"),
                  executor: executor,
                  invoke_types: invoke_types
                )
 
       assert active_ids(stepped) == ["errored"]
-      assert {:ok, loaded} = Storage.load_run_position(store, "run-1", machine)
+      assert {:ok, loaded} = Storage.load_execution_position(store, "execution-1", machine)
       assert active_ids(loaded) == ["errored"]
     end
 
-    # sabotage: reentry_origin/1's :send clause returns :observational -> red (run stays in b)
+    # sabotage: reentry_origin/1's :send clause returns :observational -> red (execution stays in b)
     test "a failed :send re-enters as error.communication the same way", %{store: store} do
       machine = compile!(@send_error_chart_source)
       executor = failing_executor([:send])
 
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: executor)
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: executor)
 
-      assert {:ok, %Run{status: :active}, stepped} =
-               Runs.step(store, "run-1", machine, Event.external("go"),
+      assert {:ok, %Execution{status: :active}, stepped} =
+               Executions.step(store, "execution-1", machine, Event.external("go"),
                  executor: executor,
                  routes: Routes.new(parent?: true)
                )
 
       assert active_ids(stepped) == ["errored"]
-      assert {:ok, loaded} = Storage.load_run_position(store, "run-1", machine)
+      assert {:ok, loaded} = Storage.load_execution_position(store, "execution-1", machine)
       assert active_ids(loaded) == ["errored"]
     end
 
-    # sabotage: reentry_origin/1's catch-all re-enters as {:state, 0} -> red (run lands in errored)
-    test "a failed :log is discarded and the run is unaffected", %{store: store} do
+    # sabotage: reentry_origin/1's catch-all re-enters as {:state, 0} -> red (execution lands in errored)
+    test "a failed :log is discarded and the execution is unaffected", %{store: store} do
       machine = compile!(@log_error_chart_source)
       executor = failing_executor([:log])
 
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: executor)
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: executor)
 
-      assert {:ok, %Run{status: :active}, stepped} =
-               Runs.step(store, "run-1", machine, Event.external("go"), executor: executor)
+      assert {:ok, %Execution{status: :active}, stepped} =
+               Executions.step(store, "execution-1", machine, Event.external("go"),
+                 executor: executor
+               )
 
       assert active_ids(stepped) == ["b"]
       assert Enum.any?(RecordingExecutor.effects(), &match?({:log, %Log{label: "observed"}}, &1))
     end
 
-    # sabotage: reenter_one/4 re-enters the wave's own failures recursively -> red (run lands in d)
+    # sabotage: reenter_one/4 re-enters the wave's own failures recursively -> red (execution lands in d)
     test "re-entry is single-wave: a deterministically failing executor terminates in one wave",
          %{store: store} do
       machine = compile!(@wave_chart_source)
       executor = failing_executor([:send, :log, :datamodel_change, :datamodel_init, :cancel])
 
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: executor)
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: executor)
 
-      assert {:ok, %Run{status: :active}, stepped} =
-               Runs.step(store, "run-1", machine, Event.external("go"),
+      assert {:ok, %Execution{status: :active}, stepped} =
+               Executions.step(store, "execution-1", machine, Event.external("go"),
                  executor: executor,
                  routes: Routes.new(parent?: true)
                )
@@ -660,122 +702,135 @@ defmodule StatifierPersistence.RunsTest do
       # failed too, and that failure was dropped, not re-entered - a second
       # wave would have landed in d.
       assert active_ids(stepped) == ["c"]
-      assert {:ok, loaded} = Storage.load_run_position(store, "run-1", machine)
+      assert {:ok, loaded} = Storage.load_execution_position(store, "execution-1", machine)
       assert active_ids(loaded) == ["c"]
     end
   end
 
   describe "budget exhaustion" do
-    # sabotage: write_run/6 persists the exhausted position (always {:persist, nil}) -> red
-    test "at step: run fails, prior blob stays intact, the error surfaces after the persist",
+    # sabotage: write_execution/6 persists the exhausted position (always {:persist, nil}) -> red
+    test "at step: execution fails, prior blob stays intact, the error surfaces after the persist",
          %{store: store} do
       machine = compile!(@loop_after_event_source)
 
-      {:ok, _run, created} =
-        Runs.create(store, "run-1", machine,
+      {:ok, _execution, created} =
+        Executions.create(store, "execution-1", machine,
           executor: RecordingExecutor,
           initialize: [max_macrostep_rounds: 5]
         )
 
       assert {:error, {:budget_exhausted, %BudgetExhausted{budget: 5}}} =
-               Runs.step(store, "run-1", machine, Event.external("boom"),
+               Executions.step(store, "execution-1", machine, Event.external("boom"),
                  executor: RecordingExecutor
                )
 
       assert {:ok, %{status: :failed, failure: "budget_exhausted: 5 rounds"}} =
-               Storage.fetch_run(store, "run-1")
+               Storage.fetch_execution(store, "execution-1")
 
       # The pre-step blob remains: the loaded position is the one create
       # persisted, not the non-quiescent exhausted state.
-      assert {:ok, loaded} = Storage.load_run_position(store, "run-1", machine)
+      assert {:ok, loaded} = Storage.load_execution_position(store, "execution-1", machine)
       assert loaded.configuration == created.configuration
       assert active_ids(loaded) == ["idle"]
     end
 
     # sabotage: persist_tail/6 returns {:ok, ...} with no budget_effect/1 case -> red
-    test "at create: run fails with no position blob and the error surfaces", %{store: store} do
+    test "at create: execution fails with no position blob and the error surfaces", %{
+      store: store
+    } do
       machine = compile!(@loop_at_create_source)
 
       assert {:error, {:budget_exhausted, %BudgetExhausted{budget: 4}}} =
-               Runs.create(store, "run-1", machine,
+               Executions.create(store, "execution-1", machine,
                  executor: RecordingExecutor,
                  initialize: [max_macrostep_rounds: 4]
                )
 
       assert {:ok, %{status: :failed, failure: "budget_exhausted: 4 rounds"}} =
-               Storage.fetch_run(store, "run-1")
+               Storage.fetch_execution(store, "execution-1")
 
-      assert {:error, :run_position_missing} =
-               Storage.load_run_position(store, "run-1", machine)
+      assert {:error, :execution_position_missing} =
+               Storage.load_execution_position(store, "execution-1", machine)
     end
   end
 
   describe "failure-classed final (ADR-0008's 2026-09-06 amendment)" do
-    # sabotage: drop run_status/2's failure_classed_final?/1 arm -> red,
-    # the run completed. Verified red, reverted.
-    test "the tagged final fails the run on an ordinary successful step", %{store: store} do
+    # sabotage: drop execution_status/2's failure_classed_final?/1 arm -> red,
+    # the execution completed. Verified red, reverted.
+    test "the tagged final fails the execution on an ordinary successful step", %{store: store} do
       machine = compile!(@failure_classed_final_source)
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
 
-      assert {:ok, %Run{status: :failed, failure: "failed_final"} = run,
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      assert {:ok, %Execution{status: :failed, failure: "failed_final"} = execution,
               %MachineState{status: :done}} =
-               Runs.step(store, "run-1", machine, Event.external("bad"),
+               Executions.step(store, "execution-1", machine, Event.external("bad"),
                  executor: RecordingExecutor
                )
 
       # Verbatim, tag included: the parent's collect over a failed child
       # reads the tag off the answer it is given.
-      assert run.donedata == %{
-               "statifier_persistence:run_status" => "failed",
+      assert execution.donedata == %{
+               "statifier_persistence:execution_status" => "failed",
                "detail" => "declined"
              }
 
       assert {:ok, %{status: :failed, failure: "failed_final"}} =
-               Storage.fetch_run(store, "run-1")
+               Storage.fetch_execution(store, "execution-1")
     end
 
     # The other side of the closed set: a final that carries <donedata>
     # but not the tag is exactly as completed as one that carries none.
     #
     # sabotage: failure_classed_final?/1 reads is_map/1 rather than the
-    # key and the value -> red, this run failed on an untagged final.
+    # key and the value -> red, this execution failed on an untagged final.
     # Verified red, reverted.
-    test "an untagged final still completes the run", %{store: store} do
+    test "an untagged final still completes the execution", %{store: store} do
       machine = compile!(@failure_classed_final_source)
-      {:ok, _run, _ms} = Runs.create(store, "run-2", machine, executor: RecordingExecutor)
 
-      assert {:ok, %Run{status: :completed, failure: nil, donedata: %{"detail" => "all good"}},
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-2", machine, executor: RecordingExecutor)
+
+      assert {:ok,
+              %Execution{status: :completed, failure: nil, donedata: %{"detail" => "all good"}},
               %MachineState{status: :done}} =
-               Runs.step(store, "run-2", machine, Event.external("ok"),
+               Executions.step(store, "execution-2", machine, Event.external("ok"),
                  executor: RecordingExecutor
                )
 
-      assert {:ok, %{status: :completed, failure: nil}} = Storage.fetch_run(store, "run-2")
+      assert {:ok, %{status: :completed, failure: nil}} =
+               Storage.fetch_execution(store, "execution-2")
     end
 
     # The value set is closed at "failed": a chart cannot claim a
     # :cancelled that is the parent's word, and the key with any other
-    # value leaves the run exactly where it would have been with no key.
+    # value leaves the execution exactly where it would have been with no key.
     #
     # sabotage: failure_classed_final?/1 matches the key alone
-    # (`%{@run_status_key => _any}`) -> red, "cancelled" failed the run.
+    # (`%{@execution_status_key => _any}`) -> red, "cancelled" failed the execution.
     # Verified red, reverted.
     test "the reserved key with any other value is ignored", %{store: store} do
       machine = compile!(@failure_classed_final_source)
-      {:ok, _run, _ms} = Runs.create(store, "run-3", machine, executor: RecordingExecutor)
 
-      assert {:ok, %Run{status: :completed, failure: nil} = run, %MachineState{status: :done}} =
-               Runs.step(store, "run-3", machine, Event.external("shrug"),
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-3", machine, executor: RecordingExecutor)
+
+      assert {:ok, %Execution{status: :completed, failure: nil} = execution,
+              %MachineState{status: :done}} =
+               Executions.step(store, "execution-3", machine, Event.external("shrug"),
                  executor: RecordingExecutor
                )
 
       # Ignored, not stripped - this package does not edit chart-authored
       # data on its way past.
-      assert run.donedata == %{"statifier_persistence:run_status" => "cancelled"}
-      assert {:ok, %{status: :completed, failure: nil}} = Storage.fetch_run(store, "run-3")
+      assert execution.donedata == %{"statifier_persistence:execution_status" => "cancelled"}
+
+      assert {:ok, %{status: :completed, failure: nil}} =
+               Storage.fetch_execution(store, "execution-3")
     end
 
-    # The `[..., :run, :terminated]` event and the row can never disagree
+    # The `[..., :execution, :terminated]` event and the row can never disagree
     # (`reason` is the same failure_string/1).
     #
     # Amendment decision 4, the half the operator ruled explicitly: an
@@ -789,20 +844,23 @@ defmodule StatifierPersistence.RunsTest do
     # an executor failure (crash-as-failed, the shape the record refuses)
     # -> red here and on four sibling re-entry cases. Verified red,
     # reverted.
-    test "an unhandled error.communication leaves the run active", %{store: store} do
+    test "an unhandled error.communication leaves the execution active", %{store: store} do
       machine = compile!(@send_chart_source)
       executor = failing_executor([:send])
 
-      {:ok, _run, _ms} = Runs.create(store, "run-5", machine, executor: executor)
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-5", machine, executor: executor)
 
-      assert {:ok, %Run{status: :active, failure: nil}, stepped} =
-               Runs.step(store, "run-5", machine, Event.external("go"),
+      assert {:ok, %Execution{status: :active, failure: nil}, stepped} =
+               Executions.step(store, "execution-5", machine, Event.external("go"),
                  executor: executor,
                  routes: Routes.new(parent?: true)
                )
 
       assert active_ids(stepped) == ["b"]
-      assert {:ok, %{status: :active, failure: nil}} = Storage.fetch_run(store, "run-5")
+
+      assert {:ok, %{status: :active, failure: nil}} =
+               Storage.fetch_execution(store, "execution-5")
     end
 
     # sabotage: failure_string/1's failure-classed arm returns nil -> red
@@ -811,22 +869,24 @@ defmodule StatifierPersistence.RunsTest do
     # Verified red, reverted.
     test "reports the terminated event with the same reason string", %{store: store} do
       machine = compile!(@failure_classed_final_source)
-      {:ok, _run, _ms} = Runs.create(store, "run-4", machine, executor: RecordingExecutor)
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-4", machine, executor: RecordingExecutor)
 
       handler_id = "sp-hia-#{System.unique_integer([:positive])}"
 
       :ok =
         :telemetry.attach(
           handler_id,
-          [:statifier_persistence, :run, :terminated],
+          [:statifier_persistence, :execution, :terminated],
           &__MODULE__.forward_terminated/4,
           %{pid: self()}
         )
 
       on_exit(fn -> :telemetry.detach(handler_id) end)
 
-      assert {:ok, %Run{status: :failed}, _ms} =
-               Runs.step(store, "run-4", machine, Event.external("bad"),
+      assert {:ok, %Execution{status: :failed}, _ms} =
+               Executions.step(store, "execution-4", machine, Event.external("bad"),
                  executor: RecordingExecutor
                )
 
@@ -834,111 +894,236 @@ defmodule StatifierPersistence.RunsTest do
     end
   end
 
+  # ADR-0011 decision 4: the reserved donedata key is renamed, and the
+  # pre-0.12.0 spelling is read for one release so a chart already committed
+  # somewhere keeps working. Dropped in 0.13.0.
+  describe "the donedata key rename (ADR-0011 decision 4)" do
+    @legacy_failure_source """
+    <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="a">
+        <state id="a"><transition event="bad" target="ended_badly"/></state>
+        <final id="ended_badly">
+            <donedata>
+                <param name="statifier_persistence:run_status" expr="'failed'"/>
+            </donedata>
+        </final>
+    </scxml>
+    """
+
+    @both_keys_source """
+    <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="a">
+        <state id="a"><transition event="bad" target="ended_badly"/></state>
+        <final id="ended_badly">
+            <donedata>
+                <param name="statifier_persistence:execution_status" expr="'ignored'"/>
+                <param name="statifier_persistence:run_status" expr="'failed'"/>
+            </donedata>
+        </final>
+    </scxml>
+    """
+
+    # sabotage: dropped failure_classed_final?/1's new-key clause -> red,
+    # the execution completed. Verified red, reverted.
+    test "the new key fails the execution", %{store: store} do
+      machine = compile!(@failure_classed_final_source)
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      assert {:ok, %Execution{status: :failed, failure: "failed_final"}, _ms} =
+               Executions.step(store, "execution-1", machine, Event.external("bad"),
+                 executor: RecordingExecutor
+               )
+    end
+
+    # sabotage: made failure_classed_final?/1's legacy clause answer false
+    # -> red, the execution completed. Verified red, reverted.
+    test "the pre-0.12.0 key is still read", %{store: store} do
+      machine = compile!(@legacy_failure_source)
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-2", machine, executor: RecordingExecutor)
+
+      assert {:ok, %Execution{status: :failed, failure: "failed_final"}, _ms} =
+               Executions.step(store, "execution-2", machine, Event.external("bad"),
+                 executor: RecordingExecutor
+               )
+    end
+
+    # sabotage: made warn_legacy_execution_status_key/1's legacy branch a
+    # no-op -> red, the captured log was empty. Verified red, reverted.
+    test "reading the pre-0.12.0 key logs one deprecation line at :debug naming the new key",
+         %{store: store} do
+      machine = compile!(@legacy_failure_source)
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-3", machine, executor: RecordingExecutor)
+
+      log =
+        capture_log([level: :debug], fn ->
+          assert {:ok, %Execution{status: :failed}, _ms} =
+                   Executions.step(store, "execution-3", machine, Event.external("bad"),
+                     executor: RecordingExecutor
+                   )
+        end)
+
+      assert [_one_line] =
+               Regex.scan(~r/statifier_persistence:run_status.* is deprecated/, log)
+
+      assert log =~ "statifier_persistence:execution_status"
+    end
+
+    # sabotage: reordered both failure_classed_final?/1's and
+    # warn_legacy_execution_status_key/1's clauses so the legacy key matches
+    # first -> red, the execution failed on the old key's value and the
+    # deprecation line was logged. Verified red, reverted.
+    test "the new key wins where both are present, and the old one is not read",
+         %{store: store} do
+      machine = compile!(@both_keys_source)
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-4", machine, executor: RecordingExecutor)
+
+      log =
+        capture_log([level: :debug], fn ->
+          assert {:ok, %Execution{status: :completed, failure: nil}, _ms} =
+                   Executions.step(store, "execution-4", machine, Event.external("bad"),
+                     executor: RecordingExecutor
+                   )
+        end)
+
+      refute log =~ "is deprecated"
+    end
+  end
+
   describe "fail/4" do
-    # sabotage: fail/4 returns {:ok, ...} without calling Storage.update_run_status/4 -> red
-    test "on an active run persists :failed with the reason, position untouched",
+    # sabotage: fail/4 returns {:ok, ...} without calling Storage.update_execution_status/4 -> red
+    test "on an active execution persists :failed with the reason, position untouched",
          %{store: store} do
       {_source, machine} = Charts.chart_a()
-      {:ok, _run, created} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
 
-      assert {:ok, %Run{status: :failed, failure: "operator: abandoned"}} =
-               Runs.fail(store, "run-1", "operator: abandoned")
+      {:ok, _execution, created} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      assert {:ok, %Execution{status: :failed, failure: "operator: abandoned"}} =
+               Executions.fail(store, "execution-1", "operator: abandoned")
 
       assert {:ok, %{status: :failed, failure: "operator: abandoned"}} =
-               Storage.fetch_run(store, "run-1")
+               Storage.fetch_execution(store, "execution-1")
 
-      assert {:ok, loaded} = Storage.load_run_position(store, "run-1", machine)
+      assert {:ok, loaded} = Storage.load_execution_position(store, "execution-1", machine)
       assert loaded.configuration == created.configuration
     end
 
-    # sabotage: fail/4 drops the terminal-status head clause -> red ({:ok, ...} on a completed run)
-    test "on a terminal run discards without writing", %{store: store} do
+    # sabotage: fail/4 drops the terminal-status head clause -> red ({:ok, ...} on a completed execution)
+    test "on a terminal execution discards without writing", %{store: store} do
       machine = compile!(@final_chart_source)
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
 
-      {:ok, %Run{status: :completed}, _ms} =
-        Runs.step(store, "run-1", machine, Event.external("finish"), executor: RecordingExecutor)
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
 
-      assert {:discarded, %Run{status: :completed}} =
-               Runs.fail(store, "run-1", "operator: abandoned")
+      {:ok, %Execution{status: :completed}, _ms} =
+        Executions.step(store, "execution-1", machine, Event.external("finish"),
+          executor: RecordingExecutor
+        )
 
-      assert {:ok, %{status: :completed, failure: nil}} = Storage.fetch_run(store, "run-1")
+      assert {:discarded, %Execution{status: :completed}} =
+               Executions.fail(store, "execution-1", "operator: abandoned")
+
+      assert {:ok, %{status: :completed, failure: nil}} =
+               Storage.fetch_execution(store, "execution-1")
     end
 
     # sabotage: fail/4's fetch error arm rewrites the reason -> red
-    test "on a missing run returns {:error, :run_not_found}", %{store: store} do
-      assert {:error, :run_not_found} = Runs.fail(store, "absent", "operator: abandoned")
+    test "on a missing execution returns {:error, :execution_not_found}", %{store: store} do
+      assert {:error, :execution_not_found} =
+               Executions.fail(store, "absent", "operator: abandoned")
     end
   end
 
   describe "cancel/3" do
-    # sabotage: cancel_tail/2 rewritten to call Storage.update_run/5 with
+    # sabotage: cancel_tail/2 rewritten to call Storage.update_execution/5 with
     # position: :persist and a freshly-initialized MachineState instead of
-    # Storage.update_run_status/4 -> red, the byte-identity assertion below
+    # Storage.update_execution_status/4 -> red, the byte-identity assertion below
     # failed because the persisted blob was re-encoded from a fresh state
     # rather than carried forward untouched. Verified red, reverted.
-    test "moves an :active run to :cancelled and leaves the stored position byte-identical",
+    test "moves an :active execution to :cancelled and leaves the stored position byte-identical",
          %{store: store} do
       {_source, machine} = Charts.chart_a()
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
 
-      assert {:ok, %{position_blob: before_blob}} = Storage.fetch_run(store, "run-1")
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
 
-      assert {:ok, %Run{run_id: "run-1", status: :cancelled, failure: nil}} =
-               Runs.cancel(store, "run-1")
+      assert {:ok, %{position_blob: before_blob}} = Storage.fetch_execution(store, "execution-1")
+
+      assert {:ok, %Execution{execution_id: "execution-1", status: :cancelled, failure: nil}} =
+               Executions.cancel(store, "execution-1")
 
       assert {:ok, %{status: :cancelled, position_blob: after_blob}} =
-               Storage.fetch_run(store, "run-1")
+               Storage.fetch_execution(store, "execution-1")
 
       assert after_blob == before_blob
     end
 
-    # sabotage: runs.ex's terminal guard drops :cancelled from the list in
+    # sabotage: executions.ex's terminal guard drops :cancelled from the list in
     # cancel_tail/2's own case (or the shared clause it reads) -> red, this
     # second cancel returned {:ok, _} and re-wrote the record instead of
     # discarding. Verified red, reverted.
-    test "on an already-cancelled run returns {:discarded, _} and writes nothing", %{
+    test "on an already-cancelled execution returns {:discarded, _} and writes nothing", %{
       store: store
     } do
       {_source, machine} = Charts.chart_a()
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
 
-      assert {:ok, %Run{status: :cancelled}} = Runs.cancel(store, "run-1")
-      assert {:ok, %{status: :cancelled, position_blob: blob}} = Storage.fetch_run(store, "run-1")
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
 
-      assert {:discarded, %Run{status: :cancelled}} = Runs.cancel(store, "run-1")
+      assert {:ok, %Execution{status: :cancelled}} = Executions.cancel(store, "execution-1")
+
+      assert {:ok, %{status: :cancelled, position_blob: blob}} =
+               Storage.fetch_execution(store, "execution-1")
+
+      assert {:discarded, %Execution{status: :cancelled}} =
+               Executions.cancel(store, "execution-1")
 
       assert {:ok, %{status: :cancelled, position_blob: ^blob}} =
-               Storage.fetch_run(store, "run-1")
+               Storage.fetch_execution(store, "execution-1")
     end
 
     # sabotage: fail_tail/3's terminal guard drops :cancelled from
-    # `status in [...]` (runs.ex:259) -> red, this call re-wrote the
-    # cancelled run's status to :failed instead of discarding it. Verified
+    # `status in [...]` (executions.ex:259) -> red, this call re-wrote the
+    # cancelled execution's status to :failed instead of discarding it. Verified
     # red, reverted.
-    test "fail/4 on a :cancelled run is discarded", %{store: store} do
+    test "fail/4 on a :cancelled execution is discarded", %{store: store} do
       {_source, machine} = Charts.chart_a()
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
-      {:ok, %Run{status: :cancelled}} = Runs.cancel(store, "run-1")
 
-      assert {:discarded, %Run{status: :cancelled}} =
-               Runs.fail(store, "run-1", "operator: abandoned")
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
 
-      assert {:ok, %{status: :cancelled, failure: nil}} = Storage.fetch_run(store, "run-1")
+      {:ok, %Execution{status: :cancelled}} = Executions.cancel(store, "execution-1")
+
+      assert {:discarded, %Execution{status: :cancelled}} =
+               Executions.fail(store, "execution-1", "operator: abandoned")
+
+      assert {:ok, %{status: :cancelled, failure: nil}} =
+               Storage.fetch_execution(store, "execution-1")
     end
 
     # sabotage: step_tail/6's terminal guard drops :cancelled from
-    # `status in [...]` (runs.ex:221) -> red, this step decoded the
+    # `status in [...]` (executions.ex:221) -> red, this step decoded the
     # position and advanced it instead of discarding before any decode.
     # Verified red, reverted.
-    test "step/5 on a :cancelled run is discarded before any position decode", %{store: store} do
+    test "step/5 on a :cancelled execution is discarded before any position decode", %{
+      store: store
+    } do
       {_source, machine} = Charts.chart_a()
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
-      {:ok, %Run{status: :cancelled}} = Runs.cancel(store, "run-1")
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      {:ok, %Execution{status: :cancelled}} = Executions.cancel(store, "execution-1")
       RecordingExecutor.reset()
 
-      assert {:discarded, %Run{status: :cancelled}} =
-               Runs.step(store, "run-1", machine, Event.external("go"),
+      assert {:discarded, %Execution{status: :cancelled}} =
+               Executions.step(store, "execution-1", machine, Event.external("go"),
                  executor: RecordingExecutor
                )
 
@@ -946,16 +1131,16 @@ defmodule StatifierPersistence.RunsTest do
     end
 
     # sabotage: cancel_tail/2's fetch error arm rewrites the reason -> red
-    test "on a missing run returns {:error, :run_not_found}", %{store: store} do
-      assert {:error, :run_not_found} = Runs.cancel(store, "absent")
+    test "on a missing execution returns {:error, :execution_not_found}", %{store: store} do
+      assert {:error, :execution_not_found} = Executions.cancel(store, "absent")
     end
   end
 
-  describe "per-run serialization (ADR-0004 decision 5)" do
-    # sabotage: InMemory.lock_run/3 runs fun without the exclusion
+  describe "per-execution serialization (ADR-0004 decision 5)" do
+    # sabotage: InMemory.lock_execution/3 executions fun without the exclusion
     # ({:ok, fun.()} with no acquire) -> red (both steps load s0 and the
     # persisted state is a one-event s1/s2, which no serial order produces)
-    test "two concurrent steps on one run serialize to some order of the two events",
+    test "two concurrent steps on one execution serialize to some order of the two events",
          %{store: store} do
       machine = compile!(@order_chart_source)
 
@@ -967,88 +1152,95 @@ defmodule StatifierPersistence.RunsTest do
         :ok
       end
 
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: executor)
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: executor)
 
       tasks =
         for event <- ["e1", "e2"] do
           Task.async(fn ->
-            Runs.step(store, "run-1", machine, Event.external(event), executor: executor)
+            Executions.step(store, "execution-1", machine, Event.external(event),
+              executor: executor
+            )
           end)
         end
 
       results = Task.await_many(tasks, 10_000)
-      assert Enum.all?(results, &match?({:ok, %Run{status: :active}, %MachineState{}}, &1))
+      assert Enum.all?(results, &match?({:ok, %Execution{status: :active}, %MachineState{}}, &1))
 
       # The final persisted state is one of the two serial orders' results,
       # never an interleaving's.
-      assert {:ok, loaded} = Storage.load_run_position(store, "run-1", machine)
+      assert {:ok, loaded} = Storage.load_execution_position(store, "execution-1", machine)
       assert active_ids(loaded) in [["s12"], ["s21"]]
     end
 
-    # sabotage: Runs.serialized/4 ignores the :serialization opt and always
-    # uses the {AdapterLock, store} default -> red (no {:with_run, _}
+    # sabotage: Executions.serialized/4 ignores the :serialization opt and always
+    # uses the {AdapterLock, store} default -> red (no {:with_execution, _}
     # message ever arrives)
     test "the serialization: {module, config} override is honored on every entry point",
          %{store: store} do
       {_source, machine} = Charts.chart_a()
       serialization = {SpyStrategy, self()}
 
-      assert {:ok, _run, _ms} =
-               Runs.create(store, "run-1", machine,
+      assert {:ok, _execution, _ms} =
+               Executions.create(store, "execution-1", machine,
                  executor: RecordingExecutor,
                  serialization: serialization
                )
 
-      assert_receive {:with_run, "run-1"}
+      assert_receive {:with_execution, "execution-1"}
 
-      assert {:ok, _run, _ms} =
-               Runs.step(store, "run-1", machine, Event.external("go"),
+      assert {:ok, _execution, _ms} =
+               Executions.step(store, "execution-1", machine, Event.external("go"),
                  executor: RecordingExecutor,
                  serialization: serialization
                )
 
-      assert_receive {:with_run, "run-1"}
+      assert_receive {:with_execution, "execution-1"}
 
-      assert {:ok, %Run{status: :failed}} =
-               Runs.fail(store, "run-1", "operator: abandoned", serialization: serialization)
+      assert {:ok, %Execution{status: :failed}} =
+               Executions.fail(store, "execution-1", "operator: abandoned",
+                 serialization: serialization
+               )
 
-      assert_receive {:with_run, "run-1"}
+      assert_receive {:with_execution, "execution-1"}
     end
 
-    # sabotage: AdapterLock.with_run/3 falls back to {:ok, fun.()} when the
-    # adapter exports no lock_run/3 -> red (create returns {:ok, ...} and
-    # the run exists)
-    test "an adapter without lock_run/3 under the default strategy is refused" do
+    # sabotage: AdapterLock.with_execution/3 falls back to {:ok, fun.()} when the
+    # adapter exports no lock_execution/3 -> red (create returns {:ok, ...} and
+    # the execution exists)
+    test "an adapter without lock_execution/3 under the default strategy is refused" do
       {:ok, store} = Storage.new(NoLockAdapter, [])
       {_source, machine} = Charts.chart_a()
 
       assert {:error, {:serialization, :not_supported}} =
-               Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+               Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
 
       # The refusal precedes the tail: nothing was inserted.
-      assert {:error, :run_not_found} = Storage.fetch_run(store, "run-1")
+      assert {:error, :execution_not_found} = Storage.fetch_execution(store, "execution-1")
     end
   end
 
   describe "at-least-once redelivery" do
-    # sabotage: persist_tail/6 swallows write_run/6's error and returns {:ok, ...} -> red
+    # sabotage: persist_tail/6 swallows write_execution/6's error and returns {:ok, ...} -> red
     test "a failed persist re-drives the same event and re-emits identical deterministic keys" do
       {:ok, store} = Storage.new(FlakyAdapter, [])
       machine = compile!(@delayed_send_chart_source)
 
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
       RecordingExecutor.reset()
 
       # First step: the effect executes, then the injected adapter failure
       # lands exactly where a crash between execute and persist would.
       assert {:error, {:adapter, :injected}} =
-               Runs.step(store, "run-1", machine, Event.external("go"),
+               Executions.step(store, "execution-1", machine, Event.external("go"),
                  executor: RecordingExecutor
                )
 
       # Re-driving the same event succeeds and re-emits the same effect.
-      assert {:ok, %Run{status: :active}, _ms} =
-               Runs.step(store, "run-1", machine, Event.external("go"),
+      assert {:ok, %Execution{status: :active}, _ms} =
+               Executions.step(store, "execution-1", machine, Event.external("go"),
                  executor: RecordingExecutor
                )
 

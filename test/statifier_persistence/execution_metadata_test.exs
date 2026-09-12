@@ -1,13 +1,13 @@
-defmodule StatifierPersistence.RunMetadataTest do
+defmodule StatifierPersistence.ExecutionMetadataTest do
   @moduledoc """
-  ADR-0006's optional opaque run metadata at the facade and lifecycle
+  ADR-0006's optional opaque execution metadata at the facade and lifecycle
   levels: the option's shape, the refusal at open, and the write-once
   rule.
 
   The adapter-level round trip and refusal are the conformance suite's
-  (`StorageConformance`, run here over `InMemory` and over
+  (`StorageConformance`, execution here over `InMemory` and over
   `NoLockAdapter`, which declares no support). What this module adds is
-  what the suite cannot say generically: that `Runs.create/4` threads the
+  what the suite cannot say generically: that `Executions.create/4` threads the
   option through, that a refused create executes no effect, and that a
   malformed option raises rather than joining the error vocabulary.
   """
@@ -17,18 +17,18 @@ defmodule StatifierPersistence.RunMetadataTest do
   defmodule PassThrough do
     @moduledoc false
     # A pass-through StatifierPersistence.Serialization strategy, so the
-    # tests below can drive an adapter that exports no lock_run/3 (the
+    # tests below can drive an adapter that exports no lock_execution/3 (the
     # default AdapterLock strategy would refuse it before any metadata
     # question was reached).
     @behaviour StatifierPersistence.Serialization
 
     @impl StatifierPersistence.Serialization
-    def with_run(_config, _run_id, fun), do: {:ok, fun.()}
+    def with_execution(_config, _execution_id, fun), do: {:ok, fun.()}
   end
 
   alias Statifier.Event
   alias Statifier.MachineState
-  alias StatifierPersistence.{Runs, Storage}
+  alias StatifierPersistence.{Executions, Storage}
   alias StatifierPersistence.Storage.InMemory
   alias StatifierPersistence.Test.NoLockAdapter
   alias StatifierPersistence.Testing.Charts
@@ -72,31 +72,31 @@ defmodule StatifierPersistence.RunMetadataTest do
     machine
   end
 
-  describe "Runs.create/4 with metadata" do
-    # sabotage: in Runs.create/4, drop the {:metadata, metadata} entry from
-    # write_run/6's insert opts (pass `opts` unchanged) -> red, the fetched
+  describe "Executions.create/4 with metadata" do
+    # sabotage: in Executions.create/4, drop the {:metadata, metadata} entry from
+    # write_execution/6's insert opts (pass `opts` unchanged) -> red, the fetched
     # record's metadata came back %{} instead of the two pairs. Verified
     # red, reverted.
-    test "threads the map through to the stored run record", %{
+    test "threads the map through to the stored execution record", %{
       store: store,
       machine: machine,
       executor: executor
     } do
       metadata = %{"tenant_id" => "acct_01H8X", "processor_account_id" => "pacct_4471"}
 
-      assert {:ok, _run, _ms} =
-               Runs.create(store, "run-md-1", machine,
+      assert {:ok, _execution, _ms} =
+               Executions.create(store, "execution-md-1", machine,
                  executor: executor,
                  metadata: metadata
                )
 
-      assert {:ok, record} = Storage.fetch_run(store, "run-md-1")
+      assert {:ok, record} = Storage.fetch_execution(store, "execution-md-1")
       assert record.metadata == metadata
     end
 
-    # sabotage: in Runs.metadata/1, change the default from %{} to a
+    # sabotage: in Executions.metadata/1, change the default from %{} to a
     # non-empty map -> red, the fetched record carried the invented pair
-    # instead of %{}. (Making InMemory.insert_run/2 default an absent
+    # instead of %{}. (Making InMemory.insert_execution/2 default an absent
     # metadata key to nil does NOT go red here, and that is worth knowing:
     # the facade always builds the field, so the adapter's own default is
     # defence for a direct adapter caller, not the path this test walks.)
@@ -106,15 +106,15 @@ defmodule StatifierPersistence.RunMetadataTest do
       machine: machine,
       executor: executor
     } do
-      assert {:ok, _run, _ms} =
-               Runs.create(store, "run-md-2", machine, executor: executor)
+      assert {:ok, _execution, _ms} =
+               Executions.create(store, "execution-md-2", machine, executor: executor)
 
-      assert {:ok, record} = Storage.fetch_run(store, "run-md-2")
+      assert {:ok, record} = Storage.fetch_execution(store, "execution-md-2")
       assert record.metadata == %{}
     end
 
-    # sabotage: in Runs.create/4, delete the Storage.check_metadata/2
-    # guard entirely and rely on insert_run/5's own check -> red, the
+    # sabotage: in Executions.create/4, delete the Storage.check_metadata/2
+    # guard entirely and rely on insert_execution/5's own check -> red, the
     # persist tail executed the entry <log> through the executor on its way
     # to the refusal, so calls() was no longer empty. This is the assertion
     # that pins "at open" to "before any effect"; merely moving the guard
@@ -128,14 +128,14 @@ defmodule StatifierPersistence.RunMetadataTest do
       machine = logging_machine()
 
       assert {:error, :metadata_unsupported} =
-               Runs.create(store, "run-md-3", machine,
+               Executions.create(store, "execution-md-3", machine,
                  executor: executor,
                  serialization: {PassThrough, nil},
                  metadata: %{"tenant_id" => "acct_01H8X"}
                )
 
       assert recorded(recorder) == []
-      assert {:error, :run_not_found} = Storage.fetch_run(store, "run-md-3")
+      assert {:error, :execution_not_found} = Storage.fetch_execution(store, "execution-md-3")
     end
 
     # sabotage: in Storage's check_metadata_supported/2, delete the
@@ -148,15 +148,15 @@ defmodule StatifierPersistence.RunMetadataTest do
       {:ok, store} = Storage.new(NoLockAdapter, [])
       {_source, machine} = Charts.chart_a()
 
-      assert {:ok, _run, _ms} =
-               Runs.create(store, "run-md-4", machine,
+      assert {:ok, _execution, _ms} =
+               Executions.create(store, "execution-md-4", machine,
                  executor: executor,
                  serialization: {PassThrough, nil},
                  metadata: %{}
                )
 
-      assert {:ok, _run, _ms} =
-               Runs.create(store, "run-md-5", machine,
+      assert {:ok, _execution, _ms} =
+               Executions.create(store, "execution-md-5", machine,
                  executor: executor,
                  serialization: {PassThrough, nil}
                )
@@ -172,7 +172,7 @@ defmodule StatifierPersistence.RunMetadataTest do
       executor: executor
     } do
       assert_raise ArgumentError, ~r/string keys/, fn ->
-        Runs.create(store, "run-md-6", machine,
+        Executions.create(store, "execution-md-6", machine,
           executor: executor,
           metadata: %{tenant_id: "acct_01H8X"}
         )
@@ -187,7 +187,7 @@ defmodule StatifierPersistence.RunMetadataTest do
       executor: executor
     } do
       assert_raise ArgumentError, ~r/must be a map/, fn ->
-        Runs.create(store, "run-md-7", machine,
+        Executions.create(store, "execution-md-7", machine,
           executor: executor,
           metadata: [{"tenant_id", "acct_01H8X"}]
         )
@@ -196,7 +196,7 @@ defmodule StatifierPersistence.RunMetadataTest do
   end
 
   describe "write-once" do
-    # sabotage: in InMemory.update_run/2, put the given record's metadata
+    # sabotage: in InMemory.update_execution/2, put the given record's metadata
     # instead of the stored map (drop the Map.put restoring it) -> red,
     # the fetch after the step saw %{} where the created map should be.
     # Verified red, reverted.
@@ -207,26 +207,28 @@ defmodule StatifierPersistence.RunMetadataTest do
     } do
       metadata = %{"tenant_id" => "acct_01H8X"}
 
-      {:ok, _run, _ms} =
-        Runs.create(store, "run-md-8", machine,
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-md-8", machine,
           executor: executor,
           metadata: metadata
         )
 
-      assert {:ok, _run, %MachineState{}} =
-               Runs.step(store, "run-md-8", machine, Event.external("go"), executor: executor)
+      assert {:ok, _execution, %MachineState{}} =
+               Executions.step(store, "execution-md-8", machine, Event.external("go"),
+                 executor: executor
+               )
 
-      assert {:ok, record} = Storage.fetch_run(store, "run-md-8")
+      assert {:ok, record} = Storage.fetch_execution(store, "execution-md-8")
       assert record.metadata == metadata
     end
 
     # sabotage: this path is guarded twice over and only a double mutation
-    # reaches it, which is itself the finding: Storage.update_run_status/4
+    # reaches it, which is itself the finding: Storage.update_execution_status/4
     # updates the *fetched* record (so metadata survives whatever the
-    # adapter does), and InMemory.update_run/2 carries the stored map
+    # adapter does), and InMemory.update_execution/2 carries the stored map
     # forward (so metadata survives whatever the facade passes). Setting
-    # metadata: %{} in update_run_status/4's updated record alone is green,
-    # and writing the given record's metadata in InMemory.update_run/2
+    # metadata: %{} in update_execution_status/4's updated record alone is green,
+    # and writing the given record's metadata in InMemory.update_execution/2
     # alone is green; both together -> red, the fetch after the
     # abandonment saw %{}. Verified red on the pair, reverted.
     test "an abandonment does not disturb the stored map", %{
@@ -236,15 +238,16 @@ defmodule StatifierPersistence.RunMetadataTest do
     } do
       metadata = %{"tenant_id" => "acct_01H8X"}
 
-      {:ok, _run, _ms} =
-        Runs.create(store, "run-md-9", machine,
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-md-9", machine,
           executor: executor,
           metadata: metadata
         )
 
-      assert {:ok, _run} = Runs.fail(store, "run-md-9", "abandoned: operator request")
+      assert {:ok, _execution} =
+               Executions.fail(store, "execution-md-9", "abandoned: operator request")
 
-      assert {:ok, record} = Storage.fetch_run(store, "run-md-9")
+      assert {:ok, record} = Storage.fetch_execution(store, "execution-md-9")
       assert record.status == :failed
       assert record.metadata == metadata
     end

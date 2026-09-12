@@ -2,7 +2,7 @@ defmodule StatifierPersistence.Test.RaisingListingAdapter do
   @moduledoc """
   A delegating `StatifierPersistence.Storage.Adapter` wrapping
   `StatifierPersistence.Storage.InMemory` whose
-  `list_runs_by_metadata/2` raises.
+  `list_executions_by_metadata/2` raises.
 
   The fixture for ruling C5's real content: a fan-out's settlement asks
   "have all N children settled?" once per child, and it must ask through
@@ -34,28 +34,28 @@ defmodule StatifierPersistence.Test.RaisingListingAdapter do
   defdelegate fetch_position(opts, session_id), to: InMemory
 
   @impl true
-  defdelegate insert_run(opts, run_record), to: InMemory
+  defdelegate insert_execution(opts, execution_record), to: InMemory
 
   @impl true
-  defdelegate fetch_run(opts, run_id), to: InMemory
+  defdelegate fetch_execution(opts, execution_id), to: InMemory
 
   @impl true
-  defdelegate update_run(opts, run_record), to: InMemory
+  defdelegate update_execution(opts, execution_record), to: InMemory
 
   @impl true
   defdelegate supports_metadata?(opts), to: InMemory
 
   @impl true
-  defdelegate supports_run_outcome?(opts), to: InMemory
+  defdelegate supports_execution_outcome?(opts), to: InMemory
 
   @impl true
-  defdelegate list_run_states_by_metadata(opts, metadata), to: InMemory
+  defdelegate list_execution_states_by_metadata(opts, metadata), to: InMemory
 
   @impl true
-  defdelegate lock_run(opts, run_id, fun), to: InMemory
+  defdelegate lock_execution(opts, execution_id, fun), to: InMemory
 
   @impl true
-  def list_runs_by_metadata(_opts, _metadata) do
-    raise "list_runs_by_metadata/2 was called where the projection was required"
+  def list_executions_by_metadata(_opts, _metadata) do
+    raise "list_executions_by_metadata/2 was called where the projection was required"
   end
 end

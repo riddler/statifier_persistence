@@ -1,9 +1,9 @@
 defmodule StatifierPersistence.Driver do
   @moduledoc """
-  Run-to-quiescence over `StatifierPersistence.Runs`: the loop that answers
+  Execution-to-quiescence over `StatifierPersistence.Executions`: the loop that answers
   the chart's `<invoke>` calls and keeps stepping until it stops asking.
 
-  `StatifierPersistence.Runs` steps a run *once*. That is the durable unit
+  `StatifierPersistence.Executions` steps an execution *once*. That is the durable unit
   and it is deliberately small - load, step, hand the effects to an
   executor, persist - but it is not what a host wants to call. A chart that
   invokes a service is not finished when the step that emitted the
@@ -11,7 +11,7 @@ defmodule StatifierPersistence.Driver do
   for itself. Every host that has embedded this package has written the
   same loop on top - step, collect the calls, perform them, feed each
   answer back, step again - and every hand-written copy of it is a place
-  where a durable run can quietly stop meaning what the same chart means
+  where a durable execution can quietly stop meaning what the same chart means
   under `Statifier.Session`.
 
   This module is that loop, with the event construction taken from
@@ -21,23 +21,23 @@ defmodule StatifierPersistence.Driver do
 
   One call to `create/3` or `send_event/4` is:
 
-  1. one `StatifierPersistence.Runs` entry point - the durable step, with
-     the run's whole fetch-to-persist tail inside its serialization
+  1. one `StatifierPersistence.Executions` entry point - the durable step, with
+     the execution's whole fetch-to-persist tail inside its serialization
      strategy;
   2. every non-lifecycle effect through the host's `:effects` executor, in
-     list order, exactly as `Runs` already hands them over;
+     list order, exactly as `Executions` already hands them over;
   3. every `{:invoke, _}` effect *also* through the host's `:dispatch`
      fun, synchronously, inside that same tail;
   4. after the tail has returned - never inside it - one further
-     `Runs.step/5` per answer, in the order the calls were made, each of
+     `Executions.step/5` per answer, in the order the calls were made, each of
      which can produce answers of its own;
   5. repeat from 4 until no answer is left. The result is the last step's
      own result.
 
-  The ordering in 3 and 4 is forced rather than stylistic. Dispatch runs
+  The ordering in 3 and 4 is forced rather than stylistic. Dispatch executions
   inside the tail because a call the chart made and a call the host
   performed have to be the same event in the same durable step; stepping
-  runs outside it because the tail is already inside the run's
+  runs outside it because the tail is already inside the execution's
   serialization strategy, and a step issued from within would ask for
   exclusion its own caller is holding.
 
@@ -59,9 +59,9 @@ defmodule StatifierPersistence.Driver do
     keyword list `failed_invocation/3` reads.
 
   `origin` is `#_scxml_<session id>`, and the session id comes from the
-  run's own persisted `_sessionid` (spec 5.10, st-ADR-0008), which
+  execution's own persisted `_sessionid` (spec 5.10, st-ADR-0008), which
   `Statifier.Position` carries in the datamodel across a restart. A
-  resumed run therefore answers with the same origin the run started
+  resumed execution therefore answers with the same origin the execution started
   with, on a node that has never seen it before.
 
   The error arm is *permanent* failure, in st-ADR-0068's sense: the host's
@@ -90,10 +90,10 @@ defmodule StatifierPersistence.Driver do
   `Statifier.Invoke.Handler.Scxml` and `StatifierBlocks.Runtime.Subchart`
   both emit, unchanged, whichever session executes it. This module is the
   durable executor for it (ADR-0008 decision 3): it resolves and creates
-  the child as an ordinary run, linked to this invocation under a
+  the child as an ordinary execution, linked to this invocation under a
   reserved-namespace pin of the child's own chart identity
-  (`StatifierPersistence.Run.Linkage`, ADR-0008 decision 2), drives that
-  run to its own quiescence through this same loop - so a child that
+  (`StatifierPersistence.Execution.Linkage`, ADR-0008 decision 2), drives that
+  execution to its own quiescence through this same loop - so a child that
   itself invokes a grandchild is handled with no extra code - and then
   answers `:pending` under ADR-0007 decision 1, exactly as any other
   asynchronous call does: the parent rests with the invocation live and no
@@ -107,30 +107,30 @@ defmodule StatifierPersistence.Driver do
   `:pending` from `:dispatch` instead. The call has been started; nothing
   is buffered for it; the drive rests and the position persists with the
   invocation still live in `machine_state.active_invocations`. There is no
-  process holding the run in the meantime, which is the point: the run can
+  process holding the execution in the meantime, which is the point: the execution can
   wait days and survive a deploy.
 
   The answer arrives later through `done_invocation/5` or
   `failed_invocation/5` - the two doors `Statifier.Session` gives a live
   session's host, on the durable path and keyed by the same
   `invoke_id`. They build the same two events the in-drive path builds and
-  drive the run from them, so a chart cannot tell which way its answer
+  drive the execution from them, so a chart cannot tell which way its answer
   came.
 
   ### The cancel-versus-completion race
 
   An invocation the chart cancels while its call is still running has an
   answer coming for something that is no longer live - across a restart,
-  on a node that has never seen the run. The liveness read that settles it
+  on a node that has never seen the execution. The liveness read that settles it
   is `active_invocations`, which `Statifier.Position` persists and
   `Statifier.Interpreter.ExitEntry` empties when the invoking state is
-  exited, and it is taken *inside* the run's serialization strategy: the
-  door hands `StatifierPersistence.Runs.step/5` an event builder rather
+  exited, and it is taken *inside* the execution's serialization strategy: the
+  door hands `StatifierPersistence.Executions.step/5` an event builder rather
   than an event, and the builder reads the loaded position under the same
   exclusion the step itself holds. A check taken before the call would
   leave a window for a cancel to land between the read and the step.
 
-  A cancelled invocation's answer is `{:discarded, run}` - spec 6.4.3's
+  A cancelled invocation's answer is `{:discarded, execution}` - spec 6.4.3's
   discard again, the same rule the in-drive loop applies at drain time -
   and the chart never sees it.
 
@@ -147,7 +147,7 @@ defmodule StatifierPersistence.Driver do
   A chart whose answer re-arms the call it answered would drive forever.
   `:max_turns` (default 1000) bounds the answer-fed steps in one drive and
   returns `{:error, {:turns_exhausted, max_turns}}` when it is reached.
-  The run is durable and quiescent at that point - every step that ran,
+  The execution is durable and quiescent at that point - every step that ran,
   persisted - so the error names a loop this driver refused to keep
   turning, not a lost position.
 
@@ -158,13 +158,13 @@ defmodule StatifierPersistence.Driver do
           dispatch: fn type, params, _context -> MyApp.perform(type, params) end,
           effects: fn effect, _context -> MyApp.Timers.consume(effect) end,
           invoke_types: Statifier.Invoke.Types.new(types: ["myapp:authorize"]),
-          serialization: {MyApp.RunLock, MyApp.RunLock}
+          serialization: {MyApp.ExecutionLock, MyApp.ExecutionLock}
         )
 
-      {:ok, run, machine_state} = StatifierPersistence.Driver.create(driver, run_id)
+      {:ok, execution, machine_state} = StatifierPersistence.Driver.create(driver, execution_id)
 
-      {:ok, run, machine_state} =
-        StatifierPersistence.Driver.send_event(driver, run_id, Statifier.Event.external("go"))
+      {:ok, execution, machine_state} =
+        StatifierPersistence.Driver.send_event(driver, execution_id, Statifier.Event.external("go"))
   """
 
   alias Statifier.Effect.{CancelInvoke, Invoke}
@@ -173,25 +173,25 @@ defmodule StatifierPersistence.Driver do
   alias Statifier.Invoke.Source
   alias Statifier.Machine.Identity
   alias Statifier.Session.Invocations
-  alias StatifierPersistence.{Executor, Run, Runs, Storage, Telemetry}
-  alias StatifierPersistence.Run.Linkage
+  alias StatifierPersistence.{Execution, Executions, Executor, Storage, Telemetry}
+  alias StatifierPersistence.Execution.Linkage
   alias StatifierPersistence.Serialization.AdapterLock
   alias StatifierPersistence.Storage.Adapter
 
   @typedoc """
   What `t:dispatch/0` receives as its third argument: the executor's own
-  context - the run id and the chart's content hash - plus `invoke_id`,
+  context - the execution id and the chart's content hash - plus `invoke_id`,
   this invocation's id, and `invoke`, the effect payload being dispatched.
 
   `invoke_id` is here and not in `t:StatifierPersistence.Executor.context/0`
-  because it is not a property of the run or the step: it names one
+  because it is not a property of the execution or the step: it names one
   `<invoke>`, and only the dispatch fun is called per invocation. It is
   what an asynchronous host keys its job by, and the same string
   `done_invocation/5` and `failed_invocation/5` take back.
 
   `invoke` is the whole `t:Statifier.Effect.Invoke.t/0` this dispatch is
   for, and it is here for the same reason: it is a property of the one
-  `<invoke>`, not of the run or the step. `type` and `params` are handed
+  `<invoke>`, not of the execution or the step. `type` and `params` are handed
   over as their own arguments because they are what an ordinary host acts
   on; the rest of the element - `src` above all, and `content`,
   `autoforward`, and the counters with it - reaches a host that needs it
@@ -203,7 +203,7 @@ defmodule StatifierPersistence.Driver do
   (ADR-0007 decision 5's amendment, ADR-0008 decision 3).
   """
   @type dispatch_context :: %{
-          run_id: String.t(),
+          execution_id: String.t(),
           content_hash: String.t(),
           invoke_id: String.t(),
           invoke: Invoke.t()
@@ -227,7 +227,7 @@ defmodule StatifierPersistence.Driver do
   be answered later, by `done_invocation/5` or `failed_invocation/5`, from
   whatever process - or whatever node, after whatever restart - eventually
   has the result. Nothing is buffered for it and the drive rests, so the
-  run reaches quiescence and persists with the invocation still live.
+  execution reaches quiescence and persists with the invocation still live.
 
   `{:start_child, invoke, {:invoke, invoke}}` means: start this chart as
   the child of this invocation. It is `Statifier.Session.Effects`' own
@@ -249,20 +249,20 @@ defmodule StatifierPersistence.Driver do
   @typedoc """
   What one drive returns: the last durable step's own result.
 
-  `{:ok, run, machine_state}` for a run that reached quiescence with
-  nothing left to answer, `{:discarded, run}` for an event delivered to a
-  terminal run, and the error arms of `StatifierPersistence.Runs` plus
+  `{:ok, execution, machine_state}` for an execution that reached quiescence with
+  nothing left to answer, `{:discarded, execution}` for an event delivered to a
+  terminal execution, and the error arms of `StatifierPersistence.Executions` plus
   this module's own `{:turns_exhausted, max_turns}`.
   """
   @type result ::
-          {:ok, Run.t(), MachineState.t()}
-          | {:discarded, Run.t()}
-          | {:error, Runs.error() | {:turns_exhausted, pos_integer()}}
+          {:ok, Execution.t(), MachineState.t()}
+          | {:discarded, Execution.t()}
+          | {:error, Executions.error() | {:turns_exhausted, pos_integer()}}
 
   @typedoc """
   How this driver reaches a chart it does not hold: answering a durable
   subchart's parent, whose chart is not this driver's own `machine`
-  (ADR-0008 decision 3). `content_hash` is the parent run's own, read off
+  (ADR-0008 decision 3). `content_hash` is the parent execution's own, read off
   its stored record.
   """
   @type chart_resolver :: (content_hash :: String.t() -> {:ok, Machine.t()} | :error)
@@ -272,14 +272,14 @@ defmodule StatifierPersistence.Driver do
   started children (sp-t57, ruling C9; `sob-q3y` implements it).
 
   `first_error` cancels the invocation's remaining children. The ones that
-  already have a run are this package's own to cancel, through
-  `StatifierPersistence.Runs.cascade_cancel/3`. The ones whose start job
-  has not run yet have no run record at all, so nothing here can see them,
+  already have an execution are this package's own to cancel, through
+  `StatifierPersistence.Executions.cascade_cancel/3`. The ones whose start job
+  has not run yet have no execution record at all, so nothing here can see them,
   let alone cancel them - only the scheduler that enqueued their jobs can.
   This is the call that asks it to.
 
-  It receives the parent's run id, the invocation id, and the indices in
-  `0..child_count - 1` that produced no run record - the exact set of
+  It receives the parent's execution id, the invocation id, and the indices in
+  `0..child_count - 1` that produced no execution record - the exact set of
   start jobs to cancel, computed inside the settlement section under the
   parent's exclusion. `{:error, reason}` fails the settlement rather than
   answering a dense list whose cancelled entries it could not vouch for.
@@ -287,17 +287,17 @@ defmodule StatifierPersistence.Driver do
   Defaults to `nil`, "this driver cancels no start jobs": a host with no
   scheduler starts no fan-out, and a `:first_error` settlement over a
   fully-started fan-out needs none either, since every index already has
-  a run for the cascade to reach.
+  an execution for the cascade to reach.
   """
   @type child_canceller ::
-          (parent_run_id :: Runs.run_id(),
+          (parent_execution_id :: Executions.execution_id(),
            invoke_id :: String.t(),
            unstarted_indices :: [non_neg_integer()] ->
              :ok | {:error, term()})
 
   @typedoc """
   ADR-0008's `after_step:` callback (the 2026-09-08 amendment): the id of
-  the run that was stepped, the `t:Statifier.MachineState.t/0` that step's
+  the execution that was stepped, the `t:Statifier.MachineState.t/0` that step's
   result carries, and the whole effect list that step produced - lifecycle
   effects included, not the executable subset `effects:` sees.
 
@@ -306,7 +306,7 @@ defmodule StatifierPersistence.Driver do
   clause 4).
   """
   @type after_step ::
-          (run_id :: Runs.run_id(),
+          (execution_id :: Executions.execution_id(),
            machine_state :: MachineState.t(),
            effects :: [Statifier.Effect.t()] ->
              any())
@@ -362,16 +362,16 @@ defmodule StatifierPersistence.Driver do
     durable timer, a trace becoming a feed row). Defaults to `nil`, "the
     host wants none of them"; an `{:error, reason}` from it re-enters the
     chart as `error.communication` exactly as it does through
-    `StatifierPersistence.Runs` directly.
+    `StatifierPersistence.Executions` directly.
   - `invoke_types:` - the `t:Statifier.Invoke.Types.t/0` snapshot stamped
     on every step. A driver-level default rather than a per-call one
     because the registered set is fixed for a session's lifetime
     (st-ADR-0051); `routes:`, which is not, stays per call. Defaults to
     `nil`, "the built-in set only".
-  - `serialization:` - the `{module, config}` per-run strategy every entry
+  - `serialization:` - the `{module, config}` per-execution strategy every entry
     point runs inside (ADR-0004 decision 5). Defaults to whatever
-    `StatifierPersistence.Runs` defaults to, the adapter's own
-    `lock_run/3`.
+    `StatifierPersistence.Executions` defaults to, the adapter's own
+    `lock_execution/3`.
   - `chart_resolver:` - `t:chart_resolver/0`, how this driver reaches a
     chart it does not hold: `(content_hash -> {:ok, Statifier.Machine.t()}
     | :error)`. It exists for exactly one purpose - answering a durable
@@ -381,22 +381,22 @@ defmodule StatifierPersistence.Driver do
     one, so the host that saved the chart is the only party that can
     compile it. Defaults to `nil`, "this driver answers no parents" - a
     host without one calls `done_invocation/5` or `failed_invocation/5`
-    itself, from `parent_link/2` and the drive's own `run.donedata` or
-    `run.failure`.
+    itself, from `parent_link/2` and the drive's own `execution.donedata` or
+    `execution.failure`.
   - `child_canceller:` - `t:child_canceller/0`, how a `:first_error`
     settlement reaches the scheduler holding the start jobs of a fan-out's
     not-yet-started children. Defaults to `nil`, "this driver cancels no
     start jobs".
   - `after_step:` - `t:after_step/0`, called
-    `after_step.(run_id, machine_state, effects)` after every step this
+    `after_step.(execution_id, machine_state, effects)` after every step this
     driver takes on a caller's behalf, so a host keeping its own record of
-    what a run did can append the steps it never made itself: a durable
+    what an execution did can append the steps it never made itself: a durable
     subchart child's own steps, and the *parent's* step on the answer path
     (ADR-0008 decision 3 and the `driver:` option on
-    `StatifierPersistence.Runs.fail/4`), neither of which the drive's
-    return value reports. The run id is always the run that was stepped -
+    `StatifierPersistence.Executions.fail/4`), neither of which the drive's
+    return value reports. The execution id is always the execution that was stepped -
     the parent's, on the answer path. It fires after that step's persist,
-    in the order the steps happened, and outside the exclusion of the run
+    in the order the steps happened, and outside the exclusion of the execution
     it reports; a step that was discarded, and a `cascade_cancel`, step
     nothing and fire nothing. Its return is ignored and a raise inside it
     propagates (the 2026-09-08 amendment's clauses 3 to 5, which also say
@@ -425,34 +425,35 @@ defmodule StatifierPersistence.Driver do
   end
 
   @doc """
-  Creates the run under `run_id` and drives it to quiescence.
+  Creates the execution under `execution_id` and drives it to quiescence.
 
-  `StatifierPersistence.Runs.create/4` with this driver's executor, then
+  `StatifierPersistence.Executions.create/4` with this driver's executor, then
   the answer loop. `opts` takes everything `create/4` takes except
   `executor:`, which this module supplies - `initialize:`, `metadata:`,
   `routes:`, and per-call overrides of the driver's own `invoke_types:`
   and `serialization:`.
   """
-  @spec create(driver :: t(), run_id :: Runs.run_id(), opts :: keyword()) :: result()
-  def create(%__MODULE__{} = driver, run_id, opts \\ []) do
+  @spec create(driver :: t(), execution_id :: Executions.execution_id(), opts :: keyword()) ::
+          result()
+  def create(%__MODULE__{} = driver, execution_id, opts \\ []) do
     ref = make_ref()
     opts = driver |> create_opts(opts) |> Keyword.put_new(:entry, :create)
 
     result =
       driver.store
-      |> Runs.create(run_id, driver.machine, run_opts(driver, opts, ref))
-      |> fire_after_step(driver, run_id, opts, ref)
+      |> Executions.create(execution_id, driver.machine, execution_opts(driver, opts, ref))
+      |> fire_after_step(driver, execution_id, opts, ref)
 
-    result = advance(driver, run_id, opts, result, drain(ref, []), 0)
+    result = advance(driver, execution_id, opts, result, drain(ref, []), 0)
 
-    maybe_answer_parent(driver, run_id, result)
+    maybe_answer_parent(driver, execution_id, result)
   end
 
   # `create/4`'s `invoke_types:` has to travel inside `initialize:`, not
   # beside it: a create has no stored position to stamp, so the snapshot
   # reaches the core through `Statifier.MachineState.new/2`'s own option
   # and nowhere else. Without this, a driver-level `invoke_types:` would
-  # take effect on every step of a run and not on the step that starts it,
+  # take effect on every step of an execution and not on the step that starts it,
   # and the very first `<invoke>` a chart makes - the one in its initial
   # configuration - would go unregistered.
   @spec create_opts(t(), keyword()) :: keyword()
@@ -468,42 +469,42 @@ defmodule StatifierPersistence.Driver do
   end
 
   @doc """
-  Delivers one external event to the run under `run_id` and drives it to
+  Delivers one external event to the execution under `execution_id` and drives it to
   quiescence.
 
-  `StatifierPersistence.Runs.step/5` with this driver's executor, then the
-  answer loop. An event delivered to a terminal run is that function's own
-  `{:discarded, run}`, before any position decode and before any dispatch.
+  `StatifierPersistence.Executions.step/5` with this driver's executor, then the
+  answer loop. An event delivered to a terminal execution is that function's own
+  `{:discarded, execution}`, before any position decode and before any dispatch.
   """
   @spec send_event(
           driver :: t(),
-          run_id :: Runs.run_id(),
+          execution_id :: Executions.execution_id(),
           event :: Event.t(),
           opts :: keyword()
         ) :: result()
-  def send_event(%__MODULE__{} = driver, run_id, %Event{} = event, opts \\ []) do
+  def send_event(%__MODULE__{} = driver, execution_id, %Event{} = event, opts \\ []) do
     ref = make_ref()
     opts = Keyword.put_new(opts, :entry, :step)
-    result = step(driver, run_id, opts, event, ref)
-    result = advance(driver, run_id, opts, result, drain(ref, []), 0)
+    result = step(driver, execution_id, opts, event, ref)
+    result = advance(driver, execution_id, opts, result, drain(ref, []), 0)
 
-    maybe_answer_parent(driver, run_id, result)
+    maybe_answer_parent(driver, execution_id, result)
   end
 
   @doc """
-  Answers a `:pending` invocation with `donedata` and drives the run to
+  Answers a `:pending` invocation with `donedata` and drives the execution to
   quiescence.
 
   `Statifier.Session.done_invocation/3`'s door on the durable path: it
-  builds the same `done.invoke.<invoke_id>` event, from the run's own
+  builds the same `done.invoke.<invoke_id>` event, from the execution's own
   persisted `_sessionid`, and steps it. `invoke_id` is the `<invoke>`
   element's id - the `invoke_id` `:dispatch` was handed in its
   `t:dispatch_context/0`.
 
   Answering an invocation the chart has since cancelled is
-  `{:discarded, run}`, spec 6.4.3's discard, decided from the loaded
-  position inside the run's serialization strategy (the moduledoc's
-  cancel-versus-completion section). So is answering a terminal run.
+  `{:discarded, execution}`, spec 6.4.3's discard, decided from the loaded
+  position inside the execution's serialization strategy (the moduledoc's
+  cancel-versus-completion section). So is answering a terminal execution.
 
   The answer can re-arm calls of its own; they are dispatched and driven
   exactly as `send_event/4` drives them, `:pending` included.
@@ -512,19 +513,25 @@ defmodule StatifierPersistence.Driver do
   """
   @spec done_invocation(
           driver :: t(),
-          run_id :: Runs.run_id(),
+          execution_id :: Executions.execution_id(),
           invoke_id :: String.t(),
           donedata :: term(),
           opts :: keyword()
         ) :: result()
-  def done_invocation(%__MODULE__{} = driver, run_id, invoke_id, donedata \\ nil, opts \\ [])
+  def done_invocation(
+        %__MODULE__{} = driver,
+        execution_id,
+        invoke_id,
+        donedata \\ nil,
+        opts \\ []
+      )
       when is_binary(invoke_id) do
-    reenter(driver, run_id, opts, invoke_id, {:done, donedata})
+    reenter(driver, execution_id, opts, invoke_id, {:done, donedata})
   end
 
   @doc """
   `done_invocation/5`'s failing counterpart: answers a `:pending`
-  invocation with a *permanent* failure and drives the run to quiescence.
+  invocation with a *permanent* failure and drives the execution to quiescence.
 
   `Statifier.Session.failed_invocation/3`'s door on the durable path,
   building the same `error.communication.invoke.<invoke_id>` event from
@@ -537,30 +544,36 @@ defmodule StatifierPersistence.Driver do
   """
   @spec failed_invocation(
           driver :: t(),
-          run_id :: Runs.run_id(),
+          execution_id :: Executions.execution_id(),
           invoke_id :: String.t(),
           failure :: keyword(),
           opts :: keyword()
         ) :: result()
-  def failed_invocation(%__MODULE__{} = driver, run_id, invoke_id, failure \\ [], opts \\ [])
+  def failed_invocation(
+        %__MODULE__{} = driver,
+        execution_id,
+        invoke_id,
+        failure \\ [],
+        opts \\ []
+      )
       when is_binary(invoke_id) and is_list(failure) do
-    reenter(driver, run_id, opts, invoke_id, {:failed, failure})
+    reenter(driver, execution_id, opts, invoke_id, {:failed, failure})
   end
 
   @doc """
-  The "find my parent" query: reads `run_id`'s own stored linkage, one key
-  read off its fetched record (`StatifierPersistence.Run.Linkage`, ADR-0008
+  The "find my parent" query: reads `execution_id`'s own stored linkage, one key
+  read off its fetched record (`StatifierPersistence.Execution.Linkage`, ADR-0008
   decision 2).
 
-  `:no_parent` for a run with no linkage - an ordinary run, or a durable
+  `:no_parent` for an execution with no linkage - an ordinary execution, or a durable
   subchart child that has none for whatever reason - not a failure: having
-  no parent is an ordinary property of a run.
+  no parent is an ordinary property of an execution.
   """
-  @spec parent_link(store :: Storage.t(), run_id :: Runs.run_id()) ::
+  @spec parent_link(store :: Storage.t(), execution_id :: Executions.execution_id()) ::
           {:ok, Linkage.t()} | :no_parent | {:error, Storage.error()}
-  def parent_link(%Storage{} = store, run_id) do
-    with {:ok, run_record} <- Storage.fetch_run(store, run_id) do
-      case Linkage.from_metadata(run_record.metadata) do
+  def parent_link(%Storage{} = store, execution_id) do
+    with {:ok, execution_record} <- Storage.fetch_execution(store, execution_id) do
+      case Linkage.from_metadata(execution_record.metadata) do
         {:ok, %Linkage{} = linkage} -> {:ok, linkage}
         :no_linkage -> :no_parent
       end
@@ -568,14 +581,14 @@ defmodule StatifierPersistence.Driver do
   end
 
   @doc """
-  Answers `child_run_id`'s parent with its completion or permanent failure
+  Answers `child_execution_id`'s parent with its completion or permanent failure
   (ADR-0008 decision 3) - a separate drive under the *parent's* own
   exclusion, `driver.machine` must be the parent's chart.
 
   `donedata_or_failure` is `{:done, donedata}` or `{:failed, failure}`.
-  Reads `child_run_id`'s own linkage through `parent_link/2` first:
+  Reads `child_execution_id`'s own linkage through `parent_link/2` first:
   `:no_parent` is a no-op answering `:no_parent`, so this is safe to call
-  on any run id, linked or not.
+  on any execution id, linked or not.
 
   A child of a **fan-out** answers no parent here. Its linkage carries a
   `child_count`, so this call settles instead - records the child's own
@@ -597,19 +610,19 @@ defmodule StatifierPersistence.Driver do
   """
   @spec answer_parent(
           driver :: t(),
-          child_run_id :: Runs.run_id(),
+          child_execution_id :: Executions.execution_id(),
           donedata_or_failure :: {:done, term()} | {:failed, keyword()}
         ) :: result() | :ok | :no_parent | {:error, Storage.error()}
-  def answer_parent(%__MODULE__{} = driver, child_run_id, donedata_or_failure)
-      when is_binary(child_run_id) do
-    case parent_link(driver.store, child_run_id) do
+  def answer_parent(%__MODULE__{} = driver, child_execution_id, donedata_or_failure)
+      when is_binary(child_execution_id) do
+    case parent_link(driver.store, child_execution_id) do
       {:ok, %Linkage{child_count: nil} = linkage} ->
         result = respond_to_parent(driver, linkage, donedata_or_failure)
-        report_answered(child_run_id, linkage, donedata_or_failure)
+        report_answered(child_execution_id, linkage, donedata_or_failure)
         result
 
       {:ok, %Linkage{} = linkage} ->
-        settle_child(driver, linkage, child_run_id, donedata_or_failure)
+        settle_child(driver, linkage, child_execution_id, donedata_or_failure)
 
       :no_parent ->
         :no_parent
@@ -627,8 +640,8 @@ defmodule StatifierPersistence.Driver do
   the *child* has left it terminal - resolve the parent's chart through
   `chart_resolver:`, then answer through `answer_parent/3` with a driver
   over that chart - and it exists because a caller outside a drive needs
-  the same two steps. `StatifierPersistence.Runs.fail/4`'s `driver:` option
-  is that caller (ADR-0008's outside-fail note): a run failed from outside
+  the same two steps. `StatifierPersistence.Executions.fail/4`'s `driver:` option
+  is that caller (ADR-0008's outside-fail note): an execution failed from outside
   the interpreter has no drive to hang the answer off, so it calls here.
 
   A driver with no `chart_resolver:` answers through `answer_parent/3`
@@ -639,41 +652,51 @@ defmodule StatifierPersistence.Driver do
   would step the parent against the wrong chart. Here the caller chose the
   driver, so the choice is theirs to make.
 
-  Never raises for a run with no parent and never reports a storage error:
+  Never raises for an execution with no parent and never reports a storage error:
   `:no_parent` and a failed fetch are both `:ok`, exactly as the automatic
   path treats them. A caller that needs the answer's own result calls
   `answer_parent/3`.
   """
   @spec resolve_and_answer_parent(
           driver :: t(),
-          child_run_id :: Runs.run_id(),
+          child_execution_id :: Executions.execution_id(),
           donedata_or_failure :: {:done, term()} | {:failed, keyword()}
         ) :: :ok
-  def resolve_and_answer_parent(%__MODULE__{} = driver, child_run_id, donedata_or_failure)
-      when is_binary(child_run_id) do
-    case parent_link(driver.store, child_run_id) do
+  def resolve_and_answer_parent(%__MODULE__{} = driver, child_execution_id, donedata_or_failure)
+      when is_binary(child_execution_id) do
+    case parent_link(driver.store, child_execution_id) do
       {:ok, %Linkage{} = linkage} ->
-        answer_resolved(driver, linkage, child_run_id, donedata_or_failure)
+        answer_resolved(driver, linkage, child_execution_id, donedata_or_failure)
 
       _no_parent_or_error ->
         :ok
     end
   end
 
-  @spec answer_resolved(t(), Linkage.t(), Runs.run_id(), {:done, term()} | {:failed, keyword()}) ::
+  @spec answer_resolved(
+          t(),
+          Linkage.t(),
+          Executions.execution_id(),
+          {:done, term()} | {:failed, keyword()}
+        ) ::
           :ok
-  defp answer_resolved(%__MODULE__{chart_resolver: nil} = driver, _linkage, child_run_id, payload) do
-    answer_parent(driver, child_run_id, payload)
+  defp answer_resolved(
+         %__MODULE__{chart_resolver: nil} = driver,
+         _linkage,
+         child_execution_id,
+         payload
+       ) do
+    answer_parent(driver, child_execution_id, payload)
 
     :ok
   end
 
-  defp answer_resolved(driver, %Linkage{} = linkage, child_run_id, payload) do
-    resolve_and_answer(driver, linkage, child_run_id, payload)
+  defp answer_resolved(driver, %Linkage{} = linkage, child_execution_id, payload) do
+    resolve_and_answer(driver, linkage, child_execution_id, payload)
   end
 
   @doc """
-  Starts child `index` of `count` for `parent_run_id`'s `<invoke>` - the
+  Starts child `index` of `count` for `parent_execution_id`'s `<invoke>` - the
   public start-with-index door a scheduler drives a fan-out through
   (sp-t57, ruling C4; mirrors `sob-q3y`).
 
@@ -687,8 +710,8 @@ defmodule StatifierPersistence.Driver do
   happens under the parent's exclusion is the enqueue, and the children
   are created afterwards, idempotently and resumably.
 
-  Idempotent, and that is what makes it resumable: the child's run id is
-  `StatifierPersistence.Run.Linkage.child_run_id/3` of the same three
+  Idempotent, and that is what makes it resumable: the child's execution id is
+  `StatifierPersistence.Execution.Linkage.child_execution_id/3` of the same three
   values, so a re-delivered start job finds the child it already created
   and adopts it rather than creating a second one - exactly as the
   single-child path's at-least-once re-drive does.
@@ -698,7 +721,7 @@ defmodule StatifierPersistence.Driver do
   - `driver` - any driver over the right store. Its `machine` is not read:
     the child's chart comes from `effect`, and the parent's comes from the
     `chart_resolver:` when the settlement answers.
-  - `parent_run_id` - the run whose `<invoke>` this fans out.
+  - `parent_execution_id` - the execution whose `<invoke>` this fans out.
   - `effect` - the resolved `t:Statifier.Effect.Invoke.t/0`, or the whole
     `{:start_child, resolved, {:invoke, invoke}}` instruction a subchart
     handler answers with. The invocation id is read off it, so a caller
@@ -710,7 +733,7 @@ defmodule StatifierPersistence.Driver do
 
   `index` outside `0..count - 1` raises `ArgumentError` - a caller bug,
   not a storage event. The check is
-  `StatifierPersistence.Run.Linkage.new/6`'s, which is the one definition
+  `StatifierPersistence.Execution.Linkage.new/6`'s, which is the one definition
   site of the linkage's own shape; this function does not repeat it.
 
   ## Refusals
@@ -718,27 +741,34 @@ defmodule StatifierPersistence.Driver do
   `{:refused, reason}`, the same shape and the same telemetry the
   single-child path's refusal at open uses, with three added arms. An
   adapter that cannot enumerate children refuses `:child_listing_unsupported`
-  as it always has; one that cannot store a run's outcome payload refuses
-  `:run_outcome_unsupported`, and one that cannot answer the indexed
-  status projection refuses `:run_states_unsupported`. All three are the
+  as it always has; one that cannot store an execution's outcome payload refuses
+  `:execution_outcome_unsupported`, and one that cannot answer the indexed
+  status projection refuses `:execution_states_unsupported`. All three are the
   same principle: a child whose invocation could never be settled is not
-  started. A `parent_run_id` naming no stored run refuses `:run_not_found`.
+  started. A `parent_execution_id` naming no stored execution refuses `:execution_not_found`.
   """
   @spec start_child_at(
           driver :: t(),
-          parent_run_id :: Runs.run_id(),
+          parent_execution_id :: Executions.execution_id(),
           effect :: Invoke.t() | {:start_child, Invoke.t(), {:invoke, Invoke.t()}},
           index :: non_neg_integer(),
           count :: pos_integer(),
           opts :: [policy: Linkage.policy()]
         ) :: :ok | {:refused, term()}
-  def start_child_at(%__MODULE__{} = driver, parent_run_id, effect, index, count, opts \\ [])
-      when is_binary(parent_run_id) and is_integer(index) and index >= 0 and
+  def start_child_at(
+        %__MODULE__{} = driver,
+        parent_execution_id,
+        effect,
+        index,
+        count,
+        opts \\ []
+      )
+      when is_binary(parent_execution_id) and is_integer(index) and index >= 0 and
              is_integer(count) and count > 0 do
     resolved = resolved_invoke(effect)
     policy = Keyword.get(opts, :policy, :all)
 
-    with {:ok, context} <- start_context(driver, parent_run_id, resolved) do
+    with {:ok, context} <- start_context(driver, parent_execution_id, resolved) do
       result = settleable(driver, context, resolved, {index, count, policy})
       report_refusal(result, context)
     end
@@ -751,16 +781,16 @@ defmodule StatifierPersistence.Driver do
 
   # The parent's own record supplies the `content_hash` a
   # `t:dispatch_context/0` carries, and reading it doubles as the check
-  # that the parent exists at all: creating a child of a run that is not
+  # that the parent exists at all: creating a child of an execution that is not
   # there would leave a linked orphan nothing ever settles.
-  @spec start_context(t(), Runs.run_id(), Invoke.t()) ::
+  @spec start_context(t(), Executions.execution_id(), Invoke.t()) ::
           {:ok, dispatch_context()} | {:refused, term()}
-  defp start_context(driver, parent_run_id, %Invoke{} = resolved) do
-    case Storage.fetch_run(driver.store, parent_run_id) do
+  defp start_context(driver, parent_execution_id, %Invoke{} = resolved) do
+    case Storage.fetch_execution(driver.store, parent_execution_id) do
       {:ok, parent_record} ->
         {:ok,
          %{
-           run_id: parent_run_id,
+           execution_id: parent_execution_id,
            content_hash: parent_record.content_hash,
            invoke_id: resolved.invoke_id,
            invoke: resolved
@@ -782,11 +812,11 @@ defmodule StatifierPersistence.Driver do
       not Storage.child_listing_supported?(driver.store) ->
         {:refused, :child_listing_unsupported}
 
-      not Storage.run_outcome_supported?(driver.store) ->
-        {:refused, :run_outcome_unsupported}
+      not Storage.execution_outcome_supported?(driver.store) ->
+        {:refused, :execution_outcome_unsupported}
 
-      not Storage.run_states_supported?(driver.store) ->
-        {:refused, :run_states_unsupported}
+      not Storage.execution_states_supported?(driver.store) ->
+        {:refused, :execution_states_unsupported}
 
       true ->
         resolve_child(driver, resolved, context, fan_out)
@@ -794,13 +824,17 @@ defmodule StatifierPersistence.Driver do
   end
 
   # `[:statifier_persistence, :child, :answered]`, after the parent's own
-  # door has returned. A run with no linkage answers nothing and reports
-  # nothing: having no parent is an ordinary property of a run.
-  @spec report_answered(Runs.run_id(), Linkage.t(), {:done, term()} | {:failed, keyword()}) :: :ok
-  defp report_answered(child_run_id, %Linkage{} = linkage, {outcome, _payload}) do
+  # door has returned. An execution with no linkage answers nothing and reports
+  # nothing: having no parent is an ordinary property of an execution.
+  @spec report_answered(
+          Executions.execution_id(),
+          Linkage.t(),
+          {:done, term()} | {:failed, keyword()}
+        ) :: :ok
+  defp report_answered(child_execution_id, %Linkage{} = linkage, {outcome, _payload}) do
     Telemetry.child_answered(
-      child_run_id: child_run_id,
-      parent_run_id: linkage.parent_run_id,
+      child_execution_id: child_execution_id,
+      parent_execution_id: linkage.parent_execution_id,
       invoke_id: linkage.invoke_id,
       outcome: outcome,
       child_count: linkage.child_count,
@@ -816,13 +850,13 @@ defmodule StatifierPersistence.Driver do
   # for a settlement that failed, which is the one thing a consumer counts
   # this event to learn. The entries are what the parent is about to be
   # answered with, so they are what the report reads.
-  @spec report_settled_answer(Runs.run_id(), Linkage.t(), [map()]) :: :ok
-  defp report_settled_answer(child_run_id, %Linkage{} = linkage, entries) do
+  @spec report_settled_answer(Executions.execution_id(), Linkage.t(), [map()]) :: :ok
+  defp report_settled_answer(child_execution_id, %Linkage{} = linkage, entries) do
     failed_count = Enum.count(entries, &(&1["status"] == "failed"))
 
     Telemetry.child_answered(
-      child_run_id: child_run_id,
-      parent_run_id: linkage.parent_run_id,
+      child_execution_id: child_execution_id,
+      parent_execution_id: linkage.parent_execution_id,
       invoke_id: linkage.invoke_id,
       outcome: if(failed_count > 0, do: :failed, else: :done),
       child_count: linkage.child_count,
@@ -845,7 +879,7 @@ defmodule StatifierPersistence.Driver do
   defp respond_to_parent(driver, %Linkage{} = linkage, {:done, donedata}) do
     done_invocation(
       driver,
-      linkage.parent_run_id,
+      linkage.parent_execution_id,
       linkage.invoke_id,
       donedata,
       answer_opts(linkage)
@@ -855,7 +889,7 @@ defmodule StatifierPersistence.Driver do
   defp respond_to_parent(driver, %Linkage{} = linkage, {:failed, failure}) do
     failed_invocation(
       driver,
-      linkage.parent_run_id,
+      linkage.parent_execution_id,
       linkage.invoke_id,
       failure,
       answer_opts(linkage)
@@ -871,34 +905,43 @@ defmodule StatifierPersistence.Driver do
     ]
   end
 
-  @spec door({:done, term()} | {:failed, keyword()}) :: Runs.entry()
+  @spec door({:done, term()} | {:failed, keyword()}) :: Executions.entry()
   defp door({:done, _donedata}), do: :done_invocation
   defp door({:failed, _failure}), do: :failed_invocation
 
   # The automatic re-entry `create/3`, `send_event/4` and `reenter/5` all
   # call after their own drive returns: a completed or permanently-failed
-  # run with a `chart_resolver:` and linkage answers its parent; anything
+  # execution with a `chart_resolver:` and linkage answers its parent; anything
   # else - active, no linkage, no resolver - leaves the drive's own result
   # unchanged, which is always what this function returns regardless of
   # what the answer attempt does.
-  @spec maybe_answer_parent(t(), Runs.run_id(), result()) :: result()
-  defp maybe_answer_parent(driver, run_id, {:ok, %Run{status: :completed} = run, _ms} = result) do
-    auto_answer_parent(driver, run_id, {:done, run.donedata})
+  @spec maybe_answer_parent(t(), Executions.execution_id(), result()) :: result()
+  defp maybe_answer_parent(
+         driver,
+         execution_id,
+         {:ok, %Execution{status: :completed} = execution, _ms} = result
+       ) do
+    auto_answer_parent(driver, execution_id, {:done, execution.donedata})
     result
   end
 
-  defp maybe_answer_parent(driver, run_id, {:ok, %Run{status: :failed} = run, _ms} = result) do
-    auto_answer_parent(driver, run_id, {:failed, reason: run.failure})
+  defp maybe_answer_parent(
+         driver,
+         execution_id,
+         {:ok, %Execution{status: :failed} = execution, _ms} = result
+       ) do
+    auto_answer_parent(driver, execution_id, {:failed, reason: execution.failure})
     result
   end
 
-  defp maybe_answer_parent(_driver, _run_id, result), do: result
+  defp maybe_answer_parent(_driver, _execution_id, result), do: result
 
-  @spec auto_answer_parent(t(), Runs.run_id(), {:done, term()} | {:failed, keyword()}) :: :ok
-  defp auto_answer_parent(%__MODULE__{chart_resolver: nil}, _run_id, _payload), do: :ok
+  @spec auto_answer_parent(t(), Executions.execution_id(), {:done, term()} | {:failed, keyword()}) ::
+          :ok
+  defp auto_answer_parent(%__MODULE__{chart_resolver: nil}, _execution_id, _payload), do: :ok
 
-  defp auto_answer_parent(driver, run_id, payload) do
-    resolve_and_answer_parent(driver, run_id, payload)
+  defp auto_answer_parent(driver, execution_id, payload) do
+    resolve_and_answer_parent(driver, execution_id, payload)
   end
 
   # -- Settlement (sp-t57, rulings C1, C3, C5, C9) ---------------------
@@ -913,10 +956,10 @@ defmodule StatifierPersistence.Driver do
   # 1. A settlement section takes the PARENT's exclusion. Everything that
   #    follows happens inside it, because the question and the answer that
   #    follows from it have to be one decision.
-  # 2. The child's own answer is persisted on the child's run record.
+  # 2. The child's own answer is persisted on the child's execution record.
   #    Nothing else keeps it: a stored record carries no donedata, so an
   #    answer that stayed on the step that produced it could not be
-  #    assembled later by a node that never saw the child run. It is
+  #    assembled later by a node that never saw the child execution. It is
   #    written under the parent's exclusion (sp-kl3) so that every
   #    invocation's answers are written and read in one order: the
   #    settlement that records the last answer is the settlement that then
@@ -948,13 +991,18 @@ defmodule StatifierPersistence.Driver do
   # package already relies on for a late answer to a cancelled invocation.
   # That discard is idempotent for a chart that transitions out of the
   # invoking state on its answer, which the compiled fan-out block is.
-  @spec settle_child(t(), Linkage.t(), Runs.run_id(), {:done, term()} | {:failed, keyword()}) ::
+  @spec settle_child(
+          t(),
+          Linkage.t(),
+          Executions.execution_id(),
+          {:done, term()} | {:failed, keyword()}
+        ) ::
           :ok
-  defp settle_child(driver, %Linkage{} = linkage, child_run_id, payload) do
-    case decide(driver, linkage, child_run_id, payload) do
+  defp settle_child(driver, %Linkage{} = linkage, child_execution_id, payload) do
+    case decide(driver, linkage, child_execution_id, payload) do
       {:ok, {:answer, entries}} ->
         respond_to_parent(driver, linkage, {:done, entries})
-        report_settled_answer(child_run_id, linkage, entries)
+        report_settled_answer(child_execution_id, linkage, entries)
 
       _not_yet_or_error ->
         :ok
@@ -965,25 +1013,25 @@ defmodule StatifierPersistence.Driver do
 
   # The child's status is already stored - its own step persisted it - so
   # this writes the payload beside it and re-states the same status rather
-  # than deriving a new one. `update_run_status/4` is the writer that
+  # than deriving a new one. `update_execution_status/4` is the writer that
   # carries every other stored field, both blobs included, forward
   # verbatim.
   #
   # Called from inside `decide/4`'s exclusion, never outside it: see the
   # section comment above.
-  @spec record_outcome(t(), Runs.run_id(), {:done, term()} | {:failed, keyword()}) ::
+  @spec record_outcome(t(), Executions.execution_id(), {:done, term()} | {:failed, keyword()}) ::
           :ok | {:error, Storage.error()}
-  defp record_outcome(driver, child_run_id, payload) do
+  defp record_outcome(driver, child_execution_id, payload) do
     {status, failure} = terminal_fields(payload)
 
-    Storage.update_run_status(driver.store, child_run_id, status,
+    Storage.update_execution_status(driver.store, child_execution_id, status,
       failure: failure,
       outcome_blob: encode_outcome(payload)
     )
   end
 
   @spec terminal_fields({:done, term()} | {:failed, keyword()}) ::
-          {Adapter.run_status(), String.t() | nil}
+          {Adapter.execution_status(), String.t() | nil}
   defp terminal_fields({:done, _donedata}), do: {:completed, nil}
 
   defp terminal_fields({:failed, failure}) do
@@ -1009,14 +1057,19 @@ defmodule StatifierPersistence.Driver do
   # parent's own serialization strategy, so two children settling at once
   # neither read a half-written picture of the invocation nor write their
   # answers into one.
-  @spec decide(t(), Linkage.t(), Runs.run_id(), {:done, term()} | {:failed, keyword()}) ::
+  @spec decide(
+          t(),
+          Linkage.t(),
+          Executions.execution_id(),
+          {:done, term()} | {:failed, keyword()}
+        ) ::
           {:ok, {:answer, term()} | :not_yet} | {:error, term()}
-  defp decide(driver, %Linkage{} = linkage, child_run_id, payload) do
+  defp decide(driver, %Linkage{} = linkage, child_execution_id, payload) do
     {strategy, config} = settlement_strategy(driver)
-    match = Linkage.invocation_match(linkage.parent_run_id, linkage.invoke_id)
+    match = Linkage.invocation_match(linkage.parent_execution_id, linkage.invoke_id)
 
-    case strategy.with_run(config, linkage.parent_run_id, fn ->
-           record_and_settle(driver, linkage, match, child_run_id, payload)
+    case strategy.with_execution(config, linkage.parent_execution_id, fn ->
+           record_and_settle(driver, linkage, match, child_execution_id, payload)
          end) do
       {:ok, result} -> result
       {:error, _reason} = error -> error
@@ -1030,13 +1083,13 @@ defmodule StatifierPersistence.Driver do
           t(),
           Linkage.t(),
           Adapter.metadata(),
-          Runs.run_id(),
+          Executions.execution_id(),
           {:done, term()} | {:failed, keyword()}
         ) :: {:ok, {:answer, term()} | :not_yet} | {:error, term()}
-  defp record_and_settle(driver, %Linkage{} = linkage, match, child_run_id, payload) do
-    case record_outcome(driver, child_run_id, payload) do
+  defp record_and_settle(driver, %Linkage{} = linkage, match, child_execution_id, payload) do
+    case record_outcome(driver, child_execution_id, payload) do
       :ok ->
-        report_recorded(child_run_id, linkage, payload)
+        report_recorded(child_execution_id, linkage, payload)
         settle(driver, linkage, match)
 
       {:error, _reason} = error ->
@@ -1049,11 +1102,15 @@ defmodule StatifierPersistence.Driver do
   # settlement that follows will not read. Every index but the settling one
   # records an answer that reaches no door at all, and before this event
   # nothing showed them (sp-8wv's ADR-0009 amendment).
-  @spec report_recorded(Runs.run_id(), Linkage.t(), {:done, term()} | {:failed, keyword()}) :: :ok
-  defp report_recorded(child_run_id, %Linkage{} = linkage, {outcome, _payload}) do
+  @spec report_recorded(
+          Executions.execution_id(),
+          Linkage.t(),
+          {:done, term()} | {:failed, keyword()}
+        ) :: :ok
+  defp report_recorded(child_execution_id, %Linkage{} = linkage, {outcome, _payload}) do
     Telemetry.child_recorded(
-      parent_run_id: linkage.parent_run_id,
-      child_run_id: child_run_id,
+      parent_execution_id: linkage.parent_execution_id,
+      child_execution_id: child_execution_id,
       invoke_id: linkage.invoke_id,
       child_index: linkage.child_index,
       outcome: outcome
@@ -1069,7 +1126,7 @@ defmodule StatifierPersistence.Driver do
   @spec settle(t(), Linkage.t(), Adapter.metadata()) ::
           {:ok, {:answer, term()} | :not_yet} | {:error, term()}
   defp settle(driver, %Linkage{} = linkage, match) do
-    with {:ok, states} <- Storage.list_run_states_by_metadata(driver.store, match),
+    with {:ok, states} <- Storage.list_execution_states_by_metadata(driver.store, match),
          {:ok, states, cancelled?} <- maybe_cancel(driver, linkage, states, match) do
       decided =
         if settled?(states, linkage.child_count, cancelled?) do
@@ -1089,11 +1146,11 @@ defmodule StatifierPersistence.Driver do
   # `states` the decision was made from - including the cancels
   # `maybe_cancel/4` had just written, which is why this reports after the
   # decision rather than before it - and `unstarted` is the indexes with no
-  # run at all, which is the number that tells a fan-out still starting
+  # execution at all, which is the number that tells a fan-out still starting
   # from one that is stuck.
   @spec report_settled(
           Linkage.t(),
-          [Adapter.run_state()],
+          [Adapter.execution_state()],
           {:ok, {:answer, [map()]} | :not_yet} | {:error, term()}
         ) :: :ok
   defp report_settled(%Linkage{} = linkage, states, {:ok, decision}) do
@@ -1105,7 +1162,7 @@ defmodule StatifierPersistence.Driver do
         cancelled: Enum.count(states, &(&1.status == :cancelled)),
         unstarted: length(unstarted_indices(states, linkage.child_count))
       },
-      parent_run_id: linkage.parent_run_id,
+      parent_execution_id: linkage.parent_execution_id,
       invoke_id: linkage.invoke_id,
       policy: linkage.policy,
       decision: decision_atom(decision)
@@ -1127,13 +1184,14 @@ defmodule StatifierPersistence.Driver do
   # It reads "any child failed" rather than "this child failed" on purpose:
   # a re-driven settlement after a crash has to reach the same conclusion
   # as the one that was interrupted.
-  @spec maybe_cancel(t(), Linkage.t(), [Adapter.run_state()], Adapter.metadata()) ::
-          {:ok, [Adapter.run_state()], boolean()} | {:error, term()}
+  @spec maybe_cancel(t(), Linkage.t(), [Adapter.execution_state()], Adapter.metadata()) ::
+          {:ok, [Adapter.execution_state()], boolean()} | {:error, term()}
   defp maybe_cancel(driver, %Linkage{policy: :first_error} = linkage, states, match) do
     if Enum.any?(states, &(&1.status == :failed)) do
-      with {:ok, _cancelled} <- Runs.cascade_cancel(driver.store, match, cascade_opts(driver)),
+      with {:ok, _cancelled} <-
+             Executions.cascade_cancel(driver.store, match, cascade_opts(driver)),
            :ok <- cancel_unstarted(driver, linkage, states),
-           {:ok, states} <- Storage.list_run_states_by_metadata(driver.store, match) do
+           {:ok, states} <- Storage.list_execution_states_by_metadata(driver.store, match) do
         {:ok, states, true}
       end
     else
@@ -1143,7 +1201,7 @@ defmodule StatifierPersistence.Driver do
 
   defp maybe_cancel(_driver, _linkage, states, _match), do: {:ok, states, false}
 
-  @spec cancel_unstarted(t(), Linkage.t(), [Adapter.run_state()]) :: :ok | {:error, term()}
+  @spec cancel_unstarted(t(), Linkage.t(), [Adapter.execution_state()]) :: :ok | {:error, term()}
   defp cancel_unstarted(%__MODULE__{child_canceller: nil}, _linkage, _states), do: :ok
 
   defp cancel_unstarted(driver, %Linkage{} = linkage, states) do
@@ -1152,27 +1210,27 @@ defmodule StatifierPersistence.Driver do
         :ok
 
       indices ->
-        case driver.child_canceller.(linkage.parent_run_id, linkage.invoke_id, indices) do
+        case driver.child_canceller.(linkage.parent_execution_id, linkage.invoke_id, indices) do
           :ok -> :ok
           {:error, reason} -> {:error, {:child_canceller, reason}}
         end
     end
   end
 
-  @spec unstarted_indices([Adapter.run_state()], pos_integer()) :: [non_neg_integer()]
+  @spec unstarted_indices([Adapter.execution_state()], pos_integer()) :: [non_neg_integer()]
   defp unstarted_indices(states, child_count) do
     started = MapSet.new(states, & &1.child_index)
 
     Enum.reject(0..(child_count - 1), &MapSet.member?(started, &1))
   end
 
-  # Under `:all` every one of the N indices needs a run of its own in a
+  # Under `:all` every one of the N indices needs an execution of its own in a
   # terminal status - an index whose start job has not run yet is an answer
   # still coming, not a missing one. Under a `first_error` cancel the
-  # indices with no run are the start jobs the scheduler was just asked to
+  # indices with no execution are the start jobs the scheduler was just asked to
   # cancel, so they are settled too, and they have to be or the block could
   # never answer at all.
-  @spec settled?([Adapter.run_state()], pos_integer(), boolean()) :: boolean()
+  @spec settled?([Adapter.execution_state()], pos_integer(), boolean()) :: boolean()
   defp settled?(states, child_count, cancelled?) do
     terminal = Enum.count(states, &terminal?(&1.status))
 
@@ -1183,11 +1241,11 @@ defmodule StatifierPersistence.Driver do
     end
   end
 
-  @spec terminal?(Adapter.run_status()) :: boolean()
+  @spec terminal?(Adapter.execution_status()) :: boolean()
   defp terminal?(status), do: status in [:completed, :failed, :cancelled]
 
   # The one materialising read of a fan-out, at its last settlement: N
-  # single-key fetches over the ids `Linkage.child_run_id/3` derives, which
+  # single-key fetches over the ids `Linkage.child_execution_id/3` derives, which
   # needs no second query. The list is dense and index-ordered, so a chart
   # reads item `i`'s answer at position `i` whatever order the children
   # finished in.
@@ -1196,7 +1254,7 @@ defmodule StatifierPersistence.Driver do
   # into a sufficient one (sp-kl3): an index whose answer has not been
   # recorded yet halts the whole assembly as `:not_yet`, because a fan-out
   # answers with every answer or with none.
-  @spec assemble(t(), Linkage.t(), [Adapter.run_state()], boolean()) ::
+  @spec assemble(t(), Linkage.t(), [Adapter.execution_state()], boolean()) ::
           {:ok, {:answer, [map()]} | :not_yet} | {:error, term()}
   defp assemble(driver, %Linkage{} = linkage, states, cancelled?) do
     by_index = Map.new(states, &{&1.child_index, &1})
@@ -1219,7 +1277,7 @@ defmodule StatifierPersistence.Driver do
   # A cancelled index answers from its status alone - it has no answer to
   # record and never will. Every other terminal index answers from its
   # recorded outcome, and `:not_yet` when that outcome is not there yet.
-  @spec entry(t(), Linkage.t(), Adapter.run_state() | nil, non_neg_integer(), boolean()) ::
+  @spec entry(t(), Linkage.t(), Adapter.execution_state() | nil, non_neg_integer(), boolean()) ::
           {:ok, map()} | :not_yet | {:error, term()}
   defp entry(_driver, _linkage, nil, index, true), do: {:ok, cancelled_entry(index)}
 
@@ -1227,9 +1285,10 @@ defmodule StatifierPersistence.Driver do
     do: {:ok, cancelled_entry(index)}
 
   defp entry(driver, %Linkage{} = linkage, %{status: _status}, index, _cancelled?) do
-    child_run_id = Linkage.child_run_id(linkage.parent_run_id, linkage.invoke_id, index)
+    child_execution_id =
+      Linkage.child_execution_id(linkage.parent_execution_id, linkage.invoke_id, index)
 
-    with {:ok, record} <- Storage.fetch_run(driver.store, child_run_id) do
+    with {:ok, record} <- Storage.fetch_execution(driver.store, child_execution_id) do
       case decode_outcome(record.outcome_blob) do
         nil -> :not_yet
         outcome -> {:ok, outcome_entry(index, outcome)}
@@ -1274,39 +1333,47 @@ defmodule StatifierPersistence.Driver do
   @spec resolve_and_answer(
           t(),
           Linkage.t(),
-          Runs.run_id(),
+          Executions.execution_id(),
           {:done, term()} | {:failed, keyword()}
         ) ::
           :ok
-  defp resolve_and_answer(driver, %Linkage{} = linkage, run_id, payload) do
-    with {:ok, parent_record} <- Storage.fetch_run(driver.store, linkage.parent_run_id),
+  defp resolve_and_answer(driver, %Linkage{} = linkage, execution_id, payload) do
+    with {:ok, parent_record} <-
+           Storage.fetch_execution(driver.store, linkage.parent_execution_id),
          {:ok, parent_machine} <- driver.chart_resolver.(parent_record.content_hash) do
-      answer_parent(%{driver | machine: parent_machine}, run_id, payload)
+      answer_parent(%{driver | machine: parent_machine}, execution_id, payload)
     end
 
     :ok
   end
 
   # Both doors, which differ only in the answer they carry. The event is
-  # built by a `t:StatifierPersistence.Runs.event_builder/0` rather than
+  # built by a `t:StatifierPersistence.Executions.event_builder/0` rather than
   # here, so the liveness read and the step see one position under one
   # exclusion: a cancel cannot land between them.
   @spec reenter(
           t(),
-          Runs.run_id(),
+          Executions.execution_id(),
           keyword(),
           String.t(),
           {:done, term()} | {:failed, keyword()}
         ) :: result()
-  defp reenter(driver, run_id, opts, invoke_id, answer) do
+  defp reenter(driver, execution_id, opts, invoke_id, answer) do
     ref = make_ref()
     opts = Keyword.put_new(opts, :entry, door(answer))
     builder = fn machine_state -> late_answer(machine_state, invoke_id, answer) end
 
     result =
-      advance(driver, run_id, opts, step(driver, run_id, opts, builder, ref), drain(ref, []), 0)
+      advance(
+        driver,
+        execution_id,
+        opts,
+        step(driver, execution_id, opts, builder, ref),
+        drain(ref, []),
+        0
+      )
 
-    maybe_answer_parent(driver, run_id, result)
+    maybe_answer_parent(driver, execution_id, result)
   end
 
   # The public door's own 6.4.3 read. `live?/2` keys on the invocation's
@@ -1328,88 +1395,120 @@ defmodule StatifierPersistence.Driver do
   # The loop of the moduledoc's steps 4 and 5. `result` is carried rather
   # than rebuilt because it is what the drive returns: a discarded answer
   # leaves the previous step's result standing, unchanged.
-  @spec advance(t(), Runs.run_id(), keyword(), result(), [answer()], non_neg_integer()) ::
+  @spec advance(
+          t(),
+          Executions.execution_id(),
+          keyword(),
+          result(),
+          [answer()],
+          non_neg_integer()
+        ) ::
           result()
-  defp advance(_driver, _run_id, _opts, result, [], _turns), do: result
+  defp advance(_driver, _execution_id, _opts, result, [], _turns), do: result
 
-  defp advance(_driver, _run_id, _opts, {:discarded, _run} = result, _answers, _turns), do: result
+  defp advance(
+         _driver,
+         _execution_id,
+         _opts,
+         {:discarded, _execution} = result,
+         _answers,
+         _turns
+       ),
+       do: result
 
-  defp advance(_driver, _run_id, _opts, {:error, _reason} = result, _answers, _turns), do: result
+  defp advance(_driver, _execution_id, _opts, {:error, _reason} = result, _answers, _turns),
+    do: result
 
-  defp advance(%__MODULE__{max_turns: max_turns}, run_id, opts, _result, _answers, turns)
+  defp advance(%__MODULE__{max_turns: max_turns}, execution_id, opts, _result, _answers, turns)
        when turns >= max_turns do
     # The drive loop's own refusal, reported as a point-in-time verdict
     # rather than a span (ADR-0009 decision 5): the loop is one turn in the
     # ordinary case, so an outer pair bracketing it would almost always
     # duplicate the single step span inside it.
-    Telemetry.drive_turns_exhausted(turns, run_id: run_id, entry: opts[:entry])
+    Telemetry.drive_turns_exhausted(turns, execution_id: execution_id, entry: opts[:entry])
 
     {:error, {:turns_exhausted, max_turns}}
   end
 
-  defp advance(driver, run_id, opts, {:ok, _run, machine_state} = result, [answer | rest], turns) do
+  defp advance(
+         driver,
+         execution_id,
+         opts,
+         {:ok, _execution, machine_state} = result,
+         [answer | rest],
+         turns
+       ) do
     if live?(machine_state, answer) do
       {_key, invoke_id, payload} = answer
       ref = make_ref()
-      next = step(driver, run_id, opts, answer_event(machine_state, invoke_id, payload), ref)
 
-      advance(driver, run_id, opts, next, rest ++ drain(ref, []), turns + 1)
+      next =
+        step(driver, execution_id, opts, answer_event(machine_state, invoke_id, payload), ref)
+
+      advance(driver, execution_id, opts, next, rest ++ drain(ref, []), turns + 1)
     else
       # Spec 6.4.3's drain-time discard: the invocation this answer is for
       # is no longer live, so the answer is dropped rather than delivered.
-      advance(driver, run_id, opts, result, rest, turns)
+      advance(driver, execution_id, opts, result, rest, turns)
     end
   end
 
-  @spec step(t(), Runs.run_id(), keyword(), Event.t() | Runs.event_builder(), reference()) ::
+  @spec step(
+          t(),
+          Executions.execution_id(),
+          keyword(),
+          Event.t() | Executions.event_builder(),
+          reference()
+        ) ::
           result()
-  defp step(driver, run_id, opts, event, ref) do
+  defp step(driver, execution_id, opts, event, ref) do
     driver.store
-    |> Runs.step(run_id, driver.machine, event, run_opts(driver, opts, ref))
-    |> fire_after_step(driver, run_id, opts, ref)
+    |> Executions.step(execution_id, driver.machine, event, execution_opts(driver, opts, ref))
+    |> fire_after_step(driver, execution_id, opts, ref)
   end
 
   # ADR-0008's `after_step:` amendment (2026-09-08), clauses 2 to 4, on
-  # this side of the seam. Every `Runs` entry point this module calls
+  # this side of the seam. Every `Executions` entry point this module calls
   # passes through here or through `create/3`, and both are reached with
-  # the id of the run that was actually stepped - the parent's, on the
+  # the id of the execution that was actually stepped - the parent's, on the
   # answer path, because `answer_parent/3` reaches `reenter/5` on a driver
-  # over the parent's chart and with the parent's run id.
+  # over the parent's chart and with the parent's execution id.
   #
   # The effects come back through the mailbox rather than through the
   # entry point's return value, which the amendment's clause 1 rules out
-  # widening: `run_opts/3` hands `StatifierPersistence.Runs` a
+  # widening: `execution_opts/3` hands `StatifierPersistence.Executions` a
   # `step_reporter:` that sends the step's whole effect list here, tagged
   # with this drive's own reference, exactly as `buffer/4` sends a
   # dispatched invocation's answer. That is what makes the callback fire
   # from here, after the entry point has returned and outside the stepped
-  # run's exclusion, rather than from inside the persist tail.
+  # execution's exclusion, rather than from inside the persist tail.
   #
   # A drive that took no step - a discard, an error, a create the adapter
   # refused - has no message to read and fires nothing. `nil` reads no
-  # mailbox at all and adds no message to it: `run_opts/3` writes no
+  # mailbox at all and adds no message to it: `execution_opts/3` writes no
   # `step_reporter:` in that case, so a driver without an `after_step:`
   # takes exactly the steps and makes exactly the calls it took before
   # this option existed.
-  @spec fire_after_step(result(), t(), Runs.run_id(), keyword(), reference()) :: result()
-  defp fire_after_step(result, driver, run_id, opts, ref) do
+  @spec fire_after_step(result(), t(), Executions.execution_id(), keyword(), reference()) ::
+          result()
+  defp fire_after_step(result, driver, execution_id, opts, ref) do
     case after_step(driver, opts) do
       nil ->
         result
 
       after_step ->
-        report(result, after_step, run_id, drain_steps(ref, []))
+        report(result, after_step, execution_id, drain_steps(ref, []))
 
         result
     end
   end
 
-  @spec report(result(), after_step(), Runs.run_id(), [[Statifier.Effect.t()]]) :: :ok
-  defp report({:ok, _run, machine_state}, after_step, run_id, reported) do
-    Enum.each(reported, fn effects -> after_step.(run_id, machine_state, effects) end)
+  @spec report(result(), after_step(), Executions.execution_id(), [[Statifier.Effect.t()]]) :: :ok
+  defp report({:ok, _execution, machine_state}, after_step, execution_id, reported) do
+    Enum.each(reported, fn effects -> after_step.(execution_id, machine_state, effects) end)
   end
 
-  defp report(_result, _after_step, _run_id, _reported), do: :ok
+  defp report(_result, _after_step, _execution_id, _reported), do: :ok
 
   # The driver's own default, outranked by a per-call `after_step:` in a
   # `create/3`, `send_event/4` or invocation-door `opts` list - the same
@@ -1419,7 +1518,7 @@ defmodule StatifierPersistence.Driver do
   @spec after_step(t(), keyword()) :: after_step() | nil
   defp after_step(driver, opts), do: Keyword.get(opts, :after_step, driver.after_step)
 
-  # The `step_reporter:` messages this drive's own `Runs` call left in the
+  # The `step_reporter:` messages this drive's own `Executions` call left in the
   # mailbox: one per step that persisted, in the order they were sent.
   # Shaped so it can never match `drain/2`'s answers, or another drive's.
   @spec drain_steps(reference(), [[Statifier.Effect.t()]]) :: [[Statifier.Effect.t()]]
@@ -1435,10 +1534,10 @@ defmodule StatifierPersistence.Driver do
   # buffer the answer loop reads. Everything else is a default the caller's
   # own `opts` outrank, and `serialization:` is only written at all when
   # the driver carries one, so an unset driver falls through to
-  # `StatifierPersistence.Runs`'s own default rather than overriding it
+  # `StatifierPersistence.Executions`'s own default rather than overriding it
   # with `nil`.
-  @spec run_opts(t(), keyword(), reference()) :: keyword()
-  defp run_opts(driver, opts, ref) do
+  @spec execution_opts(t(), keyword(), reference()) :: keyword()
+  defp execution_opts(driver, opts, ref) do
     after_step = after_step(driver, opts)
 
     opts =
@@ -1455,23 +1554,23 @@ defmodule StatifierPersistence.Driver do
   end
 
   # `after_step:` is this module's option, not
-  # `StatifierPersistence.Runs`', so it is deleted above rather than
+  # `StatifierPersistence.Executions`', so it is deleted above rather than
   # passed on, and what the entry point is handed instead is the reporter
   # that carries the step's whole effect list back here. Written only when
   # a callback is actually set: without one the entry point is called with
   # exactly the options it was called with before this existed.
   @spec step_reporter_opt(keyword(), after_step() | nil, reference()) :: keyword()
-  defp step_reporter_opt(run_opts, nil, _ref), do: run_opts
+  defp step_reporter_opt(execution_opts, nil, _ref), do: execution_opts
 
-  defp step_reporter_opt(run_opts, _after_step, ref) do
+  defp step_reporter_opt(execution_opts, _after_step, ref) do
     reader = self()
 
-    Keyword.put(run_opts, :step_reporter, fn effects ->
+    Keyword.put(execution_opts, :step_reporter, fn effects ->
       send(reader, {ref, :after_step, effects})
     end)
   end
 
-  # The executor `StatifierPersistence.Runs` calls, once per effect, in the
+  # The executor `StatifierPersistence.Executions` calls, once per effect, in the
   # very process that called `create/3` or `send_event/4`. The host's own
   # executor sees every effect first and its refusal short-circuits the
   # dispatch, so an effect the host could not perform never becomes a call
@@ -1523,10 +1622,10 @@ defmodule StatifierPersistence.Driver do
 
       # ADR-0008 decision 3. The child is created inside the parent's own
       # serialization strategy - this runs in the executor, inside
-      # `Runs.persist_tail/6`, inside `with_run/3` - because a parent that
-      # believes it has a child and a child run that was never created is
+      # `Executions.persist_tail/6`, inside `with_execution/3` - because a parent that
+      # believes it has a child and a child execution that was never created is
       # the window statifier_blocks ADR-0008 decision 4 names as the one
-      # that loses. The exclusion is per run id, and a child's id is not
+      # that loses. The exclusion is per execution id, and a child's id is not
       # the parent's, so nothing nests on one key.
       #
       # The answer is `:pending` in every non-refusing case: nothing is
@@ -1542,7 +1641,7 @@ defmodule StatifierPersistence.Driver do
               reader,
               ref,
               invoke,
-              {:failed, reason: "child_run_creation_failed", detail: detail}
+              {:failed, reason: "child_execution_creation_failed", detail: detail}
             )
         end
     end
@@ -1552,8 +1651,8 @@ defmodule StatifierPersistence.Driver do
   # one of its <invoke>s is still live - not routed through `dispatch`,
   # because cancelling a durable child is this package's own storage
   # operation and statifier_blocks ADR-0008 decision 4 says the handler
-  # offers no durable counterpart to `cancel/2`. `context.run_id` is this
-  # invocation's own run (the parent, from the cascade's point of view);
+  # offers no durable counterpart to `cancel/2`. `context.execution_id` is this
+  # invocation's own execution (the parent, from the cascade's point of view);
   # only this one invocation's subtree is walked, so a sibling invocation's
   # own children are untouched.
   #
@@ -1565,7 +1664,7 @@ defmodule StatifierPersistence.Driver do
   # cost of a query it has no way to satisfy.
   #
   # A cascade failure is returned rather than swallowed: it reaches
-  # `Runs`'s own re-entry wave through `reentry_origin/1`'s existing
+  # `Executions`'s own re-entry wave through `reentry_origin/1`'s existing
   # `:cancel_invoke` arm and re-enters the chart as `error.communication`,
   # exactly as any other executor failure on this effect does.
   defp perform(
@@ -1576,9 +1675,9 @@ defmodule StatifierPersistence.Driver do
          _ref
        ) do
     if Storage.child_listing_supported?(driver.store) do
-      case Runs.cascade_cancel(
+      case Executions.cascade_cancel(
              driver.store,
-             Linkage.invocation_match(context.run_id, invoke_id),
+             Linkage.invocation_match(context.execution_id, invoke_id),
              cascade_opts(driver)
            ) do
         {:ok, _newly_cancelled} -> :ok
@@ -1605,10 +1704,10 @@ defmodule StatifierPersistence.Driver do
   # funnels back through this return, so the event is emitted once, in one
   # place, whatever refused. The arms are the unsupported adapter here, a
   # `Statifier.Invoke.Source.resolve/2` reason (ADR-0008 decision 4's three
-  # in-memory reasons), `:unidentified_chart`, `:run_exists` from a
+  # in-memory reasons), `:unidentified_chart`, `:execution_exists` from a
   # collision the adoption path will not adopt, and whatever reason
   # `create/3` or the adoption read answers with - the last two being
-  # decision 4's one durable-only reason, a child run that could not be
+  # decision 4's one durable-only reason, a child execution that could not be
   # created. Counting the arms is not the invariant; the single return is.
   @spec start_child(t(), Invoke.t(), dispatch_context()) :: :ok | {:refused, term()}
   defp start_child(driver, %Invoke{} = resolved, context) do
@@ -1625,7 +1724,7 @@ defmodule StatifierPersistence.Driver do
   @spec report_refusal(:ok | {:refused, term()}, dispatch_context()) :: :ok | {:refused, term()}
   defp report_refusal({:refused, reason} = result, context) do
     Telemetry.child_refused(
-      parent_run_id: context.run_id,
+      parent_execution_id: context.execution_id,
       invoke_id: context.invoke_id,
       reason: reason
     )
@@ -1662,7 +1761,7 @@ defmodule StatifierPersistence.Driver do
     end
   end
 
-  # The linkage is built from the *parent's* `context.run_id`, this
+  # The linkage is built from the *parent's* `context.execution_id`, this
   # invocation's `invoke_id`, index `0` (ADR-0008 decision 7 - fan-out is
   # not built, but the linkage does not assume one child per invocation),
   # and the child's own `content_hash`. The child is driven by
@@ -1676,22 +1775,28 @@ defmodule StatifierPersistence.Driver do
           :ok | {:refused, term()}
   defp create_child(driver, resolved, context, child_machine, content_hash, fan_out) do
     {child_index, linkage} = child_linkage(context, content_hash, fan_out)
-    child_run_id = Linkage.child_run_id(context.run_id, context.invoke_id, child_index)
+
+    child_execution_id =
+      Linkage.child_execution_id(context.execution_id, context.invoke_id, child_index)
+
     child_driver = %{driver | machine: child_machine}
     datamodel = Invocations.seed_datamodel(resolved.params, child_machine)
 
-    case create(child_driver, child_run_id, linkage: linkage, initialize: [datamodel: datamodel]) do
-      {:ok, _run, machine_state} ->
-        report_started(child_run_id, linkage, child_session_id(machine_state))
+    case create(child_driver, child_execution_id,
+           linkage: linkage,
+           initialize: [datamodel: datamodel]
+         ) do
+      {:ok, _execution, machine_state} ->
+        report_started(child_execution_id, linkage, child_session_id(machine_state))
 
-      {:error, :run_exists} ->
-        adopt_child(driver.store, child_run_id, linkage)
+      {:error, :execution_exists} ->
+        adopt_child(driver.store, child_execution_id, linkage)
 
       {:error, reason} ->
         {:refused, reason}
 
-      {:discarded, _run} ->
-        {:refused, :run_exists}
+      {:discarded, _execution} ->
+        {:refused, :execution_exists}
     end
   end
 
@@ -1701,27 +1806,28 @@ defmodule StatifierPersistence.Driver do
   @spec child_linkage(dispatch_context(), String.t(), fan_out()) ::
           {non_neg_integer(), Linkage.t()}
   defp child_linkage(context, content_hash, nil) do
-    {0, Linkage.new(context.run_id, context.invoke_id, 0, content_hash)}
+    {0, Linkage.new(context.execution_id, context.invoke_id, 0, content_hash)}
   end
 
   defp child_linkage(context, content_hash, {index, count, policy}) do
-    {index, Linkage.new(context.run_id, context.invoke_id, index, content_hash, count, policy)}
+    {index,
+     Linkage.new(context.execution_id, context.invoke_id, index, content_hash, count, policy)}
   end
 
   # `[:statifier_persistence, :child, :started]`. Every field comes from
   # the linkage this package just wrote (ADR-0008 decision 2), which is
   # what lets the bridge link parent and child without reading
-  # `StatifierPersistence.Run.Linkage` back out of a metadata map.
+  # `StatifierPersistence.Execution.Linkage` back out of a metadata map.
   #
   # `session_id` is the child's own logical session, and it is `nil` on
   # the adoption path alone: an adopted child was created by an earlier,
   # crashed drive, so this drive has no decoded position of it and does
   # not perform a load to invent one (ADR-0009 decision 4's honest nil).
-  @spec report_started(Runs.run_id(), Linkage.t(), String.t() | nil) :: :ok
-  defp report_started(child_run_id, %Linkage{} = linkage, session_id) do
+  @spec report_started(Executions.execution_id(), Linkage.t(), String.t() | nil) :: :ok
+  defp report_started(child_execution_id, %Linkage{} = linkage, session_id) do
     Telemetry.child_started(
-      parent_run_id: linkage.parent_run_id,
-      child_run_id: child_run_id,
+      parent_execution_id: linkage.parent_execution_id,
+      child_execution_id: child_execution_id,
       invoke_id: linkage.invoke_id,
       child_index: linkage.child_index,
       content_hash: linkage.content_hash,
@@ -1735,24 +1841,26 @@ defmodule StatifierPersistence.Driver do
   defp child_session_id(%MachineState{datamodel: datamodel}),
     do: Map.get(datamodel, "_sessionid")
 
-  # `{:error, :run_exists}` is not a failure. ADR-0004 decision 3's
+  # `{:error, :execution_exists}` is not a failure. ADR-0004 decision 3's
   # at-least-once execution means a crash between the child create and the
   # parent's own persist re-drives this exact step; the id is deterministic
-  # (`Linkage.child_run_id/3`), so the second create finds the first. A
+  # (`Linkage.child_execution_id/3`), so the second create finds the first. A
   # collision whose linkage names this same parent and invocation is that
   # re-drive - answer `:ok` (pending) rather than refusing. A collision
   # naming something else is a genuine id clash, and is refused.
-  @spec adopt_child(Storage.t(), Runs.run_id(), Linkage.t()) :: :ok | {:refused, term()}
-  defp adopt_child(store, child_run_id, linkage) do
-    case Storage.fetch_run(store, child_run_id) do
-      {:ok, run_record} ->
-        case Linkage.from_metadata(run_record.metadata) do
-          {:ok, %Linkage{parent_run_id: parent_run_id, invoke_id: invoke_id}}
-          when parent_run_id == linkage.parent_run_id and invoke_id == linkage.invoke_id ->
-            report_started(child_run_id, linkage, nil)
+  @spec adopt_child(Storage.t(), Executions.execution_id(), Linkage.t()) ::
+          :ok | {:refused, term()}
+  defp adopt_child(store, child_execution_id, linkage) do
+    case Storage.fetch_execution(store, child_execution_id) do
+      {:ok, execution_record} ->
+        case Linkage.from_metadata(execution_record.metadata) do
+          {:ok, %Linkage{parent_execution_id: parent_execution_id, invoke_id: invoke_id}}
+          when parent_execution_id == linkage.parent_execution_id and
+                 invoke_id == linkage.invoke_id ->
+            report_started(child_execution_id, linkage, nil)
 
           _other ->
-            {:refused, :run_exists}
+            {:refused, :execution_exists}
         end
 
       {:error, reason} ->
@@ -1816,7 +1924,7 @@ defmodule StatifierPersistence.Driver do
 
   # The bare match is the tripwire: `_sessionid` is written once by
   # `Statifier.MachineState.new/2` and carried in the persisted datamodel
-  # for the run's whole life (spec 5.10, st-ADR-0008), so a run that has
+  # for the execution's whole life (spec 5.10, st-ADR-0008), so an execution that has
   # lost it fails loudly here rather than answering with an origin no
   # `<send target>` can reach.
   @spec session_id(MachineState.t()) :: String.t()

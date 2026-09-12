@@ -1,10 +1,10 @@
-defmodule StatifierPersistence.Test.NoRunStatesAdapter do
+defmodule StatifierPersistence.Test.NoExecutionStatesAdapter do
   @moduledoc """
   A delegating `StatifierPersistence.Storage.Adapter` wrapping
   `StatifierPersistence.Storage.InMemory` that exports everything a
-  fan-out needs except `list_run_states_by_metadata/2`.
+  fan-out needs except `list_execution_states_by_metadata/2`.
 
-  The fixture for `Driver.start_child_at/6`'s `:run_states_unsupported`
+  The fixture for `Driver.start_child_at/6`'s `:execution_states_unsupported`
   refusal at open: the store enumerates children and stores an outcome
   payload, so a refusal here is provably about the indexed status
   projection alone - the read the settlement's "have all N settled?"
@@ -33,23 +33,23 @@ defmodule StatifierPersistence.Test.NoRunStatesAdapter do
   defdelegate fetch_position(opts, session_id), to: InMemory
 
   @impl true
-  defdelegate insert_run(opts, run_record), to: InMemory
+  defdelegate insert_execution(opts, execution_record), to: InMemory
 
   @impl true
-  defdelegate fetch_run(opts, run_id), to: InMemory
+  defdelegate fetch_execution(opts, execution_id), to: InMemory
 
   @impl true
-  defdelegate update_run(opts, run_record), to: InMemory
+  defdelegate update_execution(opts, execution_record), to: InMemory
 
   @impl true
   defdelegate supports_metadata?(opts), to: InMemory
 
   @impl true
-  defdelegate list_runs_by_metadata(opts, metadata), to: InMemory
+  defdelegate list_executions_by_metadata(opts, metadata), to: InMemory
 
   @impl true
-  defdelegate supports_run_outcome?(opts), to: InMemory
+  defdelegate supports_execution_outcome?(opts), to: InMemory
 
   @impl true
-  defdelegate lock_run(opts, run_id, fun), to: InMemory
+  defdelegate lock_execution(opts, execution_id, fun), to: InMemory
 end

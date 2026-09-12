@@ -4,7 +4,7 @@ defmodule StatifierPersistence.DriverSessionConformanceTest do
   rests on: a chart answered durably sees exactly the event it would have
   seen answered through a live `Statifier.Session`.
 
-  Both halves run the same document with the same session id and the same
+  Both halves execution the same document with the same session id and the same
   answer. The comparison is `_event` - spec 5.10's system variable, the
   chart's own view of what arrived - rather than the `%Statifier.Event{}`
   struct, because `_event` is the surface a document can actually branch
@@ -97,7 +97,7 @@ defmodule StatifierPersistence.DriverSessionConformanceTest do
 
     durable_event =
       via_reentry(context, fn driver ->
-        Driver.done_invocation(driver, "run_1", "call", donedata)
+        Driver.done_invocation(driver, "execution_1", "call", donedata)
       end)
 
     assert durable_event == session_event
@@ -115,7 +115,7 @@ defmodule StatifierPersistence.DriverSessionConformanceTest do
 
     durable_event =
       via_reentry(context, fn driver ->
-        Driver.failed_invocation(driver, "run_1", "call", failure)
+        Driver.failed_invocation(driver, "execution_1", "call", failure)
       end)
 
     assert durable_event == session_event
@@ -150,8 +150,8 @@ defmodule StatifierPersistence.DriverSessionConformanceTest do
         invoke_types: InvokeTypes.new(types: [@invoke_type])
       )
 
-    {:ok, _run, machine_state} =
-      Driver.create(driver, "run_1", initialize: [session_id: @session_id])
+    {:ok, _execution, machine_state} =
+      Driver.create(driver, "execution_1", initialize: [session_id: @session_id])
 
     machine_state.datamodel["_event"]
   end
@@ -167,10 +167,10 @@ defmodule StatifierPersistence.DriverSessionConformanceTest do
         invoke_types: InvokeTypes.new(types: [@invoke_type])
       )
 
-    {:ok, _run, _machine_state} =
-      Driver.create(driver, "run_1", initialize: [session_id: @session_id])
+    {:ok, _execution, _machine_state} =
+      Driver.create(driver, "execution_1", initialize: [session_id: @session_id])
 
-    {:ok, _run, machine_state} = answer.(driver)
+    {:ok, _execution, machine_state} = answer.(driver)
 
     machine_state.datamodel["_event"]
   end

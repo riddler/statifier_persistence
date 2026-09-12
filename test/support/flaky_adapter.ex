@@ -1,7 +1,7 @@
 defmodule StatifierPersistence.Test.FlakyAdapter do
   @moduledoc """
   A delegating `StatifierPersistence.Storage.Adapter` wrapping
-  `StatifierPersistence.Storage.InMemory` whose `update_run/2` fails exactly
+  `StatifierPersistence.Storage.InMemory` whose `update_execution/2` fails exactly
   once with `{:error, {:adapter, :injected}}`, then delegates normally.
 
   The at-least-once proof's fixture: the injected failure lands between
@@ -37,18 +37,21 @@ defmodule StatifierPersistence.Test.FlakyAdapter do
     do: InMemory.fetch_position(inner, session_id)
 
   @impl true
-  def insert_run(%{inner: inner}, run_record), do: InMemory.insert_run(inner, run_record)
+  def insert_execution(%{inner: inner}, execution_record),
+    do: InMemory.insert_execution(inner, execution_record)
 
   @impl true
-  def fetch_run(%{inner: inner}, run_id), do: InMemory.fetch_run(inner, run_id)
+  def fetch_execution(%{inner: inner}, execution_id),
+    do: InMemory.fetch_execution(inner, execution_id)
 
   @impl true
-  def lock_run(%{inner: inner}, run_id, fun), do: InMemory.lock_run(inner, run_id, fun)
+  def lock_execution(%{inner: inner}, execution_id, fun),
+    do: InMemory.lock_execution(inner, execution_id, fun)
 
   @impl true
-  def update_run(%{inner: inner, trip: trip}, run_record) do
+  def update_execution(%{inner: inner, trip: trip}, execution_record) do
     if Agent.get_and_update(trip, fn tripped -> {tripped, true} end) do
-      InMemory.update_run(inner, run_record)
+      InMemory.update_execution(inner, execution_record)
     else
       {:error, {:adapter, :injected}}
     end

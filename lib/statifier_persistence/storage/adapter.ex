@@ -3,7 +3,7 @@ defmodule StatifierPersistence.Storage.Adapter do
   The storage contract: opaque blobs keyed by engine identities.
 
   An adapter stores and returns binaries, engine identity strings, and one
-  optional opaque map of host identities on a run record - and nothing else
+  optional opaque map of host identities on an execution record - and nothing else
   (ADR-0003 decision 1 as amended by ADR-0006). No callback receives a compiled
   `Statifier.Machine` and none returns a `Statifier.MachineState` value -
   the identity guard is not a callback here, and cannot be, because no
@@ -14,7 +14,7 @@ defmodule StatifierPersistence.Storage.Adapter do
   A chart is keyed by its content hash
   (`Statifier.Machine.Identity.content_hash`, verbatim); a position is keyed
   by the engine session id (st-ADR-0008's `sess_` UXID), also verbatim; a
-  run is keyed by a caller-supplied opaque `run_id`, also verbatim
+  execution is keyed by a caller-supplied opaque `execution_id`, also verbatim
   (ADR-0004 decision 2). All are opaque strings to this layer: no callback
   here accepts or returns a surrogate key, a table name, or a prefix
   (ADR-0002 decision 1, ADR-0003 decision 3).
@@ -23,14 +23,14 @@ defmodule StatifierPersistence.Storage.Adapter do
 
   An adapter that exports `supports_input_log?/1` and answers `true`
   stores every input the interpreter saw, verbatim, for the life of the
-  run (ADR-0010). Chart blobs, position blobs and identity blobs are
+  execution (ADR-0010). Chart blobs, position blobs and identity blobs are
   engine-shaped; an event's `data` is the host's own values - a signup's
   email address, a capture's card number - and turning the log on puts
   them at rest. `:blob_type` reaches `input_blob` for exactly that reason
   (ADR-0010 decision 4), and `input_log_cap:` bounds how much of it
   accumulates (decision 6), but a host that cannot encrypt at rest and
   cannot accept plaintext payloads declines the whole facility by not
-  exporting the callback. Nothing in this package refuses a run over it.
+  exporting the callback. Nothing in this package refuses an execution over it.
   """
 
   @typedoc """
@@ -47,22 +47,22 @@ defmodule StatifierPersistence.Storage.Adapter do
   @type session_id :: String.t()
 
   @typedoc """
-  A run's key: a caller-supplied opaque string, stored verbatim (ADR-0004
+  An execution's key: a caller-supplied opaque string, stored verbatim (ADR-0004
   decision 2). A host identity in ADR-0002 decision 1's category - never a
   surrogate this layer generates.
   """
-  @type run_id :: String.t()
+  @type execution_id :: String.t()
 
   @typedoc """
-  A run's lifecycle status (ADR-0004 decision 2, extended by ADR-0008
+  An execution's lifecycle status (ADR-0004 decision 2, extended by ADR-0008
   decision 5). `:completed`, `:failed` and `:cancelled` are terminal. No
   callback here validates a transition between them - the lifecycle above
   the facade owns that.
   """
-  @type run_status :: :active | :completed | :failed | :cancelled
+  @type execution_status :: :active | :completed | :failed | :cancelled
 
   @typedoc """
-  A run's optional opaque metadata (ADR-0006 decision 1): a map of string
+  An execution's optional opaque metadata (ADR-0006 decision 1): a map of string
   keys to host-supplied values, opaque here in the strong sense
   `chart_blob` is opaque. No callback reads a key or a value to make a
   decision, validates it beyond the shape, or merges it into a blob.
@@ -80,26 +80,26 @@ defmodule StatifierPersistence.Storage.Adapter do
   @type metadata :: %{optional(String.t()) => term()}
 
   @typedoc """
-  A stored run (ADR-0004 decision 1): its caller-supplied key, its status,
-  the content hash and identity envelope of the chart it runs, the opaque
-  `position_blob` holding its current position - nullable, because a run
+  A stored execution (ADR-0004 decision 1): its caller-supplied key, its status,
+  the content hash and identity envelope of the chart it executions, the opaque
+  `position_blob` holding its current position - nullable, because an execution
   that fails at creation has no quiescent position to store - a short
-  `failure` reason for a `:failed` run, `nil` otherwise, the opaque
+  `failure` reason for a `:failed` execution, `nil` otherwise, the opaque
   `metadata` map of host identities (ADR-0006 decision 1), `%{}` when the
   caller supplied none, and the opaque `outcome_blob`.
 
-  `outcome_blob` is the run's own answer, written once when it reaches a
-  terminal status and `nil` for every run that has none - which is almost
-  all of them, since an ordinary run answers nobody. It is opaque in
+  `outcome_blob` is the execution's own answer, written once when it reaches a
+  terminal status and `nil` for every execution that has none - which is almost
+  all of them, since an ordinary execution answers nobody. It is opaque in
   `position_blob`'s strong sense: this layer does not decode it, does not
   say what produced it, and never reads it to make a decision. It exists
   because a stored record otherwise carries no trace of what a completed
-  run answered with, and a fan-out's settlement has to assemble N answers
+  execution answered with, and a fan-out's settlement has to assemble N answers
   it did not witness.
   """
-  @type run_record :: %{
-          run_id: run_id(),
-          status: run_status(),
+  @type execution_record :: %{
+          execution_id: execution_id(),
+          status: execution_status(),
           content_hash: content_hash(),
           identity_blob: binary(),
           position_blob: binary() | nil,
@@ -110,35 +110,35 @@ defmodule StatifierPersistence.Storage.Adapter do
 
   @typedoc """
   One row of the indexed status projection
-  (`c:list_run_states_by_metadata/2`): a matched run's id, its status, and
+  (`c:list_execution_states_by_metadata/2`): a matched execution's id, its status, and
   the `child_index` from this package's own reserved linkage namespace -
-  `nil` for a matched run that carries no linkage.
+  `nil` for a matched execution that carries no linkage.
 
-  Deliberately not a `run_record`: the projection exists so that "have all
+  Deliberately not a `execution_record`: the projection exists so that "have all
   N of this invocation's children settled?" can be answered without moving
   N identity and position blobs, and a row carrying them would defeat the
   reason the callback exists.
   """
-  @type run_state :: %{
-          run_id: run_id(),
-          status: run_status(),
+  @type execution_state :: %{
+          execution_id: execution_id(),
+          status: execution_status(),
           child_index: non_neg_integer() | nil
         }
 
   @typedoc """
-  A run's input log ordinal: dense, zero-based, per run, assigned by the
+  An execution's input log ordinal: dense, zero-based, per execution, assigned by the
   adapter. Not a position blob (ADR-0010 decision 3).
   """
   @type seq :: non_neg_integer()
 
   @typedoc """
-  The public door an input entered by (`t:StatifierPersistence.Runs.entry/0`),
+  The public door an input entered by (`t:StatifierPersistence.Executions.entry/0`),
   as a string.
   """
   @type door :: String.t()
 
   @typedoc """
-  One stored input (ADR-0010 decision 2): the run it belongs to, its
+  One stored input (ADR-0010 decision 2): the execution it belongs to, its
   ordinal, the door it entered by, and the opaque `input_blob` the facade
   encoded above this layer. A `nil` `input_blob` is the closed marker of
   decision 6 and nothing else.
@@ -149,7 +149,7 @@ defmodule StatifierPersistence.Storage.Adapter do
   `list_inputs/2` returns records whose `seq` is authoritative.
   """
   @type input_record :: %{
-          run_id: run_id(),
+          execution_id: execution_id(),
           seq: seq(),
           door: door(),
           input_blob: binary() | nil
@@ -182,12 +182,12 @@ defmodule StatifierPersistence.Storage.Adapter do
 
   @typedoc """
   This layer's own refusal arms. `:chart_not_found`, `:position_not_found`,
-  and `:run_not_found` are the not-found arms every adapter must return
-  instead of `nil` or a raise; `:run_exists` is `insert_run/2`'s refusal of
-  a duplicate `run_id`; `:metadata_unsupported` is the refusal-at-open arm
+  and `:execution_not_found` are the not-found arms every adapter must return
+  instead of `nil` or a raise; `:execution_exists` is `insert_execution/2`'s refusal of
+  a duplicate `execution_id`; `:metadata_unsupported` is the refusal-at-open arm
   for a non-empty `metadata` map an adapter cannot store (ADR-0006
-  decision 3); `:run_outcome_unsupported` and `:run_states_unsupported`
-  are the refusal-at-open arms for an adapter that cannot store a run's
+  decision 3); `:execution_outcome_unsupported` and `:execution_states_unsupported`
+  are the refusal-at-open arms for an adapter that cannot store an execution's
   `outcome_blob` or cannot answer the indexed status projection, which
   together are what a fan-out's settlement needs; `:input_log_full` is
   `append_input/3`'s refusal past the host-declared cap, after the log has
@@ -199,11 +199,11 @@ defmodule StatifierPersistence.Storage.Adapter do
   @type error ::
           :chart_not_found
           | :position_not_found
-          | :run_exists
-          | :run_not_found
+          | :execution_exists
+          | :execution_not_found
           | :metadata_unsupported
-          | :run_outcome_unsupported
-          | :run_states_unsupported
+          | :execution_outcome_unsupported
+          | :execution_states_unsupported
           | :input_log_full
           | {:adapter, term()}
 
@@ -267,53 +267,53 @@ defmodule StatifierPersistence.Storage.Adapter do
               {:ok, StatifierPersistence.Storage.Adapter.position_record()} | {:error, error()}
 
   @doc """
-  Inserts `run_record`, refusing a duplicate `run_id` with
-  `{:error, :run_exists}`.
+  Inserts `execution_record`, refusing a duplicate `execution_id` with
+  `{:error, :execution_exists}`.
 
   The refusal must be atomic with the write: no interleaving of two
-  `insert_run/2` calls for the same `run_id` may let both return `:ok`.
+  `insert_execution/2` calls for the same `execution_id` may let both return `:ok`.
   Create-exactly-once rests on this callback alone, without a lock, so a
   check-then-insert implemented as two separate operations does not satisfy
   the contract - a SQL adapter reaches for a unique index (or equivalent
   backend-native uniqueness) and maps its violation to
-  `{:error, :run_exists}`.
+  `{:error, :execution_exists}`.
 
   This callback does not decode `position_blob` or `identity_blob`, does
   not validate the status, and performs no identity check - the facade and
   the lifecycle own those (ADR-0003 decisions 1 and 2, ADR-0004
   decision 1).
 
-  `metadata` is stored as given and read back by `fetch_run/2` unchanged
+  `metadata` is stored as given and read back by `fetch_execution/2` unchanged
   (ADR-0006 decision 1). Insert is the only write that sets it: the map is
-  not mutable after create, and `update_run/2` says so. An adapter reaching
+  not mutable after create, and `update_execution/2` says so. An adapter reaching
   this callback has already declared `supports_metadata?/1` true for a
   non-empty map - the facade refuses at open otherwise - but an adapter
   whose backend cannot hold a particular value (a `jsonb` column and a
   tuple, say) refuses that value here with
   `{:error, :metadata_unsupported}` rather than storing something else.
   """
-  @callback insert_run(opts(), StatifierPersistence.Storage.Adapter.run_record()) ::
+  @callback insert_execution(opts(), StatifierPersistence.Storage.Adapter.execution_record()) ::
               :ok | {:error, error()}
 
   @doc """
-  Fetches the run stored under `run_id`.
+  Fetches the execution stored under `execution_id`.
 
-  Returns `{:error, :run_not_found}` when no run is stored under that id -
+  Returns `{:error, :execution_not_found}` when no execution is stored under that id -
   never `{:ok, nil}` and never a raise. The returned `identity_blob` and
   `position_blob` must be byte-identical to what was stored (a stored `nil`
   `position_blob` comes back as `nil`); an adapter must not normalize,
   truncate, or re-encode them, and it does not decode them either (ADR-0003
-  decision 1). The returned `metadata` is the map `insert_run/2` stored,
+  decision 1). The returned `metadata` is the map `insert_execution/2` stored,
   unchanged, and `%{}` when none was stored - never `nil`.
   """
-  @callback fetch_run(opts(), run_id()) ::
-              {:ok, StatifierPersistence.Storage.Adapter.run_record()} | {:error, error()}
+  @callback fetch_execution(opts(), execution_id()) ::
+              {:ok, StatifierPersistence.Storage.Adapter.execution_record()} | {:error, error()}
 
   @doc """
-  Overwrites the run stored under `run_record`'s `run_id` with the full
+  Overwrites the execution stored under `execution_record`'s `execution_id` with the full
   record.
 
-  Returns `{:error, :run_not_found}` when no run exists for the id. This is
+  Returns `{:error, :execution_not_found}` when no execution exists for the id. This is
   a full-record overwrite - there is no partial-update surface, so every
   field in the stored row after this call is the given record's, including
   a `nil` `position_blob`.
@@ -329,19 +329,19 @@ defmodule StatifierPersistence.Storage.Adapter do
   `outcome_blob` is the second exception, and a narrower one: a record
   whose `outcome_blob` is `nil` leaves the stored value untouched, and a
   record carrying a binary sets it. The payload is written once, when the
-  run reaches a terminal status, and never cleared, so "nil means
+  execution reaches a terminal status, and never cleared, so "nil means
   unchanged" is total rather than a partial-update surface - there is no
   writer that needs to set it back to `nil`. Without the carry-forward
-  every ordinary step of a run that had already answered would erase its
+  every ordinary step of an execution that had already answered would erase its
   answer, since this callback is a full-record overwrite and the stepper
   builds its record from a `MachineState` that has never seen one.
 
-  Like the other run callbacks it decodes nothing,
+  Like the other execution callbacks it decodes nothing,
   validates no status transition, and performs no identity check - the
   facade and the lifecycle own those (ADR-0003 decisions 1 and 2, ADR-0004
   decision 1).
   """
-  @callback update_run(opts(), StatifierPersistence.Storage.Adapter.run_record()) ::
+  @callback update_execution(opts(), StatifierPersistence.Storage.Adapter.execution_record()) ::
               :ok | {:error, error()}
 
   @doc """
@@ -360,15 +360,15 @@ defmodule StatifierPersistence.Storage.Adapter do
   @callback isolate(opts()) :: :ok | {:error, error()}
 
   @doc """
-  Optional per-run lock (ADR-0003 amendment, 2026-08-22; ADR-0004
+  Optional per-execution lock (ADR-0003 amendment, 2026-08-22; ADR-0004
   decision 5).
 
-  Provides mutual exclusion per `run_id`: while one `lock_run/3` call for a
-  given `run_id` is running `fun`, no other `lock_run/3` call for the same
-  `run_id` may run its own. `fun` runs while the exclusion is held, and the
+  Provides mutual exclusion per `execution_id`: while one `lock_execution/3` call for a
+  given `execution_id` is running `fun`, no other `lock_execution/3` call for the same
+  `execution_id` may run its own. `fun` runs while the exclusion is held, and the
   exclusion is released on ANY exit from `fun` - a normal return, a throw,
   and a raise escaping `fun` alike. The lock must not leak: a raising `fun`
-  propagates to the caller, but the next `lock_run/3` for that `run_id`
+  propagates to the caller, but the next `lock_execution/3` for that `execution_id`
   must still acquire.
 
   This is the callback the default serialization strategy
@@ -378,22 +378,22 @@ defmodule StatifierPersistence.Storage.Adapter do
   implements it as a transaction-scoped advisory lock plus a
   `SELECT ... FOR UPDATE` row lock inside a transaction that spans `fun`
   (ADR-0004 decision 5 as amended 2026-08-22) - the advisory half exists
-  because a row lock alone excludes nothing for a `run_id` whose run has
+  because a row lock alone excludes nothing for a `execution_id` whose execution has
   not been inserted yet.
   """
-  @callback lock_run(opts(), run_id(), (-> result)) ::
+  @callback lock_execution(opts(), execution_id(), (-> result)) ::
               {:ok, result} | {:error, error()}
             when result: var
 
   @doc """
-  Optional declaration that this adapter can store a run's `metadata` map
+  Optional declaration that this adapter can store an execution's `metadata` map
   (ADR-0006 decision 3).
 
   Exporting it and returning `true` is how an adapter opts into the
   metadata contract - the same `@optional_callbacks` plus
-  `function_exported?/3` shape `isolate/1` and `lock_run/3` use. An adapter
+  `function_exported?/3` shape `isolate/1` and `lock_execution/3` use. An adapter
   that does not export it stores no metadata, and
-  `StatifierPersistence.Storage.insert_run/5` refuses a non-empty map for
+  `StatifierPersistence.Storage.insert_execution/5` refuses a non-empty map for
   it at open with `{:error, :metadata_unsupported}` before any write
   happens. An empty or absent map is never refused, which is what keeps
   every adapter written before ADR-0006 conformant without a line of
@@ -409,45 +409,45 @@ defmodule StatifierPersistence.Storage.Adapter do
   Optional metadata-match listing (ADR-0006 decision 3's equality-match
   helper, promoted to a callback by ADR-0008 decision 5).
 
-  Lists the runs whose stored `metadata` contains every key/value pair in
+  Lists the executions whose stored `metadata` contains every key/value pair in
   `metadata`, recursively for a nested map. Equality match on all pairs is
   the whole query surface - no ranges, no partial matches, no ordering
   guarantee - the same contract `StatifierPersistence.Storage.Ecto`'s
   module-local function already documents. Exporting it is how an adapter
-  declares it can answer "which runs name me as their parent", which is
+  declares it can answer "which executions name me as their parent", which is
   what a cascading cancel walks; an adapter that does not export it cannot
   host a durable subchart, and `StatifierPersistence.Driver` refuses at
   open rather than starting a child it could never cancel.
   """
-  @callback list_runs_by_metadata(opts(), metadata()) ::
-              {:ok, [StatifierPersistence.Storage.Adapter.run_record()]} | {:error, error()}
+  @callback list_executions_by_metadata(opts(), metadata()) ::
+              {:ok, [StatifierPersistence.Storage.Adapter.execution_record()]} | {:error, error()}
 
   @doc """
-  Optional declaration that this adapter can store a run's `outcome_blob`
+  Optional declaration that this adapter can store an execution's `outcome_blob`
   (sp-t57, ruling C3).
 
   The same opt-in-by-export shape `supports_metadata?/1` uses. An adapter
   that does not export it, or answers `false`, stores no outcome payload,
   and `StatifierPersistence.Driver.start_child_at/6` refuses to start a
-  fan-out child on it at open with `{:refused, :run_outcome_unsupported}` -
+  fan-out child on it at open with `{:refused, :execution_outcome_unsupported}` -
   a child whose answer could never be read back is a child whose
   invocation could never be settled, the same posture
   `:child_listing_unsupported` already takes for a child that could never
   be cancelled.
 
-  Nothing else refuses on it. An ordinary run and a single-child durable
+  Nothing else refuses on it. An ordinary execution and a single-child durable
   subchart need no outcome payload, so an adapter written before this
   callback existed is conformant unchanged and sees no behaviour change.
   """
-  @callback supports_run_outcome?(opts()) :: boolean()
+  @callback supports_execution_outcome?(opts()) :: boolean()
 
   @doc """
   Optional indexed status projection over a metadata match (sp-t57,
   ruling C5).
 
-  Answers the same match `list_runs_by_metadata/2` answers - equality on
+  Answers the same match `list_executions_by_metadata/2` answers - equality on
   every pair, recursively for a nested map - and returns
-  `t:run_state/0` rows instead of whole records: the run id, its status,
+  `t:execution_state/0` rows instead of whole records: the execution id, its status,
   and its `child_index`.
 
   It exists because the settlement of a fan-out asks "have all N of this
@@ -461,35 +461,35 @@ defmodule StatifierPersistence.Storage.Adapter do
 
   Exporting it is how an adapter declares it can answer the question.
   `StatifierPersistence.Driver.start_child_at/6` refuses at open with
-  `{:refused, :run_states_unsupported}` for an adapter that does not.
+  `{:refused, :execution_states_unsupported}` for an adapter that does not.
   """
-  @callback list_run_states_by_metadata(opts(), metadata()) ::
-              {:ok, [StatifierPersistence.Storage.Adapter.run_state()]} | {:error, error()}
+  @callback list_execution_states_by_metadata(opts(), metadata()) ::
+              {:ok, [StatifierPersistence.Storage.Adapter.execution_state()]} | {:error, error()}
 
   @doc """
-  Optional declaration that this adapter keeps a run's input log
+  Optional declaration that this adapter keeps an execution's input log
   (ADR-0010 decision 1).
 
   The same opt-in-by-export shape `supports_metadata?/1` and
-  `supports_run_outcome?/1` use: an adapter exports it and answers `true`,
+  `supports_execution_outcome?/1` use: an adapter exports it and answers `true`,
   the facade checks with `function_exported?/3`, and an adapter that does
   not export it stores no inputs and sees no behaviour change.
   `StatifierPersistence.Storage.InMemory` and every adapter written before
   ADR-0010 stay conformant without a line of change.
 
-  **No run-lifecycle call refuses on it**, and that is the deliberate
+  **No execution-lifecycle call refuses on it**, and that is the deliberate
   departure from `supports_metadata?/1`'s refusal at open. Those refuse
   because something the host *asked for* would otherwise be silently
   dropped; the input log is a derived record of inputs the host is
   supplying anyway, and refusing to run a chart because the log cannot be
-  kept would let a diagnostic facility break the run it is diagnosing. A
+  kept would let a diagnostic facility break the execution it is diagnosing. A
   host that needs to know asks
   `StatifierPersistence.Storage.input_log_supported?/1`.
   """
   @callback supports_input_log?(opts()) :: boolean()
 
   @doc """
-  Optional append of one input to `run_id`'s log (ADR-0010 decision 2).
+  Optional append of one input to `execution_id`'s log (ADR-0010 decision 2).
 
   The adapter assigns the ordinal and returns it: the `seq` on the given
   record is ignored on the way in and authoritative on the way out,
@@ -500,38 +500,38 @@ defmodule StatifierPersistence.Storage.Adapter do
   `input_blob` is opaque here in `position_blob`'s strong sense: the
   facade above every adapter encodes the `%Statifier.Event{}` the
   interpreter saw (ADR-0010 decision 3), and nothing in this layer decodes
-  it, inspects it, or says what produced it. `run_id`, `seq` and `door`
+  it, inspects it, or says what produced it. `execution_id`, `seq` and `door`
   are identity and lookup values and are stored beside it, not inside it.
 
   Past the cap the host declared at `init/1` (`input_log_cap:`), the
   append returns `{:error, :input_log_full}` and the log is **closed**:
   the cap's last slot is written as a record with a `nil` `input_blob`,
-  and no later append to that run ever succeeds (ADR-0010 decision 6). A
+  and no later append to that execution ever succeeds (ADR-0010 decision 6). A
   truncated log that looks complete is worse than no log, so the
   truncation is a value in the log rather than an absence.
   """
-  @callback append_input(opts(), run_id(), input_record()) ::
+  @callback append_input(opts(), execution_id(), input_record()) ::
               {:ok, seq()} | {:error, error()}
 
   @doc """
-  Optional listing of `run_id`'s whole input log, in ascending `seq`
+  Optional listing of `execution_id`'s whole input log, in ascending `seq`
   (ADR-0010 decision 2).
 
   The whole log, always - no filter, no range, no limit, no reverse. The
   whole log is what a replay consumes, and the cap is what bounds it. A
-  run with no inputs is `{:ok, []}`; a run that does not exist is
-  `{:error, :run_not_found}`, the not-found arm this layer already
+  execution with no inputs is `{:ok, []}`; an execution that does not exist is
+  `{:error, :execution_not_found}`, the not-found arm this layer already
   requires instead of `nil` or a raise.
   """
-  @callback list_inputs(opts(), run_id()) ::
+  @callback list_inputs(opts(), execution_id()) ::
               {:ok, [input_record()]} | {:error, error()}
 
   @optional_callbacks isolate: 1,
-                      lock_run: 3,
+                      lock_execution: 3,
                       supports_metadata?: 1,
-                      list_runs_by_metadata: 2,
-                      supports_run_outcome?: 1,
-                      list_run_states_by_metadata: 2,
+                      list_executions_by_metadata: 2,
+                      supports_execution_outcome?: 1,
+                      list_execution_states_by_metadata: 2,
                       supports_input_log?: 1,
                       append_input: 3,
                       list_inputs: 2

@@ -15,7 +15,7 @@ defmodule StatifierPersistence.EctoTest do
     test "schemas read from statifier_* tables" do
       assert Default.Chart.__schema__(:source) == "statifier_charts"
       assert Default.Position.__schema__(:source) == "statifier_positions"
-      assert Default.Run.__schema__(:source) == "statifier_runs"
+      assert Default.Execution.__schema__(:source) == "statifier_runs"
     end
 
     # sabotage: primary_key/2 MFA branch returns autogenerate: false -> red (no MFA in :autogenerate)
@@ -23,7 +23,7 @@ defmodule StatifierPersistence.EctoTest do
       for {schema, prefix} <- [
             {Default.Chart, "chart"},
             {Default.Position, "pos"},
-            {Default.Run, "run"}
+            {Default.Execution, "exec"}
           ] do
         assert schema.__schema__(:type, :id) == :string
 
@@ -62,10 +62,10 @@ defmodule StatifierPersistence.EctoTest do
                  :updated_at
                ]
 
-      assert Default.Run.__schema__(:fields) ==
+      assert Default.Execution.__schema__(:fields) ==
                [
                  :id,
-                 :run_id,
+                 :execution_id,
                  :status,
                  :content_hash,
                  :identity_blob,
@@ -80,12 +80,12 @@ defmodule StatifierPersistence.EctoTest do
 
       # Identities are strings, blobs are binaries, verbatim per ADR-0002
       # decision 1 - never the configured key type.
-      assert Default.Run.__schema__(:type, :run_id) == :string
-      assert Default.Run.__schema__(:type, :content_hash) == :string
-      assert Default.Run.__schema__(:type, :session_id) == :string
-      assert Default.Run.__schema__(:type, :identity_blob) == :binary
-      assert Default.Run.__schema__(:type, :status) == :string
-      assert Default.Run.__schema__(:type, :failure) == :string
+      assert Default.Execution.__schema__(:type, :execution_id) == :string
+      assert Default.Execution.__schema__(:type, :content_hash) == :string
+      assert Default.Execution.__schema__(:type, :session_id) == :string
+      assert Default.Execution.__schema__(:type, :identity_blob) == :binary
+      assert Default.Execution.__schema__(:type, :status) == :string
+      assert Default.Execution.__schema__(:type, :failure) == :string
       assert Default.Position.__schema__(:type, :position_blob) == :binary
       assert Default.Chart.__schema__(:type, :chart_blob) == :binary
     end
@@ -103,12 +103,12 @@ defmodule StatifierPersistence.EctoTest do
     test "every table-name knob lands in __schema__(:source)" do
       assert Overridden.Chart.__schema__(:source) == "wf_charts"
       assert Overridden.Position.__schema__(:source) == "wf_positions"
-      assert Overridden.Run.__schema__(:source) == "workflow_runs"
+      assert Overridden.Execution.__schema__(:source) == "workflow_runs"
     end
 
     # sabotage: schema_ast hardcodes @schema_prefix nil -> red
     test "the Postgres schema lands in __schema__(:prefix)" do
-      for schema <- [Overridden.Chart, Overridden.Position, Overridden.Run] do
+      for schema <- [Overridden.Chart, Overridden.Position, Overridden.Execution] do
         assert schema.__schema__(:prefix) == "workflows"
       end
     end
@@ -119,17 +119,17 @@ defmodule StatifierPersistence.EctoTest do
       assert Overridden.Chart.__schema__(:type, :id) == Ecto.UUID
 
       assert {[:id], {KeyGenerator.UUIDv7, :generate, []}} =
-               List.keyfind(Overridden.Run.__schema__(:autogenerate), [:id], 0)
+               List.keyfind(Overridden.Execution.__schema__(:autogenerate), [:id], 0)
     end
   end
 
   describe "bigserial host" do
     # sabotage: primary_key/2 nil branch drops read_after_writes -> red
     test "declares database-assigned keys the repo reads back" do
-      assert Bigserial.Run.__schema__(:type, :id) == :id
-      assert List.keyfind(Bigserial.Run.__schema__(:autogenerate), [:id], 0) == nil
-      assert Bigserial.Run.__schema__(:autogenerate_id) == nil
-      assert Bigserial.Run.__schema__(:read_after_writes) == [:id]
+      assert Bigserial.Execution.__schema__(:type, :id) == :id
+      assert List.keyfind(Bigserial.Execution.__schema__(:autogenerate), [:id], 0) == nil
+      assert Bigserial.Execution.__schema__(:autogenerate_id) == nil
+      assert Bigserial.Execution.__schema__(:read_after_writes) == [:id]
     end
   end
 
@@ -143,7 +143,7 @@ defmodule StatifierPersistence.EctoTest do
       assert Default.Chart.__schema__(:type, :identity_blob) == :binary
       assert Default.Chart.__schema__(:type, :chart_blob) == :binary
       assert Default.Position.__schema__(:type, :position_blob) == :binary
-      assert Default.Run.__schema__(:type, :position_blob) == :binary
+      assert Default.Execution.__schema__(:type, :position_blob) == :binary
     end
 
     # sabotage: schema_ast's blob-column branch applied blob_type to
@@ -156,13 +156,13 @@ defmodule StatifierPersistence.EctoTest do
       assert BlobTyped.Chart.__schema__(:type, :identity_blob) == ReversibleBlobType
       assert BlobTyped.Chart.__schema__(:type, :chart_blob) == ReversibleBlobType
       assert BlobTyped.Position.__schema__(:type, :position_blob) == ReversibleBlobType
-      assert BlobTyped.Run.__schema__(:type, :position_blob) == ReversibleBlobType
+      assert BlobTyped.Execution.__schema__(:type, :position_blob) == ReversibleBlobType
 
       assert BlobTyped.Chart.__schema__(:type, :content_hash) == :string
       assert BlobTyped.Position.__schema__(:type, :session_id) == :string
-      assert BlobTyped.Run.__schema__(:type, :run_id) == :string
-      assert BlobTyped.Run.__schema__(:type, :status) == :string
-      assert BlobTyped.Run.__schema__(:type, :failure) == :string
+      assert BlobTyped.Execution.__schema__(:type, :execution_id) == :string
+      assert BlobTyped.Execution.__schema__(:type, :status) == :string
+      assert BlobTyped.Execution.__schema__(:type, :failure) == :string
     end
   end
 
@@ -333,8 +333,8 @@ defmodule StatifierPersistence.EctoTest do
       # Bind through variables: the modules only exist once the snippet
       # compiles, and literal remote calls would warn at test compile time.
       assert host = Enum.find(modules, &(&1 == MyApp.Persistence))
-      run_schema = Module.concat(host, Run)
-      assert run_schema.__schema__(:source) == "statifier_runs"
+      execution_schema = Module.concat(host, Execution)
+      assert execution_schema.__schema__(:source) == "statifier_runs"
       assert host.__statifier_persistence__(:repo) == MyApp.Repo
     end
   end

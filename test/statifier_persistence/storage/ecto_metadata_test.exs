@@ -18,7 +18,7 @@ defmodule StatifierPersistence.Storage.EctoMetadataTest do
   alias Statifier.MachineState
   alias StatifierPersistence.Ecto.Config
   alias StatifierPersistence.EctoHosts.Default
-  alias StatifierPersistence.Run.Linkage
+  alias StatifierPersistence.Execution.Linkage
   alias StatifierPersistence.Storage
   alias StatifierPersistence.Testing.Charts
   alias StatifierPersistence.TestRepo
@@ -35,8 +35,8 @@ defmodule StatifierPersistence.Storage.EctoMetadataTest do
 
   defp runs_table, do: Config.table(Default.__statifier_persistence__(:config), :runs)
 
-  defp insert(store, machine_state, run_id, metadata) do
-    Storage.insert_run(store, run_id, machine_state, :active, metadata: metadata)
+  defp insert(store, machine_state, execution_id, metadata) do
+    Storage.insert_execution(store, execution_id, machine_state, :active, metadata: metadata)
   end
 
   # sabotage: in Storage.Ecto's encode_metadata/1, return the map unchanged
@@ -46,19 +46,19 @@ defmodule StatifierPersistence.Storage.EctoMetadataTest do
     store: store,
     machine_state: machine_state
   } do
-    assert :ok = insert(store, machine_state, "run-ecto-md-empty", %{})
+    assert :ok = insert(store, machine_state, "execution-ecto-md-empty", %{})
 
     %{rows: [[raw]]} =
       TestRepo.query!("SELECT metadata FROM #{runs_table()} WHERE run_id = $1", [
-        "run-ecto-md-empty"
+        "execution-ecto-md-empty"
       ])
 
     assert raw == nil
-    assert {:ok, record} = Storage.fetch_run(store, "run-ecto-md-empty")
+    assert {:ok, record} = Storage.fetch_execution(store, "execution-ecto-md-empty")
     assert record.metadata == %{}
   end
 
-  # sabotage: in Storage.Ecto's do_insert_run/3, drop the metadata from the
+  # sabotage: in Storage.Ecto's do_insert_execution/3, drop the metadata from the
   # struct/3 call so the column is never written -> red, the raw column
   # held NULL instead of the two pairs. Verified red, reverted.
   test "a non-empty map lands in the jsonb column verbatim", %{
@@ -67,73 +67,79 @@ defmodule StatifierPersistence.Storage.EctoMetadataTest do
   } do
     metadata = %{"tenant_id" => "acct_01H8X", "processor_account_id" => "pacct_4471"}
 
-    assert :ok = insert(store, machine_state, "run-ecto-md-full", metadata)
+    assert :ok = insert(store, machine_state, "execution-ecto-md-full", metadata)
 
     %{rows: [[raw]]} =
       TestRepo.query!("SELECT metadata FROM #{runs_table()} WHERE run_id = $1", [
-        "run-ecto-md-full"
+        "execution-ecto-md-full"
       ])
 
     assert raw == metadata
   end
 
-  describe "list_runs_by_metadata/2" do
-    # sabotage: in Storage.Ecto.list_runs_by_metadata/2, replace the `@>`
+  describe "list_executions_by_metadata/2" do
+    # sabotage: in Storage.Ecto.list_executions_by_metadata/2, replace the `@>`
     # containment fragment with `?->>key = value` on the first pair only ->
-    # red, the two-pair query matched the run that shares only tenant_id,
+    # red, the two-pair query matched the execution that shares only tenant_id,
     # so the returned id list had two entries instead of one. Verified red,
     # reverted.
     test "matches every given pair, and nothing looser", %{
       store: store,
       machine_state: machine_state
     } do
-      :ok = insert(store, machine_state, "run-ls-a", %{"tenant_id" => "t1", "acct" => "a1"})
-      :ok = insert(store, machine_state, "run-ls-b", %{"tenant_id" => "t1", "acct" => "a2"})
-      :ok = insert(store, machine_state, "run-ls-c", %{"tenant_id" => "t2", "acct" => "a1"})
-      :ok = insert(store, machine_state, "run-ls-d", %{})
+      :ok = insert(store, machine_state, "execution-ls-a", %{"tenant_id" => "t1", "acct" => "a1"})
+      :ok = insert(store, machine_state, "execution-ls-b", %{"tenant_id" => "t1", "acct" => "a2"})
+      :ok = insert(store, machine_state, "execution-ls-c", %{"tenant_id" => "t2", "acct" => "a1"})
+      :ok = insert(store, machine_state, "execution-ls-d", %{})
 
       assert {:ok, both} =
-               Storage.Ecto.list_runs_by_metadata(store.opts, %{
+               Storage.Ecto.list_executions_by_metadata(store.opts, %{
                  "tenant_id" => "t1",
                  "acct" => "a1"
                })
 
-      assert Enum.map(both, & &1.run_id) == ["run-ls-a"]
+      assert Enum.map(both, & &1.execution_id) == ["execution-ls-a"]
 
       assert {:ok, tenant} =
-               Storage.Ecto.list_runs_by_metadata(store.opts, %{"tenant_id" => "t1"})
+               Storage.Ecto.list_executions_by_metadata(store.opts, %{"tenant_id" => "t1"})
 
-      assert Enum.sort(Enum.map(tenant, & &1.run_id)) == ["run-ls-a", "run-ls-b"]
+      assert Enum.sort(Enum.map(tenant, & &1.execution_id)) == [
+               "execution-ls-a",
+               "execution-ls-b"
+             ]
     end
 
-    # sabotage: in Storage.Ecto.list_runs_by_metadata/2, build the returned
+    # sabotage: in Storage.Ecto.list_executions_by_metadata/2, build the returned
     # maps inline without decode_status/1 (carry row.status through as the
     # stored string) -> red, the returned record's status was "active"
     # rather than :active. Verified red, reverted.
-    test "returns records in fetch_run/2's shape", %{store: store, machine_state: machine_state} do
+    test "returns records in fetch_execution/2's shape", %{
+      store: store,
+      machine_state: machine_state
+    } do
       metadata = %{"tenant_id" => "t-shape"}
-      :ok = insert(store, machine_state, "run-ls-shape", metadata)
+      :ok = insert(store, machine_state, "execution-ls-shape", metadata)
 
-      assert {:ok, [record]} = Storage.Ecto.list_runs_by_metadata(store.opts, metadata)
-      assert {:ok, ^record} = Storage.fetch_run(store, "run-ls-shape")
+      assert {:ok, [record]} = Storage.Ecto.list_executions_by_metadata(store.opts, metadata)
+      assert {:ok, ^record} = Storage.fetch_execution(store, "execution-ls-shape")
       assert record.status == :active
       assert record.metadata == metadata
     end
 
     # sabotage: in Storage.Ecto's validate_match!/1, delete the
     # map_size(metadata) > 0 guard so the empty map falls through to the
-    # query -> red, no ArgumentError was raised and every run with any
+    # query -> red, no ArgumentError was raised and every execution with any
     # metadata came back. Verified red, reverted.
-    test "refuses an empty map rather than matching every run", %{store: store} do
+    test "refuses an empty map rather than matching every execution", %{store: store} do
       assert_raise ArgumentError, ~r/non-empty map/, fn ->
-        Storage.Ecto.list_runs_by_metadata(store.opts, %{})
+        Storage.Ecto.list_executions_by_metadata(store.opts, %{})
       end
     end
   end
 
   describe "values jsonb cannot hold" do
-    # sabotage: in Storage.Ecto.insert_run/2, drop the
-    # json_representable?/1 branch and always call do_insert_run/3 -> red,
+    # sabotage: in Storage.Ecto.insert_execution/2, drop the
+    # json_representable?/1 branch and always call do_insert_execution/3 -> red,
     # the insert raised Protocol.UndefinedError from the JSON encoder
     # instead of returning {:error, :metadata_unsupported}. Verified red,
     # reverted.
@@ -142,9 +148,10 @@ defmodule StatifierPersistence.Storage.EctoMetadataTest do
       machine_state: machine_state
     } do
       assert {:error, :metadata_unsupported} =
-               insert(store, machine_state, "run-ecto-md-tuple", %{"pair" => {1, 2}})
+               insert(store, machine_state, "execution-ecto-md-tuple", %{"pair" => {1, 2}})
 
-      assert {:error, :run_not_found} = Storage.fetch_run(store, "run-ecto-md-tuple")
+      assert {:error, :execution_not_found} =
+               Storage.fetch_execution(store, "execution-ecto-md-tuple")
     end
 
     # sabotage: same mutation as above -> red for the same reason with a
@@ -155,7 +162,7 @@ defmodule StatifierPersistence.Storage.EctoMetadataTest do
       machine_state: machine_state
     } do
       assert {:error, :metadata_unsupported} =
-               insert(store, machine_state, "run-ecto-md-bytes", %{"raw" => <<0xFF, 0xFE>>})
+               insert(store, machine_state, "execution-ecto-md-bytes", %{"raw" => <<0xFF, 0xFE>>})
     end
 
     # sabotage: in Storage.Ecto's json_representable?/1, add a clause
@@ -167,7 +174,7 @@ defmodule StatifierPersistence.Storage.EctoMetadataTest do
       machine_state: machine_state
     } do
       assert {:error, :metadata_unsupported} =
-               insert(store, machine_state, "run-ecto-md-atom", %{"state" => :pending})
+               insert(store, machine_state, "execution-ecto-md-atom", %{"state" => :pending})
     end
 
     # sabotage: in Storage.Ecto's json_representable?/1, make the map
@@ -178,7 +185,7 @@ defmodule StatifierPersistence.Storage.EctoMetadataTest do
       machine_state: machine_state
     } do
       assert {:error, :metadata_unsupported} =
-               insert(store, machine_state, "run-ecto-md-nested", %{"nested" => %{a: 1}})
+               insert(store, machine_state, "execution-ecto-md-nested", %{"nested" => %{a: 1}})
     end
 
     # sabotage: in Storage.Ecto's json_representable?/1, return false for
@@ -191,13 +198,13 @@ defmodule StatifierPersistence.Storage.EctoMetadataTest do
     } do
       metadata = %{"tags" => ["a", "b"], "counts" => %{"n" => 2}, "flag" => true, "none" => nil}
 
-      assert :ok = insert(store, machine_state, "run-ecto-md-nested-ok", metadata)
-      assert {:ok, record} = Storage.fetch_run(store, "run-ecto-md-nested-ok")
+      assert :ok = insert(store, machine_state, "execution-ecto-md-nested-ok", metadata)
+      assert {:ok, record} = Storage.fetch_execution(store, "execution-ecto-md-nested-ok")
       assert record.metadata == metadata
     end
   end
 
-  describe "StatifierPersistence.Run.Linkage's reserved namespace (sp-nt8, ADR-0008)" do
+  describe "StatifierPersistence.Execution.Linkage's reserved namespace (sp-nt8, ADR-0008)" do
     # sabotage: Linkage.to_metadata/1's child_index emitted as an atom
     # (`child_index: 0` instead of `"child_index" => 0`) -> red, the insert
     # returned {:error, :metadata_unsupported} because an atom key is not
@@ -206,11 +213,11 @@ defmodule StatifierPersistence.Storage.EctoMetadataTest do
       store: store,
       machine_state: machine_state
     } do
-      linkage = Linkage.new("run_parent", "call", 0, "sha256:child")
+      linkage = Linkage.new("execution_parent", "call", 0, "sha256:child")
       metadata = Linkage.to_metadata(linkage)
 
-      assert :ok = insert(store, machine_state, "run-ecto-linkage", metadata)
-      assert {:ok, record} = Storage.fetch_run(store, "run-ecto-linkage")
+      assert :ok = insert(store, machine_state, "execution-ecto-linkage", metadata)
+      assert {:ok, record} = Storage.fetch_execution(store, "execution-ecto-linkage")
       assert record.metadata == metadata
       assert {:ok, ^linkage} = Linkage.from_metadata(record.metadata)
     end

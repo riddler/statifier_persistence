@@ -12,13 +12,13 @@ defmodule StatifierPersistence.Ecto.KeyGenerator do
   so the two cannot disagree.
 
   Engine identities (the chart content hash, the engine session id, the
-  caller's run id) are stored verbatim and are not touched by any key
+  caller's execution id) are stored verbatim and are not touched by any key
   generator - ADR-0002 decision 1.
 
   The bundled implementations:
 
     * `StatifierPersistence.Ecto.KeyGenerator.UXID` - k-sortable strings
-      with per-table prefixes (`chart_`, `pos_`, `run_`)
+      with per-table prefixes (`chart_`, `pos_`, `exec_`)
     * `StatifierPersistence.Ecto.KeyGenerator.UUIDv7` - RFC 9562 UUIDv7
     * `StatifierPersistence.Ecto.KeyGenerator.Bigserial` -
       database-assigned auto-increment

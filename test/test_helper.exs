@@ -12,7 +12,7 @@ end
 
 {:ok, _pid} = StatifierPersistence.TestRepo.start_link()
 
-# The Ecto adapter tests (conformance and unit) run against the Default
+# The Ecto adapter tests (conformance and unit) execution against the Default
 # and Overridden fixture hosts' tables; create them once for the whole
 # suite, idempotently. Only DDL persists - the sandbox rolls rows back.
 :ok = StatifierPersistence.BootstrapMigrations.up(StatifierPersistence.TestRepo)

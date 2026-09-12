@@ -1,6 +1,6 @@
 defmodule StatifierPersistence.Storage.EctoBlobTypeConformanceTest do
   @moduledoc """
-  The lib-shipped conformance suite (ADR-0003 decision 5) run against
+  The lib-shipped conformance suite (ADR-0003 decision 5) execution against
   `StatifierPersistence.Storage.Ecto` over the `BlobTyped` host, which
   puts `StatifierPersistence.Test.ReversibleBlobType` on `:blob_type`
   (sp-km3). Byte-identical round-tripping through a custom blob type is

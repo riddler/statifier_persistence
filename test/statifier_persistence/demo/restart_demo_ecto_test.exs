@@ -1,6 +1,6 @@
 defmodule StatifierPersistence.Demo.RestartDemoEctoTest do
   @moduledoc """
-  The demo scenarios re-run against `StatifierPersistence.Storage.Ecto`
+  The demo scenarios re-execution against `StatifierPersistence.Storage.Ecto`
   over real Postgres (the ADR-0005 harness), so the demo proves the loop,
   not the `InMemory` adapter (Phase 4 of
   `docs/plans/260822-sp-4an.4-restart-demo-host.md`).
@@ -9,7 +9,7 @@ defmodule StatifierPersistence.Demo.RestartDemoEctoTest do
   this variant drives the identical scenario bodies (`Scenario` names no
   storage module) and asserts the same outcomes, plus the one thing only
   this variant can prove - that the post-restart boot re-read the chart
-  and the run from the database, under the default `AdapterLock`
+  and the execution from the database, under the default `AdapterLock`
   serialization's advisory-plus-row lock on every step.
 
   `async: false` per the plan: the demo drives several `Storage.new/2`
@@ -20,7 +20,7 @@ defmodule StatifierPersistence.Demo.RestartDemoEctoTest do
   alias Statifier.Effect.{Cancel, CancelInvoke, DatamodelInit, Invoke, SendDelayed}
   alias StatifierPersistence.Demo.{Host, Ledger, Scenario}
   alias StatifierPersistence.EctoHosts
-  alias StatifierPersistence.Run
+  alias StatifierPersistence.Execution
   alias StatifierPersistence.Storage
 
   @adapter Storage.Ecto
@@ -41,15 +41,15 @@ defmodule StatifierPersistence.Demo.RestartDemoEctoTest do
   # per-test notes below name which shared mutation reds each test.
 
   # sabotage: shared with RestartDemoTest's straight-through test -
-  # Runs.run_status/2 returning :active for a :done machine state reds the
+  # Executions.execution_status/2 returning :active for a :done machine state reds the
   # `status: :completed` assertion here identically (same scenario body).
-  # Run and confirmed red on the InMemory variant, reverted.
+  # Execution and confirmed red on the InMemory variant, reverted.
   test "drives the chart straight through over Postgres" do
     result = Scenario.straight_through({@adapter, @adapter_opts})
 
     assert result.configs == [["authorizing"], ["awaiting_capture"], ["settling"]]
     refute Enum.any?(result.configs, &("voided" in &1))
-    assert %Run{status: :completed} = Host.run(result.host)
+    assert %Execution{status: :completed} = Host.execution(result.host)
 
     calls = result.ledger |> Ledger.calls() |> Enum.map(fn {effect, _context} -> effect end)
 
@@ -63,10 +63,10 @@ defmodule StatifierPersistence.Demo.RestartDemoEctoTest do
            ] = calls
   end
 
-  # sabotage: shared with RestartDemoTest's restart test - Runs.write_run/6
+  # sabotage: shared with RestartDemoTest's restart test - Executions.write_execution/6
   # passing position: :skip on the :update path leaves the stored blob in
   # intake, so `config_at_kill == ["authorizing"]` reds here identically
-  # (same scenario body). Run and confirmed red on the InMemory variant,
+  # (same scenario body). Execution and confirmed red on the InMemory variant,
   # reverted.
   test "resumes from a simulated restart over Postgres" do
     result = Scenario.across_restart({@adapter, @adapter_opts})
@@ -80,8 +80,8 @@ defmodule StatifierPersistence.Demo.RestartDemoEctoTest do
 
     # The post-restart boot genuinely re-read from Postgres: the
     # `{:chart_fetched, _}` marker is present, and the freshly recompiled
-    # machine's identity matches the stored run record's - this is the
-    # plan's "confirm `boot/4` issues a `fetch_run` and a `fetch_chart`"
+    # machine's identity matches the stored execution record's - this is the
+    # plan's "confirm `boot/4` issues a `fetch_execution` and a `fetch_chart`"
     # check, asserted rather than observed by hand.
     assert {:chart_fetched, content_hash} =
              result.ledger
@@ -89,13 +89,13 @@ defmodule StatifierPersistence.Demo.RestartDemoEctoTest do
              |> Enum.find(&match?({:chart_fetched, _}, &1))
 
     assert content_hash == result.host_after_boot.machine.identity.content_hash
-    assert %Run{content_hash: ^content_hash} = Host.run(result.host_after_boot)
+    assert %Execution{content_hash: ^content_hash} = Host.execution(result.host_after_boot)
 
     # The tail finishes with the exact same executor call log - nothing
     # re-emitted across the restart, now with every step's write behind
-    # `Storage.Ecto.lock_run/3`.
+    # `Storage.Ecto.lock_execution/3`.
     assert result.configs == [["awaiting_capture"], ["settling"]]
-    assert %Run{status: :completed} = Host.run(result.host)
+    assert %Execution{status: :completed} = Host.execution(result.host)
 
     calls = result.ledger |> Ledger.calls() |> Enum.map(fn {effect, _context} -> effect end)
 
@@ -110,16 +110,16 @@ defmodule StatifierPersistence.Demo.RestartDemoEctoTest do
   end
 
   # sabotage: shared with RestartDemoTest's replay test - the same
-  # write_run position: :skip mutation diverges the loaded original
+  # write_execution position: :skip mutation diverges the loaded original
   # configs from the replay's returned ones, redding the sequence
-  # comparison here identically (same scenario body and comparison). Run
+  # comparison here identically (same scenario body and comparison). Execution
   # and confirmed red on the InMemory variant, reverted.
   test "replays the recorded tape over Postgres" do
     result = Scenario.across_restart({@adapter, @adapter_opts})
 
     {:ok, replay_store} = Storage.new(@adapter, @adapter_opts)
     {:ok, replay_ledger} = Ledger.start_link([])
-    replay_run_id = "restart-demo-replay-#{System.unique_integer([:positive])}"
+    replay_execution_id = "restart-demo-replay-#{System.unique_integer([:positive])}"
 
     # Same recorded-inputs discipline as the InMemory variant: the session
     # id is the one generated create input, re-supplied to the replay.
@@ -127,7 +127,7 @@ defmodule StatifierPersistence.Demo.RestartDemoEctoTest do
     original_session_id = final_position.datamodel["_sessionid"]
 
     replay_result =
-      Scenario.replay(Host.tape(result.host), {replay_store, replay_ledger}, replay_run_id,
+      Scenario.replay(Host.tape(result.host), {replay_store, replay_ledger}, replay_execution_id,
         initialize: [session_id: original_session_id]
       )
 

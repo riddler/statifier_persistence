@@ -2,8 +2,8 @@ defmodule StatifierPersistence.Test.NoChildListingAdapter do
   @moduledoc """
   A delegating `StatifierPersistence.Storage.Adapter` wrapping
   `StatifierPersistence.Storage.InMemory` that implements every callback
-  including the optional `lock_run/3` and `supports_metadata?/1`, and
-  deliberately does NOT export the optional `list_runs_by_metadata/2`.
+  including the optional `lock_execution/3` and `supports_metadata?/1`, and
+  deliberately does NOT export the optional `list_executions_by_metadata/2`.
 
   The fixture for `Driver`'s durable-subchart refusal-at-open: a store over
   this adapter serializes and stores metadata exactly as `InMemory` does, so
@@ -32,17 +32,17 @@ defmodule StatifierPersistence.Test.NoChildListingAdapter do
   defdelegate fetch_position(opts, session_id), to: InMemory
 
   @impl true
-  defdelegate insert_run(opts, run_record), to: InMemory
+  defdelegate insert_execution(opts, execution_record), to: InMemory
 
   @impl true
-  defdelegate fetch_run(opts, run_id), to: InMemory
+  defdelegate fetch_execution(opts, execution_id), to: InMemory
 
   @impl true
-  defdelegate update_run(opts, run_record), to: InMemory
+  defdelegate update_execution(opts, execution_record), to: InMemory
 
   @impl true
   defdelegate supports_metadata?(opts), to: InMemory
 
   @impl true
-  defdelegate lock_run(opts, run_id, fun), to: InMemory
+  defdelegate lock_execution(opts, execution_id, fun), to: InMemory
 end
