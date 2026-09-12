@@ -358,7 +358,7 @@ scope by the metadata-value bullet of this decision's rule, and both rename:
 
 | Today (@70d86bd) | After |
 |---|---|
-| `stage: :run` on `[:statifier_persistence, :identity, :refused]` (`storage.ex:313` and `:363`, `refuse_unidentified(:run, run_id: run_id)`; `storage.ex:714`, `precheck_identity(..., :run, keys)`; emitted at `storage.ex:830` and `:838` into `Telemetry.identity_refused/1`, `telemetry.ex:304`; documented at `docs/telemetry.md:238` and `:258`, "`stage` is `:position`, `:run` or `:chart`") | `stage: :execution` |
+| `stage: :run` on `[:statifier_persistence, :identity, :refused]` (`storage.ex:313` and `:363`, `refuse_unidentified(:run, run_id: run_id)`; `storage.ex:714`, `precheck_identity(..., :run, keys)`; emitted at `storage.ex:830` and `:838` into `Telemetry.identity_refused/1`, `telemetry.ex:304`, and a third time from `persist_tail`'s unidentified arm, `runs.ex:1051`; documented at `docs/telemetry.md:238` and `:258`, "`stage` is `:position`, `:run` or `:chart`") | `stage: :execution` |
 | `reason: :terminal_run` on `[:statifier_persistence, :run, :discarded]` (`runs.ex:428`, `:527`, `:567`, each `discarded(run_record, run_id, _, :terminal_run)` into `runs.ex:867`; documented at `telemetry.ex:102` and `docs/telemetry.md:291`) | `reason: :terminal_execution` |
 
 The private specs that type the first of these travel with it and are renamed
@@ -559,9 +559,15 @@ module's row above.
   `[:charts, :positions, :executions, :inputs]` and the shipped default name
   becomes **`statifier_executions`**.
 - **There is no `:runs` alias.** `:executions` is the only spelling the
-  configuration accepts. Supplying `:runs` under `tables:` reaches
-  `Config.table/2`'s `when table in @table_keys` guard (`ecto/config.ex:90`,
-  @70d86bd) and raises like any other unknown key. A one-release alias with a
+  configuration accepts. Supplying `:runs` under `tables:` is rejected at
+  use-time, before any table name is resolved: `Config.new/1` calls
+  `validate_tables!/1` (the call at `ecto/config.ex:73`, the definition at
+  `ecto/config.ex:125-142`, @70d86bd), whose last clause raises
+  `ArgumentError` - "unknown table key ... known keys are ..."
+  (`ecto/config.ex:135-138`, @70d86bd). `Config.table/2`'s
+  `when table in @table_keys` guard (`ecto/config.ex:90`, @70d86bd) is the
+  second line of defence, reached only by a caller that has bypassed the
+  constructor. A one-release alias with a
   deprecation log line was considered and rejected: it would have to survive
   in the historical migrations as well as in host configuration, and this
   package is pre-1.0 - the cutover is taken once, loudly, in `0.12.0`, rather
@@ -572,10 +578,12 @@ module's row above.
   the input log (V05's `add(:run_id, :text, null: false)`, `v05.ex:51`,
   @70d86bd).
 - **The historical migrations V01-V05 are rewritten to the new noun.** Every
-  `Config.table(config, :runs)` call site becomes
-  `Config.table(config, :executions)` - nine `:runs` atom literals in all:
+  `:runs` atom literal the migrations carry becomes `:executions` - nine in
+  all, all but one of them a `Config.table/2` argument in place:
   `v01.ex:64` (`runs = Config.table(config, :runs)`) and `v01.ex:88` (`for
-  name <- [:runs, :positions, :charts]` in `down/1`), `v02.ex:32` and `:42`
+  name <- [:runs, :positions, :charts]` in `down/1`, which is a list element,
+  not a call argument: the `Config.table(config, name)` call is on
+  `v01.ex:89` with the loop variable), `v02.ex:32` and `:42`
   (`alter table(Config.table(config, :runs), ...)`), `v03.ex:86` and `:108`,
   and `v04.ex:156`, `:160` and `:165` (the qualified-name helpers and the
   concurrent rebuild), all @70d86bd. Every `run_id` column and index those
