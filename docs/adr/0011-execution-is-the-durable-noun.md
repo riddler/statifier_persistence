@@ -94,9 +94,17 @@ What speaks `run` today, in full:
   through `@child_cascade_cancelled` at `:175`, @70d86bd) and tabulated in the
   moduledoc from `telemetry.ex:58` (@70d86bd).
 - **The records.** ADR-0004, ADR-0006, ADR-0008, ADR-0009 and ADR-0010 all use
-  `run` as a defined term, ADR-0002 names the "runs vocabulary" in its own
-  title, and ADR-0002 decision 5 is what makes the table name configurable at
-  all.
+  `run` as a defined term. ADR-0002 goes further and *decides* the word:
+  decision 5, "**The vocabulary is *runs*, not sessions**"
+  (`docs/adr/0002-configurable-keys-and-table-names.md:110`, @70d86bd), is the
+  standing ruling this record overturns. ADR-0002's own title says nothing about
+  a vocabulary - it is "Storage keys and table names are host-configurable;
+  engine identities are not" (`0002-configurable-keys-and-table-names.md:1`,
+  @70d86bd) - and the phrase "runs vocabulary" appears in the index summary at
+  `docs/adr/README.md:6` (@70d86bd) rather than in that record. What makes the
+  physical table name configurable at all is ADR-0002 decisions **3 and 4**
+  (`0002-configurable-keys-and-table-names.md:66` and `:88`, @70d86bd), not
+  decision 5.
 
 ### What does not exist, despite earlier drafts saying so
 
@@ -111,10 +119,17 @@ that paragraph and this record rests on the note.
 
 ### What bounds the answer
 
-- **Table names are already host-configurable.** ADR-0002 decision 5 makes the
+- **Table names are already host-configurable.** ADR-0002 decisions 3 and 4
+  (`0002-configurable-keys-and-table-names.md:66` and `:88`, @70d86bd) make the
   physical names a host's choice through `:tables` and `:table_prefix`, so the
   rename decided here changes the *default* names and the *key* that selects
   them, not a name a host cannot move.
+- **The word itself was decided, and is being re-decided.** ADR-0002 decision 5
+  (`0002-configurable-keys-and-table-names.md:110`, @70d86bd) fixed "runs" as
+  this package's vocabulary against "sessions". Decision 1 below supersedes that
+  ruling on the noun; the rest of ADR-0002 decision 5 - that "session" keeps the
+  meaning `statifier-ex` gives it, and that the durable row carries the engine
+  `session_id` as a nullable column - is untouched.
 - **The identity guard is untouched.** ADR-0003 puts the guard above every
   adapter; it is keyed on the chart's identity, never on the durable record's
   name.
@@ -147,9 +162,22 @@ naming the durable record.
 
 The table below is the complete list of public names this record changes. The
 left column is today's name at `70d86bd` with today's arity, read off the
-definition; the right column is the name after sp-op4. Arity is part of a name,
-so a row whose arity differs on the two sides would be a change of shape and not
-a rename - there is no such row.
+definition rather than off any bead text; the right column is the name after
+sp-op4. Arity is part of a name, so a row whose arity differs on the two sides
+would be a change of shape and not a rename - there is no such row.
+
+Where a definition ends in a default argument it exports two arities, and the
+left column gives the **maximum**. That is the case for `Storage.insert_run/5`
+and `Storage.update_run/5` (`opts \\ []`, `storage.ex:309` and `:359`,
+@70d86bd), `Storage.update_run_status/4` (`storage.ex:401`, @70d86bd), and, in
+the Context list above, `Runs.fail/4` (`runs.ex:490`), `Runs.cancel/3`
+(`runs.ex:558`) and `Runs.cascade_cancel/3` (`runs.ex:634`), all @70d86bd. Both
+arities of each are renamed together; the rename is unaffected either way.
+Arities are read per layer, because the two layers genuinely differ: the
+`Storage.Adapter` callback is `update_run/2` (`adapter.ex:344`) while the
+`Storage` function of the same name is `update_run/5` (`storage.ex:354`), and
+the adapter's `list_runs_by_metadata/2` (`adapter.ex:422`) and the facade's
+`list_runs_by_metadata/2` (`storage.ex:551`) agree only by coincidence.
 
 **Modules**
 
@@ -250,7 +278,7 @@ follow the same rename without being enumerated here: the table fixes the
   name, and the conformance suite exercises both directions.
 - A host that already set `:tables` or `:table_prefix` explicitly keeps whatever
   it set; V06 renames from the resolved old name to the resolved new name, which
-  is what makes it correct under ADR-0002 decision 5.
+  is what makes it correct under ADR-0002 decisions 3 and 4.
 - The `Config` option key becomes `:executions`. `:runs` is **accepted as an
   alias for one release**: supplying it resolves the executions table and logs a
   deprecation line naming `:executions`. It is removed in the release named in
@@ -367,8 +395,14 @@ to the old one.
   ADR-0009, ADR-0010 - are not rewritten. Each gets one dated Note pointing here
   (sp-478 for ADR-0004/0006/0009/0010, sp-pcw for ADR-0008), so a reader of an
   older record learns the noun moved without this campaign editing accepted text.
-  ADR-0002's title keeps the phrase "runs vocabulary"; its Note carries the
-  correction.
+- **ADR-0002 decision 5 is the one live decision this record overturns**, and its
+  dated Note must say so rather than merely pointing here: after sp-5nv flips
+  this record, ADR-0002 decision 5's "the vocabulary is *runs*" no longer holds,
+  while the rest of that decision (what "session" means, and the nullable
+  `session_id` column) does. ADR-0002's own title is unaffected - it names
+  configurability, not a vocabulary - and the phrase "runs vocabulary" that needs
+  a corresponding correction lives in the index summary at
+  `docs/adr/README.md:6` (@70d86bd).
 - This record merges at **proposed** and flips to accepted by **sp-5nv**, after
   sp-op4 (the code) and sp-j2y (the migration and the `Config` key) are on
   `main`. A flip verifies every claim above against the code of that day, not
