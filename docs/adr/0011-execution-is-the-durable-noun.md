@@ -92,7 +92,33 @@ What speaks `run` today, in full:
   module attributes at `lib/statifier_persistence/telemetry.ex:160-175`
   (`@run_step_start [:statifier_persistence, :run, :step, :start]` at `:160`
   through `@child_cascade_cancelled` at `:175`, @70d86bd) and tabulated in the
-  moduledoc from `telemetry.ex:58` (@70d86bd).
+  moduledoc from `telemetry.ex:58` (@70d86bd). The attributes are private, but
+  the six documented emitters that publish them are not: `run_step_start/3`
+  (`telemetry.ex:218`, `def run_step_start(run_id, entry, span_ref)`, @70d86bd),
+  `run_step_stop/2` (`telemetry.ex:235`), `run_lock/2` (`telemetry.ex:261`),
+  `run_created/1` (`telemetry.ex:321`), `run_terminated/1` (`telemetry.ex:342`)
+  and `run_discarded/1` (`telemetry.ex:359`), all @70d86bd.
+- **The second behaviour a host implements.** ADR-0004 decision 5's pluggable
+  per-run serialization strategy is a second `@behaviour`, not a variation on
+  the storage adapter: `StatifierPersistence.Serialization`'s one callback
+  `with_run/3` (`lib/statifier_persistence/serialization.ex:29`, `@callback
+  with_run(config :: term(), run_id :: String.t(), fun :: (-> result))`,
+  @70d86bd), and the strategy this package ships,
+  `StatifierPersistence.Serialization.AdapterLock.with_run/3`
+  (`lib/statifier_persistence/serialization/adapter_lock.ex:22`, `def
+  with_run(%Storage{} = store, run_id, fun)`, with `@behaviour
+  StatifierPersistence.Serialization` at `adapter_lock.ex:14`, @70d86bd).
+- **The linkage helper.** `Run.Linkage.child_run_id/3`
+  (`lib/statifier_persistence/run/linkage.ex:285`, `def
+  child_run_id(parent_run_id, invoke_id, child_index)`, `@spec` at `:280`,
+  @70d86bd), the pure derivation of a child's id.
+- **The public types outside the adapter.** `Runs.run_id/0` (`runs.ex:111`,
+  `@type run_id :: Adapter.run_id()`, @70d86bd), `Storage.run_write_opt/0`
+  (`storage.ex:114`, @70d86bd), the `run_id:` key of `Executor.context/0`
+  (`lib/statifier_persistence/executor.ex:17`, `@type context :: %{run_id:
+  String.t(), content_hash: String.t()}`, @70d86bd) and
+  `Ecto.KeyGenerator.table/0` (`lib/statifier_persistence/ecto/key_generator.ex:28`,
+  `@type table :: :charts | :positions | :runs | :inputs`, @70d86bd).
 - **The records.** ADR-0004, ADR-0006, ADR-0008, ADR-0009 and ADR-0010 all use
   `run` as a defined term. ADR-0002 goes further and *decides* the word:
   decision 5, "**The vocabulary is *runs*, not sessions**"
@@ -160,11 +186,14 @@ naming the durable record.
 
 ### 2. The names
 
-The table below is the complete list of public names this record changes. The
-left column is today's name at `70d86bd` with today's arity, read off the
-definition rather than off any bead text; the right column is the name after
-sp-op4. Arity is part of a name, so a row whose arity differs on the two sides
-would be a change of shape and not a rename - there is no such row.
+The tables below are the complete list of public names this record changes,
+enumerated from every `defmodule`, `def`, `defstruct`, `@callback`, `@type` and
+`@opaque` in `lib/` at `70d86bd` that spells `run` in its own name or in a key
+of its own shape, minus what carries `@doc false`. The left column is today's
+name at `70d86bd` with today's arity, read off the definition rather than off
+any bead text; the right column is the name after sp-op4. Arity is part of a
+name, so a row whose arity differs on the two sides would be a change of shape
+and not a rename - there is no such row.
 
 Where a definition ends in a default argument it exports two arities, and the
 left column gives the **maximum**. That is the case for `Storage.insert_run/5`
@@ -254,9 +283,79 @@ The `[:statifier_persistence, :adapter, :call]`,
 `[:statifier_persistence, :child, ...]` event names keep their own second
 segment; only their `run_id`-shaped metadata keys move, per the rows above.
 
+**`StatifierPersistence.Telemetry` emitters**
+
+The six documented functions that publish the renamed events rename with them.
+The other ten emitters (`adapter_call/2`, `identity_refused/1`,
+`effect_failed/1`, `drive_turns_exhausted/2` and the six `child_*` emitters,
+`telemetry.ex:279` through `:520`, @70d86bd) keep their names; only their
+`run_id`-shaped metadata keys move.
+
+| Today (@70d86bd) | After |
+|---|---|
+| `run_step_start/3` (`telemetry.ex:218`) | `execution_step_start/3` |
+| `run_step_stop/2` (`telemetry.ex:235`) | `execution_step_stop/2` |
+| `run_lock/2` (`telemetry.ex:261`) | `execution_lock/2` |
+| `run_created/1` (`telemetry.ex:321`) | `execution_created/1` |
+| `run_terminated/1` (`telemetry.ex:342`) | `execution_terminated/1` |
+| `run_discarded/1` (`telemetry.ex:359`) | `execution_discarded/1` |
+
+**The `StatifierPersistence.Serialization` behaviour**
+
+This is the *second* behaviour a host may implement (ADR-0004 decision 5), and
+it renames too. A host that supplied its own strategy module implements one
+renamed callback; the shipped `AdapterLock` strategy is renamed with it.
+
+| Today (@70d86bd) | After |
+|---|---|
+| `@callback with_run/3` (`serialization.ex:29`) | `@callback with_execution/3` |
+| `AdapterLock.with_run/3` (`serialization/adapter_lock.ex:22`) | `AdapterLock.with_execution/3` |
+
+The callback's `run_id :: String.t()` parameter becomes `execution_id ::
+String.t()`. `StatifierPersistence.Serialization` and
+`StatifierPersistence.Serialization.AdapterLock` keep their module names: they
+name a strategy, not the durable record.
+
+**`StatifierPersistence.Run.Linkage`**
+
+| Today (@70d86bd) | After |
+|---|---|
+| `child_run_id/3` (`run/linkage.ex:285`) | `child_execution_id/3` |
+
+`new/4`, `new/6`, `fan_out?/1`, `to_metadata/1`, `from_metadata/1`,
+`parent_match/1`, `invocation_match/2` and `reserved_key/0` keep their names;
+their `parent_run_id` parameters are parameter names, covered by the closing
+paragraph of this decision.
+
+**Public types outside `Storage.Adapter`**
+
+| Today (@70d86bd) | After |
+|---|---|
+| `Runs.run_id/0` (`runs.ex:111`) | `Executions.execution_id/0` |
+| `Storage.run_write_opt/0` (`storage.ex:114`) | `Storage.execution_write_opt/0` |
+| `Executor.context/0`'s `run_id:` key (`executor.ex:17`) | `execution_id:` |
+| `Ecto.KeyGenerator.table/0` = `:charts \| :positions \| :runs \| :inputs` (`ecto/key_generator.ex:28`) | `:charts \| :positions \| :executions \| :inputs` |
+
+`KeyGenerator.table/0` is load-bearing rather than cosmetic: it is the type a
+host's own key generator is written against, and decision 3 moves `@table_keys`
+to `:executions`, so leaving this type enumerating `:runs` would type a host
+against a key that no longer exists. `Executor.context/0` is the map an
+`Executor.execute/2` implementation receives, so its key rename is a break for
+every host effect executor, not an internal detail.
+
 Private functions, local variables, parameter names, test names and doc prose
-follow the same rename without being enumerated here: the table fixes the
+follow the same rename without being enumerated here: the tables fix the
 *public* surface, and the rest is consistency work sp-op4 does in the same pass.
+Three things are deliberately absent from the tables rather than overlooked.
+`Executor.run/3` (`executor.ex:50`) is not public - it carries `@doc false` at
+`executor.ex:47` and its own comment calls it package-internal - and in any case
+it is the English verb, which decision 1 keeps. The in-tree adapters'
+implementations of the renamed callbacks (`Storage.Ecto` and `Storage.InMemory`,
+e.g. `Storage.InMemory.insert_run/2` at `storage/in_memory.ex:116`, @70d86bd)
+rename mechanically with the callbacks they implement and are not listed
+separately. And `StatifierPersistence.Run.from_record/1` (`run.ex:36`, @70d86bd)
+keeps its function name, travelling to `Execution.from_record/1` with its
+module's row above.
 
 ### 3. The tables, the columns, the indexes, the V06 migration, and the `Config` key
 
@@ -326,24 +425,37 @@ somewhere, and it may be running.
   other loses spans until it upgrades the second; the changelog of each names the
   other.
 
-### 6. No `Storage.Adapter` callback shim: the behaviour breaks, and the changelog says what to do
+### 6. No callback shim: **both** behaviours break, and the changelog says what to do
 
-The renamed callbacks of decision 2 are a hard break for any out-of-tree storage
-adapter. This record deliberately ships no compatibility layer: no
+Decision 2 renames callbacks on **two** behaviours a host implements, and both
+are a hard break:
+
+- `StatifierPersistence.Storage.Adapter` - seven renamed callbacks - for any
+  out-of-tree storage adapter.
+- `StatifierPersistence.Serialization` - one renamed callback, `with_run/3` to
+  `with_execution/3` - for any host that supplied its own per-execution
+  serialization strategy under ADR-0004 decision 5. A host that left the
+  strategy at its default (`AdapterLock`) implements nothing and is unaffected
+  by this one.
+
+This record deliberately ships no compatibility layer for either: no
 `defoverridable` bridge, no `__using__` macro that defines the old names, no
 `Code.ensure_loaded?`-style dispatch that tries the new callback and falls back
-to the old one.
+to the old one. This package is pre-1.0; a break that a host fixes once, guided
+by the compiler, is cheaper than a synonym the family carries forever.
 
 - A behaviour with two accepted spellings is a behaviour with no contract: the
   `@callback` list is what `@behaviour` checks, and a shim makes the compiler
   stop telling an adapter author that they have not migrated.
 - The break is mechanical and total. An adapter implements seven renamed
-  callbacks and changes no logic; the compiler names every one of them.
+  callbacks and a custom strategy implements one, both changing no logic; the
+  compiler names every one of them.
 - The `0.12.0` changelog fragment therefore carries **Breaking for storage
-  adapters** in bold and says what to do about it - the rename table of decision
-  2 and the fact that no behaviour beyond the names changed
-  (`changelog.d/README.md:64`, "say what to do about it"). sp-op4 and sp-j2y write that
-  fragment; this record does not.
+  adapters** in bold and says what to do about it - the rename tables of
+  decision 2, the fact that no behaviour beyond the names changed, and, named
+  separately because it is easy to miss, the `Serialization` callback rename for
+  a host running a custom strategy (`changelog.d/README.md:64`, "say what to do
+  about it"). sp-op4 and sp-j2y write that fragment; this record does not.
 
 ### 7. What this record is not
 
@@ -371,8 +483,9 @@ to the old one.
 ## Consequences
 
 - `statifier_persistence` **0.12.0** is a breaking minor: renamed modules,
-  renamed types, renamed behaviour callbacks, a renamed facade, a renamed table,
-  renamed telemetry, and a new donedata key. The release order for the family is
+  renamed types, renamed callbacks on both public behaviours, a renamed facade,
+  a renamed table, renamed telemetry emitters and event names, and a new
+  donedata key. The release order for the family is
   `sp 0.12.0` then `ots 0.6.0` then `sob 0.10.0`, `sui 0.10.2` and the
   `statifier-ex` doc corrections, then `sb 0.28.0`, then the
   `statifier_examples` re-pin.
@@ -381,8 +494,16 @@ to the old one.
   deprecation line while it lives, so a host learns it is relying on one without
   reading a changelog.
 - An out-of-tree storage adapter does not compile against `0.12.0` until it
-  renames seven callbacks. That is the cost decision 6 chose on purpose, and it
-  is the single loudest consequence of this record.
+  renames seven callbacks, and a host-supplied serialization strategy does not
+  compile until it renames one. That is the cost decision 6 chose on purpose,
+  and it is the single loudest consequence of this record. Both breaks are
+  deliberate and unshimmed: this package is pre-1.0, and the release notes say
+  so plainly rather than softening it.
+- A host effect executor breaks too, quietly rather than at compile time: the
+  `context` map it receives arrives with `execution_id:` instead of `run_id:`
+  (decision 2's type table). An implementation that pattern-matches `%{run_id:
+  id}` raises at the first effect; one that reads the key by name gets `nil`.
+  The changelog names this beside the two behaviours.
 - A running install upgrades by running V06. The migration is a catalog rename
   with a `down/0`, so the rollback path is real, but an install that rolls the
   *code* back without rolling the migration back finds a table it cannot name.
