@@ -6,8 +6,8 @@ defmodule StatifierPersistence.DriverFanoutEctoTest do
   `driver_fanout_test.exs` cannot cover.
 
   `DriverSubchartEctoTest` already proves that a cascade's nested
-  `lock_run/3` calls commit rather than deadlocking when the cascade fires
-  from inside the run's OWN exclusion. The settlement path is the other
+  `lock_execution/3` calls commit rather than deadlocking when the cascade fires
+  from inside the execution's OWN exclusion. The settlement path is the other
   shape and the one the audit is about: `Driver.decide/4` opens the
   exclusion on the PARENT while the caller is a child's driver, and
   `Driver.maybe_cancel/4` then runs the whole cascade over the siblings
@@ -17,10 +17,10 @@ defmodule StatifierPersistence.DriverFanoutEctoTest do
   one of them until it commits.
 
   What makes that safe is the direction, which `driver_fanout_test.exs`
-  pins and this case runs for real: every lock taken while another is held
-  is on a strict descendant of it (`Run.Linkage.child_run_id/3` makes a
+  pins and this case executions for real: every lock taken while another is held
+  is on a strict descendant of it (`Execution.Linkage.child_execution_id/3` makes a
   child's id strictly extend its parent's), so the wait-for relation
-  between connections embeds in the run tree, and the run tree is acyclic
+  between connections embeds in the execution tree, and the execution tree is acyclic
   by construction (ADR-0008 decision 6). A plain pass is the
   confirmation - a `deadlock detected` or a lock timeout is what a cycle
   would look like here.
@@ -38,7 +38,7 @@ defmodule StatifierPersistence.DriverFanoutEctoTest do
   alias Statifier.Machine
   alias StatifierPersistence.{Driver, Storage}
   alias StatifierPersistence.EctoHosts
-  alias StatifierPersistence.Run.Linkage
+  alias StatifierPersistence.Execution.Linkage
 
   @adapter Storage.Ecto
   @adapter_opts [persistence: EctoHosts.Default, sandbox: true]
@@ -55,7 +55,7 @@ defmodule StatifierPersistence.DriverFanoutEctoTest do
 
   # The same child as the in-memory fan-out's: "go" completes with the
   # seeded item, "refuse" reaches a failure-classed final (ADR-0008's
-  # 2026-09-06 amendment) and takes its own run to :failed with no host
+  # 2026-09-06 amendment) and takes its own execution to :failed with no host
   # translation, which is what fires `first_error`.
   @child_source """
   <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="idle">
@@ -69,7 +69,7 @@ defmodule StatifierPersistence.DriverFanoutEctoTest do
       </final>
       <final id="refused">
           <donedata>
-              <param name="statifier_persistence:run_status" expr="'failed'"/>
+              <param name="statifier_persistence:execution_status" expr="'failed'"/>
           </donedata>
       </final>
   </scxml>
@@ -81,7 +81,7 @@ defmodule StatifierPersistence.DriverFanoutEctoTest do
     %{store: store}
   end
 
-  # The acquisition order this run takes, read off the query log
+  # The acquisition order this execution takes, read off the query log
   # (`pg_advisory_xact_lock` per transaction, `begin`-to-`commit`):
   #
   #   each child's own drive       begin [C_i] commit
@@ -95,26 +95,32 @@ defmodule StatifierPersistence.DriverFanoutEctoTest do
   # connection ever holds a descendant and waits for an ancestor, which is
   # the edge a cycle would need.
   #
-  # sabotage: in Driver.decide/4, take the exclusion on `child_run_id`
-  # instead of `linkage.parent_run_id` -> this case still PASSED, and that
+  # sabotage: in Driver.decide/4, take the exclusion on `child_execution_id`
+  # instead of `linkage.parent_execution_id` -> this case still PASSED, and that
   # is itself the finding: `pg_advisory_xact_lock` is session-reentrant
-  # and Ecto nests `lock_run/3` on the one checked-out connection, so a
+  # and Ecto nests `lock_execution/3` on the one checked-out connection, so a
   # mis-ordered acquisition inside a single connection is invisible to
   # Postgres. The in-memory pin in `driver_fanout_test.exs` went red on
   # the same edit. That is the pair's division of labour and why both
-  # exist: the order is pinned there, and run for real here.
+  # exist: the order is pinned there, and execution for real here.
   # sabotage: in Driver.maybe_cancel/4, answer {:ok, states, false} from
   # the :first_error clause without running the cascade -> red here, the
   # live index 2 stayed :active over Postgres and the parent never left
   # "calling". Verified red, reverted.
-  test "a first_error settlement's cascade commits under nested Ecto lock_run/3 transactions", %{
-    store: store
-  } do
+  test "a first_error settlement's cascade commits under nested Ecto lock_execution/3 transactions",
+       %{
+         store: store
+       } do
     parent = start_parent(store)
 
     for index <- 0..2 do
       assert :ok =
-               Driver.start_child_at(parent, "run_ecto_fanout", effect("item-#{index}"), index, 3,
+               Driver.start_child_at(
+                 parent,
+                 "execution_ecto_fanout",
+                 effect("item-#{index}"),
+                 index,
+                 3,
                  policy: :first_error
                )
     end
@@ -130,23 +136,23 @@ defmodule StatifierPersistence.DriverFanoutEctoTest do
     assert leaves(reload_parent(store)) == ["approved"]
 
     for {index, status} <- [{0, :completed}, {1, :failed}, {2, :cancelled}] do
-      run_id = Linkage.child_run_id("run_ecto_fanout", "call", index)
-      assert {:ok, record} = Storage.fetch_run(store, run_id)
+      execution_id = Linkage.child_execution_id("execution_ecto_fanout", "call", index)
+      assert {:ok, record} = Storage.fetch_execution(store, execution_id)
       assert record.status == status, "index #{index} was #{record.status}, not #{status}"
     end
   end
 
   defp start_parent(store) do
     driver = driver(store, @parent_source, fn "myapp:map", _params, _context -> :pending end)
-    {:ok, _run, _machine_state} = Driver.create(driver, "run_ecto_fanout")
+    {:ok, _execution, _machine_state} = Driver.create(driver, "execution_ecto_fanout")
     driver
   end
 
   defp finish_child(store, index, event) do
-    child_run_id = Linkage.child_run_id("run_ecto_fanout", "call", index)
+    child_execution_id = Linkage.child_execution_id("execution_ecto_fanout", "call", index)
 
-    assert {:ok, _run, _machine_state} =
-             Driver.send_event(child_driver(store), child_run_id, Event.external(event))
+    assert {:ok, _execution, _machine_state} =
+             Driver.send_event(child_driver(store), child_execution_id, Event.external(event))
 
     :ok
   end
@@ -198,7 +204,10 @@ defmodule StatifierPersistence.DriverFanoutEctoTest do
 
   defp reload_parent(store) do
     {:ok, parent_machine} = Statifier.compile(@parent_source)
-    {:ok, machine_state} = Storage.load_run_position(store, "run_ecto_fanout", parent_machine)
+
+    {:ok, machine_state} =
+      Storage.load_execution_position(store, "execution_ecto_fanout", parent_machine)
+
     machine_state
   end
 

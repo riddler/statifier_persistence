@@ -106,7 +106,7 @@ defmodule StatifierPersistence.Ecto.KeyGeneratorTest do
 
     # sabotage: @prefixes positions entry changed to "position" -> red (expects "pos_")
     test "keys carry the per-table prefix" do
-      for {table, prefix} <- [charts: "chart_", positions: "pos_", runs: "run_"] do
+      for {table, prefix} <- [charts: "chart_", positions: "pos_", runs: "exec_"] do
         {mod, fun, args} = KeyGenerator.UXID.autogenerate(table, [])
         key = apply(mod, fun, args)
         assert String.starts_with?(key, prefix)

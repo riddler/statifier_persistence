@@ -8,7 +8,7 @@ defmodule StatifierPersistence.DriverTest do
   alias StatifierPersistence.Storage.InMemory
 
   # One call, answered or refused, with a plain state on each side so the
-  # run stays active and its position stays readable either way.
+  # execution stays active and its position stays readable either way.
   @one_call_source """
   <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="calling">
       <state id="calling">
@@ -39,7 +39,7 @@ defmodule StatifierPersistence.DriverTest do
 
   # Two calls from one state, and a transition off the first that exits
   # it. The second answer is therefore for an invocation the chart has
-  # cancelled by the time its turn comes; `leaked` is where the run lands
+  # cancelled by the time its turn comes; `leaked` is where the execution lands
   # if it is delivered anyway.
   @two_calls_source """
   <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="calling">
@@ -66,7 +66,7 @@ defmodule StatifierPersistence.DriverTest do
   </scxml>
   """
 
-  # Waits for an external event before calling, so a run can be created,
+  # Waits for an external event before calling, so an execution can be created,
   # dropped, and picked up by a driver built in a later "process".
   @deferred_call_source """
   <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="idle">
@@ -105,7 +105,7 @@ defmodule StatifierPersistence.DriverTest do
 
   describe "create/3" do
     # Sabotage: forced `advance/6` down its discard branch (`if false`) -
-    # no answer was ever stepped and the run stayed in "calling".
+    # no answer was ever stepped and the execution stayed in "calling".
     test "performs the chart's call and steps the answer back in", %{store: store} do
       test_pid = self()
 
@@ -117,22 +117,22 @@ defmodule StatifierPersistence.DriverTest do
           end
         )
 
-      assert {:ok, run, machine_state} = Driver.create(driver, "run_1")
+      assert {:ok, execution, machine_state} = Driver.create(driver, "execution_1")
 
-      assert run.status == :active
+      assert execution.status == :active
       assert leaves(machine_state) == ["approved"]
       assert_received {:dispatched, "myapp:authorize", params, context}
       assert params == %{"amount" => 100}
-      assert context.run_id == "run_1"
+      assert context.execution_id == "execution_1"
     end
 
     # Sabotage: misspelled `create_opts/2`'s `:initialize` key - the snapshot
-    # never reached the core, no <invoke> effect was emitted, and the run
+    # never reached the core, no <invoke> effect was emitted, and the execution
     # rested in "calling" with nothing dispatched.
     test "registers the driver's invoke types on the creating step", %{store: store} do
       driver = driver(store, @one_call_source, dispatch: fn _t, _p, _c -> {:ok, %{}} end)
 
-      assert {:ok, _run, machine_state} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, machine_state} = Driver.create(driver, "execution_1")
       assert leaves(machine_state) == ["approved"]
     end
 
@@ -146,7 +146,7 @@ defmodule StatifierPersistence.DriverTest do
           end
         )
 
-      assert {:ok, _run, machine_state} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, machine_state} = Driver.create(driver, "execution_1")
 
       assert leaves(machine_state) == ["refused"]
 
@@ -158,11 +158,11 @@ defmodule StatifierPersistence.DriverTest do
     end
 
     # Sabotage: made `live?/2` return true unconditionally - the discarded
-    # answer was delivered and the run landed in "leaked".
+    # answer was delivered and the execution landed in "leaked".
     test "discards an answer whose invocation the chart has cancelled", %{store: store} do
       driver = driver(store, @two_calls_source, dispatch: fn _t, _p, _c -> {:ok, %{}} end)
 
-      assert {:ok, _run, machine_state} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, machine_state} = Driver.create(driver, "execution_1")
       assert leaves(machine_state) == ["settled"]
     end
 
@@ -176,7 +176,7 @@ defmodule StatifierPersistence.DriverTest do
           max_turns: 3
         )
 
-      assert {:error, {:turns_exhausted, 3}} = Driver.create(driver, "run_1")
+      assert {:error, {:turns_exhausted, 3}} = Driver.create(driver, "execution_1")
     end
 
     # Sabotage: made `observe/3` skip the host executor - nothing arrived
@@ -190,27 +190,27 @@ defmodule StatifierPersistence.DriverTest do
           effects: fn effect, _context -> send(test_pid, {:effect, effect}) && :ok end
         )
 
-      assert {:ok, _run, _machine_state} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, _machine_state} = Driver.create(driver, "execution_1")
       assert_received {:effect, {:invoke, _payload}}
     end
   end
 
   describe "send_event/4" do
     # Sabotage: had `send_event/4` pass `[]` instead of the drained answers
-    # to `advance/6` - the run rested in "calling" and this went red.
-    test "drives a resumed run to quiescence with the original origin", %{store: store} do
+    # to `advance/6` - the execution rested in "calling" and this went red.
+    test "drives a resumed execution to quiescence with the original origin", %{store: store} do
       opened = driver(store, @deferred_call_source, dispatch: fn _t, _p, _c -> {:ok, %{}} end)
 
-      assert {:ok, _run, machine_state} =
-               Driver.create(opened, "run_1", initialize: [session_id: "sess_first"])
+      assert {:ok, _execution, machine_state} =
+               Driver.create(opened, "execution_1", initialize: [session_id: "sess_first"])
 
       assert leaves(machine_state) == ["idle"]
 
       # A driver built after the fact, as a cold node would build one.
       resumed = driver(store, @deferred_call_source, dispatch: fn _t, _p, _c -> {:ok, %{}} end)
 
-      assert {:ok, _run, machine_state} =
-               Driver.send_event(resumed, "run_1", Event.external("go"))
+      assert {:ok, _execution, machine_state} =
+               Driver.send_event(resumed, "execution_1", Event.external("go"))
 
       assert leaves(machine_state) == ["approved"]
       assert machine_state.datamodel["_event"]["origin"] == "#_scxml_sess_first"
@@ -219,7 +219,7 @@ defmodule StatifierPersistence.DriverTest do
     # Sabotage: made `advance/6`'s no-answers clause return `{:error, :bug}`
     # instead of the step's own result - the discard stopped being what a
     # drive hands back.
-    test "returns a terminal run's discard without dispatching", %{store: store} do
+    test "returns a terminal execution's discard without dispatching", %{store: store} do
       test_pid = self()
 
       driver =
@@ -230,13 +230,16 @@ defmodule StatifierPersistence.DriverTest do
           end
         )
 
-      assert {:ok, _run, _machine_state} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, _machine_state} = Driver.create(driver, "execution_1")
       assert_received :dispatched
 
-      {:ok, _run} = StatifierPersistence.Runs.fail(store, "run_1", "host:stopped")
+      {:ok, _execution} =
+        StatifierPersistence.Executions.fail(store, "execution_1", "host:stopped")
 
-      assert {:discarded, run} = Driver.send_event(driver, "run_1", Event.external("go"))
-      assert run.status == :failed
+      assert {:discarded, execution} =
+               Driver.send_event(driver, "execution_1", Event.external("go"))
+
+      assert execution.status == :failed
       refute_received :dispatched
     end
   end
@@ -244,13 +247,13 @@ defmodule StatifierPersistence.DriverTest do
   describe "done_invocation/5 and failed_invocation/5" do
     # Sabotage: had `perform/5`'s `:pending` arm fall through to
     # `buffer/4` with `{:done, :pending}` - the drive answered a call
-    # nobody had made and the run left "calling".
-    test "a pending call rests the run with the invocation live", %{store: store} do
+    # nobody had made and the execution left "calling".
+    test "a pending call rests the execution with the invocation live", %{store: store} do
       driver = driver(store, @one_call_source, dispatch: fn _t, _p, _c -> :pending end)
 
-      assert {:ok, run, machine_state} = Driver.create(driver, "run_1")
+      assert {:ok, execution, machine_state} = Driver.create(driver, "execution_1")
 
-      assert run.status == :active
+      assert execution.status == :active
       assert leaves(machine_state) == ["calling"]
       assert Map.values(machine_state.active_invocations) == ["call"]
     end
@@ -269,28 +272,30 @@ defmodule StatifierPersistence.DriverTest do
           end
         )
 
-      assert {:ok, _run, _machine_state} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, _machine_state} = Driver.create(driver, "execution_1")
 
       assert_received {:context, context}
       assert context.invoke_id == "call"
-      assert context.run_id == "run_1"
+      assert context.execution_id == "execution_1"
     end
 
     # Sabotage: made `late_answer/3` return `:discard` unconditionally -
-    # the answer never reached the chart and the run stayed in "calling".
+    # the answer never reached the chart and the execution stayed in "calling".
     test "steps a late done answer back into the chart", %{store: store} do
       driver = driver(store, @one_call_source, dispatch: fn _t, _p, _c -> :pending end)
 
-      assert {:ok, _run, _machine_state} =
-               Driver.create(driver, "run_1", initialize: [session_id: "sess_first"])
+      assert {:ok, _execution, _machine_state} =
+               Driver.create(driver, "execution_1", initialize: [session_id: "sess_first"])
 
       # A driver built after the fact, as the answering job's node builds one.
       answering = driver(store, @one_call_source, dispatch: fn _t, _p, _c -> :pending end)
 
-      assert {:ok, run, machine_state} =
-               Driver.done_invocation(answering, "run_1", "call", %{"authorization" => "auth_1"})
+      assert {:ok, execution, machine_state} =
+               Driver.done_invocation(answering, "execution_1", "call", %{
+                 "authorization" => "auth_1"
+               })
 
-      assert run.status == :active
+      assert execution.status == :active
       assert leaves(machine_state) == ["approved"]
       assert machine_state.datamodel["_event"]["name"] == "done.invoke.call"
       assert machine_state.datamodel["_event"]["origin"] == "#_scxml_sess_first"
@@ -303,10 +308,13 @@ defmodule StatifierPersistence.DriverTest do
     test "steps a late permanent failure back in as error.communication", %{store: store} do
       driver = driver(store, @one_call_source, dispatch: fn _t, _p, _c -> :pending end)
 
-      assert {:ok, _run, _machine_state} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, _machine_state} = Driver.create(driver, "execution_1")
 
-      assert {:ok, _run, machine_state} =
-               Driver.failed_invocation(driver, "run_1", "call", reason: "declined", attempts: 3)
+      assert {:ok, _execution, machine_state} =
+               Driver.failed_invocation(driver, "execution_1", "call",
+                 reason: "declined",
+                 attempts: 3
+               )
 
       assert leaves(machine_state) == ["refused"]
 
@@ -318,16 +326,18 @@ defmodule StatifierPersistence.DriverTest do
     end
 
     # Sabotage: narrowed `step_tail/6`'s terminal guard to `[:completed]` -
-    # the abandoned run was loaded and stepped, and the answer reached a
-    # run the host had already ended.
-    test "discards a late answer to a run the host abandoned", %{store: store} do
+    # the abandoned execution was loaded and stepped, and the answer reached a
+    # execution the host had already ended.
+    test "discards a late answer to an execution the host abandoned", %{store: store} do
       driver = driver(store, @one_call_source, dispatch: fn _t, _p, _c -> :pending end)
 
-      assert {:ok, _run, _machine_state} = Driver.create(driver, "run_1")
-      {:ok, _run} = StatifierPersistence.Runs.fail(store, "run_1", "host:stopped")
+      assert {:ok, _execution, _machine_state} = Driver.create(driver, "execution_1")
 
-      assert {:discarded, run} = Driver.done_invocation(driver, "run_1", "call", %{})
-      assert run.status == :failed
+      {:ok, _execution} =
+        StatifierPersistence.Executions.fail(store, "execution_1", "host:stopped")
+
+      assert {:discarded, execution} = Driver.done_invocation(driver, "execution_1", "call", %{})
+      assert execution.status == :failed
     end
   end
 
@@ -346,7 +356,7 @@ defmodule StatifierPersistence.DriverTest do
           end
         )
 
-      assert {:ok, _run, _machine_state} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, _machine_state} = Driver.create(driver, "execution_1")
 
       assert_received {:dispatched, context}
 
@@ -371,26 +381,26 @@ defmodule StatifierPersistence.DriverTest do
           end
         )
 
-      assert {:ok, _run, _machine_state} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, _machine_state} = Driver.create(driver, "execution_1")
 
       assert_received {:dispatched, context}
       assert context.invoke_id == "call"
       assert context.invoke_id == context.invoke.invoke_id
-      assert context.run_id == "run_1"
+      assert context.execution_id == "execution_1"
       assert is_binary(context.content_hash)
     end
   end
 
   # ADR-0008's `after_step:` amendment (2026-09-08), the ordinary drive's
-  # half. The parent-answer half - clause 2's sentence about the run id
-  # being the run that was *stepped* - is in `DriverSubchartTest`, where
+  # half. The parent-answer half - clause 2's sentence about the execution id
+  # being the execution that was *stepped* - is in `DriverSubchartTest`, where
   # the linked-child fixtures are.
   describe "after_step:" do
     # Sabotage: deleted the `|> fire_after_step(...)` from `create/3`,
     # leaving the one in the private `step/5` - two reports instead of
     # three and this went red on the count (and the cases below it with
     # it, each on its own first report). Verified red, reverted.
-    test "fires once per step of a drive, with the driven run's id", %{store: store} do
+    test "fires once per step of a drive, with the driven execution's id", %{store: store} do
       test_pid = self()
 
       driver =
@@ -399,18 +409,18 @@ defmodule StatifierPersistence.DriverTest do
           after_step: reporter(test_pid)
         )
 
-      assert {:ok, run, _machine_state} = Driver.create(driver, "run_1")
-      assert run.status == :completed
+      assert {:ok, execution, _machine_state} = Driver.create(driver, "execution_1")
+      assert execution.status == :completed
 
       reported = reported()
 
       assert length(reported) == 3
 
-      assert Enum.map(reported, fn {run_id, _ms, _effects} -> run_id end) ==
-               List.duplicate("run_1", 3)
+      assert Enum.map(reported, fn {execution_id, _ms, _effects} -> execution_id end) ==
+               List.duplicate("execution_1", 3)
     end
 
-    # Sabotage: had `Runs.persist_tail/7` report `executable` rather than
+    # Sabotage: had `Executions.persist_tail/7` report `executable` rather than
     # the list it was handed - the `{:done, _}` assertion went red while
     # the count above stayed green, which is the whole distinction clause
     # 1 draws. Verified red, reverted.
@@ -424,9 +434,9 @@ defmodule StatifierPersistence.DriverTest do
           after_step: reporter(test_pid)
         )
 
-      assert {:ok, _run, _machine_state} = Driver.create(driver, "run_1")
+      assert {:ok, _execution, _machine_state} = Driver.create(driver, "execution_1")
 
-      {_run_id, _machine_state, effects} = List.last(reported())
+      {_execution_id, _machine_state, effects} = List.last(reported())
 
       assert Enum.any?(effects, &match?({:done, _payload}, &1))
       refute Enum.any?(executed(), &match?({:done, _payload}, &1))
@@ -439,13 +449,13 @@ defmodule StatifierPersistence.DriverTest do
       driver =
         driver(store, @three_step_source,
           dispatch: fn _type, _params, _context -> {:ok, %{}} end,
-          after_step: fn _run_id, _machine_state, _effects -> raise "boom" end
+          after_step: fn _execution_id, _machine_state, _effects -> raise "boom" end
         )
 
-      assert_raise RuntimeError, "boom", fn -> Driver.create(driver, "run_1") end
+      assert_raise RuntimeError, "boom", fn -> Driver.create(driver, "execution_1") end
     end
 
-    # Sabotage: had `Runs.step_tail/7`'s terminal-run arm report `[]`
+    # Sabotage: had `Executions.step_tail/7`'s terminal-execution arm report `[]`
     # through the `step_reporter:` before discarding, AND relaxed
     # `Driver.report/4`'s `{:ok, _, _}` head to a catch-all - the discard
     # fired the host's callback and this went red. Both halves were
@@ -456,17 +466,21 @@ defmodule StatifierPersistence.DriverTest do
       test_pid = self()
       quiet = driver(store, @one_call_source, dispatch: fn _t, _p, _c -> {:ok, %{}} end)
 
-      assert {:ok, _run, _machine_state} = Driver.create(quiet, "run_1")
-      {:ok, _run} = StatifierPersistence.Runs.fail(store, "run_1", "host:stopped")
+      assert {:ok, _execution, _machine_state} = Driver.create(quiet, "execution_1")
+
+      {:ok, _execution} =
+        StatifierPersistence.Executions.fail(store, "execution_1", "host:stopped")
 
       reporting = %{quiet | after_step: reporter(test_pid)}
 
-      assert {:discarded, run} = Driver.send_event(reporting, "run_1", Event.external("go"))
-      assert run.status == :failed
+      assert {:discarded, execution} =
+               Driver.send_event(reporting, "execution_1", Event.external("go"))
+
+      assert execution.status == :failed
       assert reported() == []
     end
 
-    # Sabotage: made `run_opts/3` write the `step_reporter:` option
+    # Sabotage: made `execution_opts/3` write the `step_reporter:` option
     # unconditionally - a driver that reports nothing still filled this
     # process's mailbox with the reporter's messages and the bare
     # `refute_received` went red. Verified red, reverted.
@@ -477,26 +491,26 @@ defmodule StatifierPersistence.DriverTest do
       quiet = driver(store, @three_step_source, dispatch: dispatch)
       loud = %{quiet | after_step: reporter(test_pid)}
 
-      assert {:ok, quiet_run, quiet_state} =
-               Driver.create(quiet, "run_quiet", initialize: [session_id: "sess"])
+      assert {:ok, quiet_execution, quiet_state} =
+               Driver.create(quiet, "execution_quiet", initialize: [session_id: "sess"])
 
       # Not just "no report": a driver with no callback puts nothing in
       # the mailbox at all, because it asks for no `step_reporter:`.
       refute_received _anything
 
-      assert {:ok, loud_run, loud_state} =
-               Driver.create(loud, "run_loud", initialize: [session_id: "sess"])
+      assert {:ok, loud_execution, loud_state} =
+               Driver.create(loud, "execution_loud", initialize: [session_id: "sess"])
 
       assert length(reported()) == 3
-      assert quiet_run.status == loud_run.status
-      assert quiet_run.donedata == loud_run.donedata
+      assert quiet_execution.status == loud_execution.status
+      assert quiet_execution.donedata == loud_execution.donedata
       assert quiet_state == loud_state
     end
 
     # The widening the amendment's closing section left open to this bead:
     # the driver's own default, outranked by a per-call `after_step:`.
     #
-    # Sabotage: had `run_opts/3` read `driver.after_step` rather than the
+    # Sabotage: had `execution_opts/3` read `driver.after_step` rather than the
     # effective callback when deciding whether to write a
     # `step_reporter:` - a per-call callback on a driver whose own is
     # `nil` reported nothing and this went red. Verified red, reverted.
@@ -504,16 +518,16 @@ defmodule StatifierPersistence.DriverTest do
       test_pid = self()
       driver = driver(store, @three_step_source, dispatch: fn _t, _p, _c -> {:ok, %{}} end)
 
-      assert {:ok, _run, _machine_state} =
-               Driver.create(driver, "run_1", after_step: reporter(test_pid))
+      assert {:ok, _execution, _machine_state} =
+               Driver.create(driver, "execution_1", after_step: reporter(test_pid))
 
       assert length(reported()) == 3
     end
   end
 
   defp reporter(test_pid) do
-    fn run_id, machine_state, effects ->
-      send(test_pid, {:after_step, run_id, machine_state, effects})
+    fn execution_id, machine_state, effects ->
+      send(test_pid, {:after_step, execution_id, machine_state, effects})
     end
   end
 
@@ -526,8 +540,8 @@ defmodule StatifierPersistence.DriverTest do
 
   defp reported(acc \\ []) do
     receive do
-      {:after_step, run_id, machine_state, effects} ->
-        reported([{run_id, machine_state, effects} | acc])
+      {:after_step, execution_id, machine_state, effects} ->
+        reported([{execution_id, machine_state, effects} | acc])
     after
       0 -> Enum.reverse(acc)
     end

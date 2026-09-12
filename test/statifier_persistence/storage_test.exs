@@ -29,13 +29,13 @@ defmodule StatifierPersistence.StorageTest do
     def fetch_position(_opts, _session_id), do: {:error, {:adapter, :boom}}
 
     @impl StatifierPersistence.Storage.Adapter
-    def insert_run(_opts, _run_record), do: {:error, {:adapter, :boom}}
+    def insert_execution(_opts, _execution_record), do: {:error, {:adapter, :boom}}
 
     @impl StatifierPersistence.Storage.Adapter
-    def fetch_run(_opts, _run_id), do: {:error, {:adapter, :boom}}
+    def fetch_execution(_opts, _execution_id), do: {:error, {:adapter, :boom}}
 
     @impl StatifierPersistence.Storage.Adapter
-    def update_run(_opts, _run_record), do: {:error, {:adapter, :boom}}
+    def update_execution(_opts, _execution_record), do: {:error, {:adapter, :boom}}
   end
 
   # The conformance suite (test/statifier_persistence/storage/in_memory_conformance_test.exs,
@@ -64,93 +64,115 @@ defmodule StatifierPersistence.StorageTest do
     assert {:error, {:adapter, :boom}} = Storage.new(FailingAdapter, [])
   end
 
-  # -- Run records: the facade arms Phase 2 adds ----------------------
+  # -- Execution records: the facade arms Phase 2 adds ----------------------
 
-  describe "run records" do
+  describe "execution records" do
     setup do
       {:ok, store} = Storage.new(InMemory, [])
       %{store: store}
     end
 
-    # sabotage: in Storage.insert_run/5, replace the
-    # store.adapter.insert_run(store.opts, run_record) call with a bare :ok
-    # that never writes -> red, fetch_run/2 below returned
-    # {:error, :run_not_found} instead of the record. Verified red,
+    # sabotage: in Storage.insert_execution/5, replace the
+    # store.adapter.insert_execution(store.opts, execution_record) call with a bare :ok
+    # that never writes -> red, fetch_execution/2 below returned
+    # {:error, :execution_not_found} instead of the record. Verified red,
     # reverted.
-    test "insert_run/5 and load_run_position/3: the guarded round trip", %{store: store} do
+    test "insert_execution/5 and load_execution_position/3: the guarded round trip", %{
+      store: store
+    } do
       {_source, machine} = Charts.chart_a()
 
       machine_state =
-        MachineState.new(machine, session_id: "sess_run_round_trip", datamodel: %{"count" => 1})
+        MachineState.new(machine,
+          session_id: "sess_execution_round_trip",
+          datamodel: %{"count" => 1}
+        )
 
-      assert :ok = Storage.insert_run(store, "run-round-trip", machine_state, :active)
+      assert :ok = Storage.insert_execution(store, "execution-round-trip", machine_state, :active)
 
-      assert {:ok, record} = Storage.fetch_run(store, "run-round-trip")
+      assert {:ok, record} = Storage.fetch_execution(store, "execution-round-trip")
       assert %{status: :active, failure: nil} = record
       assert record.content_hash == Machine.identity(machine).content_hash
 
-      assert {:ok, loaded} = Storage.load_run_position(store, "run-round-trip", machine)
+      assert {:ok, loaded} =
+               Storage.load_execution_position(store, "execution-round-trip", machine)
+
       assert loaded.configuration == machine_state.configuration
       assert loaded.datamodel == machine_state.datamodel
       assert loaded.status == machine_state.status
     end
 
-    # sabotage: in Storage.insert_run/5, replace the nil-identity refusal
+    # sabotage: in Storage.insert_execution/5, replace the nil-identity refusal
     # arm with a write of a dummy-identity record (content_hash "dummy",
     # empty identity_blob) -> red, this test's assertion that the insert is
     # refused failed (it returned :ok). Verified red, reverted.
-    test "insert_run/5 refuses an unidentified machine, and nothing is written", %{store: store} do
+    test "insert_execution/5 refuses an unidentified machine, and nothing is written", %{
+      store: store
+    } do
       machine_state =
-        MachineState.new(Charts.unidentified_machine(), session_id: "sess_run_unidentified")
+        MachineState.new(Charts.unidentified_machine(), session_id: "sess_execution_unidentified")
 
       assert {:error, :unidentified_chart} =
-               Storage.insert_run(store, "run-unidentified", machine_state, :active,
+               Storage.insert_execution(store, "execution-unidentified", machine_state, :active,
                  position: :skip
                )
 
-      assert {:error, :run_not_found} = Storage.fetch_run(store, "run-unidentified")
+      assert {:error, :execution_not_found} =
+               Storage.fetch_execution(store, "execution-unidentified")
     end
 
-    # sabotage: in Storage.update_run/5, replace the nil-identity refusal
+    # sabotage: in Storage.update_execution/5, replace the nil-identity refusal
     # arm with a fetch-and-overwrite of the stored record's status and
     # failure -> red, this test's assertion that the update is refused
     # failed (it returned :ok). Verified red, reverted.
-    test "update_run/5 refuses an unidentified machine", %{store: store} do
+    test "update_execution/5 refuses an unidentified machine", %{store: store} do
       {_source, machine} = Charts.chart_a()
-      machine_state = MachineState.new(machine, session_id: "sess_run_update_unidentified")
+      machine_state = MachineState.new(machine, session_id: "sess_execution_update_unidentified")
 
-      assert :ok = Storage.insert_run(store, "run-update-unidentified", machine_state, :active)
+      assert :ok =
+               Storage.insert_execution(
+                 store,
+                 "execution-update-unidentified",
+                 machine_state,
+                 :active
+               )
 
       unidentified_state =
         MachineState.new(Charts.unidentified_machine(),
-          session_id: "sess_run_update_unidentified"
+          session_id: "sess_execution_update_unidentified"
         )
 
       assert {:error, :unidentified_chart} =
-               Storage.update_run(store, "run-update-unidentified", unidentified_state, :failed,
+               Storage.update_execution(
+                 store,
+                 "execution-update-unidentified",
+                 unidentified_state,
+                 :failed,
                  position: :skip
                )
     end
 
-    # sabotage: in Storage.load_run_position/3, replace the whole with-chain
-    # (fetch_run -> precheck_identity/2 -> nil arm -> Position.from_binary/2)
-    # with a body that fetches the run record and unconditionally returns
+    # sabotage: in Storage.load_execution_position/3, replace the whole with-chain
+    # (fetch_execution -> precheck_identity/2 -> nil arm -> Position.from_binary/2)
+    # with a body that fetches the execution record and unconditionally returns
     # {:ok, MachineState.new(machine)} -> red, this test saw a plain
     # {:ok, _} instead of {:identity_mismatch, _, _} (the round-trip,
     # unidentified, and missing-position tests in this describe went red
     # under the same mutation). Verified red, reverted.
-    test "load_run_position/3 refuses a different chart revision, not raised", %{store: store} do
+    test "load_execution_position/3 refuses a different chart revision, not raised", %{
+      store: store
+    } do
       {_source_a, machine_a} = Charts.chart_a()
       {_source_b, machine_b} = Charts.chart_b()
 
       refute Identity.matches?(Machine.identity(machine_a), Machine.identity(machine_b))
 
-      machine_state = MachineState.new(machine_a, session_id: "sess_run_mismatch")
+      machine_state = MachineState.new(machine_a, session_id: "sess_execution_mismatch")
 
-      assert :ok = Storage.insert_run(store, "run-mismatch", machine_state, :active)
+      assert :ok = Storage.insert_execution(store, "execution-mismatch", machine_state, :active)
 
       assert {:error, {:identity_mismatch, expected, actual}} =
-               Storage.load_run_position(store, "run-mismatch", machine_b)
+               Storage.load_execution_position(store, "execution-mismatch", machine_b)
 
       assert expected.content_hash == Machine.identity(machine_a).content_hash
       assert actual.content_hash == Machine.identity(machine_b).content_hash
@@ -161,83 +183,94 @@ defmodule StatifierPersistence.StorageTest do
     # red, Identity.matches?/2 is total and this test saw an
     # {:identity_mismatch, _, nil} tuple instead of :unidentified_chart.
     # Verified red, reverted.
-    test "load_run_position/3 refuses an unidentified machine as :unidentified_chart", %{
+    test "load_execution_position/3 refuses an unidentified machine as :unidentified_chart", %{
       store: store
     } do
       {_source, machine} = Charts.chart_a()
-      machine_state = MachineState.new(machine, session_id: "sess_run_load_unidentified")
+      machine_state = MachineState.new(machine, session_id: "sess_execution_load_unidentified")
 
-      assert :ok = Storage.insert_run(store, "run-load-unidentified", machine_state, :active)
+      assert :ok =
+               Storage.insert_execution(
+                 store,
+                 "execution-load-unidentified",
+                 machine_state,
+                 :active
+               )
 
       assert {:error, :unidentified_chart} =
-               Storage.load_run_position(
+               Storage.load_execution_position(
                  store,
-                 "run-load-unidentified",
+                 "execution-load-unidentified",
                  Charts.unidentified_machine()
                )
     end
 
-    # sabotage: in Storage.load_run_position/3, change the nil
-    # position_blob arm to return {:error, :run_not_found} instead of
-    # :run_position_missing -> red, this test's pattern match on the
+    # sabotage: in Storage.load_execution_position/3, change the nil
+    # position_blob arm to return {:error, :execution_not_found} instead of
+    # :execution_position_missing -> red, this test's pattern match on the
     # dedicated arm saw the wrong error. Verified red, reverted.
-    test "load_run_position/3 reports :run_position_missing for a nil position_blob", %{
-      store: store
-    } do
+    test "load_execution_position/3 reports :execution_position_missing for a nil position_blob",
+         %{
+           store: store
+         } do
       {_source, machine} = Charts.chart_a()
-      machine_state = MachineState.new(machine, session_id: "sess_run_no_position")
+      machine_state = MachineState.new(machine, session_id: "sess_execution_no_position")
 
       assert :ok =
-               Storage.insert_run(store, "run-no-position", machine_state, :failed,
+               Storage.insert_execution(store, "execution-no-position", machine_state, :failed,
                  position: :skip,
                  failure: "budget_exhausted: 100 rounds"
                )
 
       assert {:ok, %{position_blob: nil, failure: "budget_exhausted: 100 rounds"}} =
-               Storage.fetch_run(store, "run-no-position")
+               Storage.fetch_execution(store, "execution-no-position")
 
-      assert {:error, :run_position_missing} =
-               Storage.load_run_position(store, "run-no-position", machine)
+      assert {:error, :execution_position_missing} =
+               Storage.load_execution_position(store, "execution-no-position", machine)
     end
 
     # sabotage: in Storage's private update_position_blob/4, change the
     # :skip clause to return {:ok, nil} instead of fetching the current
     # record and carrying its position_blob forward -> red, the equality
     # assertion on stored_blob below saw nil. Verified red, reverted.
-    test "update_run/5 under position: :skip carries the stored blob forward verbatim", %{
+    test "update_execution/5 under position: :skip carries the stored blob forward verbatim", %{
       store: store
     } do
       {_source, machine} = Charts.chart_a()
-      machine_state = MachineState.new(machine, session_id: "sess_run_skip_carry")
+      machine_state = MachineState.new(machine, session_id: "sess_execution_skip_carry")
 
-      assert :ok = Storage.insert_run(store, "run-skip-carry", machine_state, :active)
-      assert {:ok, %{position_blob: stored_blob}} = Storage.fetch_run(store, "run-skip-carry")
+      assert :ok = Storage.insert_execution(store, "execution-skip-carry", machine_state, :active)
+
+      assert {:ok, %{position_blob: stored_blob}} =
+               Storage.fetch_execution(store, "execution-skip-carry")
+
       assert is_binary(stored_blob)
 
       assert :ok =
-               Storage.update_run(store, "run-skip-carry", machine_state, :failed,
+               Storage.update_execution(store, "execution-skip-carry", machine_state, :failed,
                  position: :skip,
                  failure: "abandoned: operator request"
                )
 
-      assert {:ok, updated} = Storage.fetch_run(store, "run-skip-carry")
+      assert {:ok, updated} = Storage.fetch_execution(store, "execution-skip-carry")
       assert %{status: :failed, failure: "abandoned: operator request"} = updated
       assert updated.position_blob == stored_blob
     end
 
     # sabotage: two mutations together, because either layer alone
     # backstops the other - update_position_blob/4's :skip clause returning
-    # {:ok, nil} without the fetch AND InMemory.update_run/2 upserting on a
-    # missing run_id -> red, the update below returned :ok instead of
-    # {:error, :run_not_found}. Verified red, both reverted.
-    test "update_run/5 under position: :skip reports :run_not_found for an unknown run", %{
-      store: store
-    } do
+    # {:ok, nil} without the fetch AND InMemory.update_execution/2 upserting on a
+    # missing execution_id -> red, the update below returned :ok instead of
+    # {:error, :execution_not_found}. Verified red, both reverted.
+    test "update_execution/5 under position: :skip reports :execution_not_found for an unknown execution",
+         %{
+           store: store
+         } do
       {_source, machine} = Charts.chart_a()
-      machine_state = MachineState.new(machine, session_id: "sess_run_skip_missing")
+      machine_state = MachineState.new(machine, session_id: "sess_execution_skip_missing")
 
-      assert {:error, :run_not_found} =
-               Storage.update_run(store, "run-skip-missing", machine_state, :failed,
+      assert {:error, :execution_not_found} =
+               Storage.update_execution(store, "execution-skip-missing", machine_state, :failed,
                  position: :skip
                )
     end
@@ -245,11 +278,11 @@ defmodule StatifierPersistence.StorageTest do
 
   # -- Child listing: the facade arms Phase 1 adds (ADR-0008 decision 5) --
 
-  describe "list_runs_by_metadata/2 and child_listing_supported?/1" do
+  describe "list_executions_by_metadata/2 and child_listing_supported?/1" do
     # sabotage: in Storage.child_listing_supported?/1, drop the
     # function_exported?/3 check and always return true -> red, this
     # assertion against NoLockAdapter (which exports no
-    # list_runs_by_metadata/2) saw true instead of false. Verified red,
+    # list_executions_by_metadata/2) saw true instead of false. Verified red,
     # reverted.
     test "child_listing_supported?/1 answers both ways" do
       {:ok, supporting_store} = Storage.new(InMemory, [])
@@ -259,7 +292,7 @@ defmodule StatifierPersistence.StorageTest do
       refute Storage.child_listing_supported?(unsupporting_store)
     end
 
-    # sabotage: in Storage.list_runs_by_metadata/2, drop the
+    # sabotage: in Storage.list_executions_by_metadata/2, drop the
     # child_listing_supported?/1 branch and always delegate to the adapter
     # -> red, this call against NoLockAdapter raised UndefinedFunctionError
     # instead of returning the refusal tuple. Verified red, reverted.
@@ -267,12 +300,12 @@ defmodule StatifierPersistence.StorageTest do
       {:ok, store} = Storage.new(NoLockAdapter, [])
 
       assert {:error, :child_listing_unsupported} =
-               Storage.list_runs_by_metadata(store, %{"tenant_id" => "acct_conformance"})
+               Storage.list_executions_by_metadata(store, %{"tenant_id" => "acct_conformance"})
     end
 
-    # sabotage: in Storage.list_runs_by_metadata/2, replace the delegation
+    # sabotage: in Storage.list_executions_by_metadata/2, replace the delegation
     # with a hardcoded {:ok, []} -> red, the returned list below would come
-    # back empty instead of naming the inserted run. Verified red, reverted.
+    # back empty instead of naming the inserted execution. Verified red, reverted.
     test "delegates to the adapter for one that exports the callback" do
       {:ok, store} = Storage.new(InMemory, [])
       {_source, machine} = Charts.chart_a()
@@ -280,66 +313,77 @@ defmodule StatifierPersistence.StorageTest do
       machine_state =
         MachineState.new(machine, session_id: "sess_child_listing_delegate")
 
-      metadata = %{"statifier_persistence" => %{"parent_run_id" => "run-parent"}}
+      metadata = %{"statifier_persistence" => %{"parent_execution_id" => "execution-parent"}}
 
       assert :ok =
-               Storage.insert_run(store, "run-child-delegate", machine_state, :active,
+               Storage.insert_execution(store, "execution-child-delegate", machine_state, :active,
                  metadata: metadata
                )
 
-      assert {:ok, [record]} = Storage.list_runs_by_metadata(store, metadata)
-      assert record.run_id == "run-child-delegate"
+      assert {:ok, [record]} = Storage.list_executions_by_metadata(store, metadata)
+      assert record.execution_id == "execution-child-delegate"
     end
   end
 
   # -- The fan-out facade arms (sp-t57, rulings C3 and C5) ---------------
 
   describe "the outcome payload and the status projection" do
-    # sabotage: in Storage.run_outcome_supported?/1, drop the
+    # sabotage: in Storage.execution_outcome_supported?/1, drop the
     # function_exported?/3 check and always call the adapter -> red, the
     # NoLockAdapter assertion raised UndefinedFunctionError instead of
     # answering false. Verified red, reverted.
-    test "run_outcome_supported?/1 and run_states_supported?/1 answer both ways" do
+    test "execution_outcome_supported?/1 and execution_states_supported?/1 answer both ways" do
       {:ok, supporting_store} = Storage.new(InMemory, [])
       {:ok, unsupporting_store} = Storage.new(NoLockAdapter, [])
 
-      assert Storage.run_outcome_supported?(supporting_store)
-      assert Storage.run_states_supported?(supporting_store)
-      refute Storage.run_outcome_supported?(unsupporting_store)
-      refute Storage.run_states_supported?(unsupporting_store)
+      assert Storage.execution_outcome_supported?(supporting_store)
+      assert Storage.execution_states_supported?(supporting_store)
+      refute Storage.execution_outcome_supported?(unsupporting_store)
+      refute Storage.execution_states_supported?(unsupporting_store)
     end
 
-    # sabotage: in Storage.list_run_states_by_metadata/2, drop the
-    # run_states_supported?/1 branch and always delegate -> red, this call
+    # sabotage: in Storage.list_execution_states_by_metadata/2, drop the
+    # execution_states_supported?/1 branch and always delegate -> red, this call
     # against NoLockAdapter raised UndefinedFunctionError instead of
     # returning the refusal tuple. Verified red, reverted.
-    test "list_run_states_by_metadata/2 refuses an adapter that does not export the callback" do
+    test "list_execution_states_by_metadata/2 refuses an adapter that does not export the callback" do
       {:ok, store} = Storage.new(NoLockAdapter, [])
 
-      assert {:error, :run_states_unsupported} =
-               Storage.list_run_states_by_metadata(store, %{"tenant_id" => "acct_conformance"})
+      assert {:error, :execution_states_unsupported} =
+               Storage.list_execution_states_by_metadata(store, %{
+                 "tenant_id" => "acct_conformance"
+               })
     end
 
-    # sabotage: in Storage.update_run_status/4, drop the outcome_blob key
+    # sabotage: in Storage.update_execution_status/4, drop the outcome_blob key
     # from the record it builds -> red, the fetched record's outcome_blob
     # came back nil instead of the written payload. Verified red, reverted.
-    test "update_run_status/4 writes an outcome payload and a later status-only write keeps it" do
+    test "update_execution_status/4 writes an outcome payload and a later status-only write keeps it" do
       {:ok, store} = Storage.new(InMemory, [])
       {_source, machine} = Charts.chart_a()
       machine_state = MachineState.new(machine, session_id: "sess_outcome_write")
 
-      assert :ok = Storage.insert_run(store, "run-outcome-write", machine_state, :active)
+      assert :ok =
+               Storage.insert_execution(store, "execution-outcome-write", machine_state, :active)
 
       assert :ok =
-               Storage.update_run_status(store, "run-outcome-write", :completed,
+               Storage.update_execution_status(store, "execution-outcome-write", :completed,
                  outcome_blob: <<7, 7>>
                )
 
-      assert {:ok, %{outcome_blob: <<7, 7>>}} = Storage.fetch_run(store, "run-outcome-write")
+      assert {:ok, %{outcome_blob: <<7, 7>>}} =
+               Storage.fetch_execution(store, "execution-outcome-write")
 
-      assert :ok = Storage.update_run(store, "run-outcome-write", machine_state, :completed)
+      assert :ok =
+               Storage.update_execution(
+                 store,
+                 "execution-outcome-write",
+                 machine_state,
+                 :completed
+               )
 
-      assert {:ok, %{outcome_blob: <<7, 7>>}} = Storage.fetch_run(store, "run-outcome-write")
+      assert {:ok, %{outcome_blob: <<7, 7>>}} =
+               Storage.fetch_execution(store, "execution-outcome-write")
     end
   end
 end

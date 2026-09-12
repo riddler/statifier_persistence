@@ -6,7 +6,7 @@ defmodule StatifierPersistence.Test.RecordingExecutor do
 
   Registered under this module's own name, so `execute/2` needs no handle
   beyond the behaviour's own arguments. Start it per test with
-  `start_supervised!/1`; tests within one module run serially, so the
+  `start_supervised!/1`; tests within one module execution serially, so the
   single name never collides.
   """
 

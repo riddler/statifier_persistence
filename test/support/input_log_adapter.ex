@@ -11,7 +11,7 @@ defmodule StatifierPersistence.Test.InputLogAdapter do
   adapter that exports none of the three callbacks to prove the "an
   adapter without them skips the cases" half of the contract - `InMemory`
   is that adapter. This one is its opposite number, so the input-log cases
-  run without a database beside the Ecto adapter that runs them with one.
+  execution without a database beside the Ecto adapter that runs them with one.
 
   The cap comes from `init/1`'s `input_log_cap:` option, exactly as it
   does on `StatifierPersistence.Storage.Ecto` (ADR-0010 decision 6):
@@ -51,28 +51,28 @@ defmodule StatifierPersistence.Test.InputLogAdapter do
   defdelegate fetch_position(opts, session_id), to: InMemory
 
   @impl true
-  defdelegate insert_run(opts, run_record), to: InMemory
+  defdelegate insert_execution(opts, execution_record), to: InMemory
 
   @impl true
-  defdelegate fetch_run(opts, run_id), to: InMemory
+  defdelegate fetch_execution(opts, execution_id), to: InMemory
 
   @impl true
-  defdelegate update_run(opts, run_record), to: InMemory
+  defdelegate update_execution(opts, execution_record), to: InMemory
 
   @impl true
   defdelegate supports_metadata?(opts), to: InMemory
 
   @impl true
-  defdelegate list_runs_by_metadata(opts, metadata), to: InMemory
+  defdelegate list_executions_by_metadata(opts, metadata), to: InMemory
 
   @impl true
-  defdelegate list_run_states_by_metadata(opts, metadata), to: InMemory
+  defdelegate list_execution_states_by_metadata(opts, metadata), to: InMemory
 
   @impl true
-  defdelegate supports_run_outcome?(opts), to: InMemory
+  defdelegate supports_execution_outcome?(opts), to: InMemory
 
   @impl true
-  defdelegate lock_run(opts, run_id, fun), to: InMemory
+  defdelegate lock_execution(opts, execution_id, fun), to: InMemory
 
   @impl true
   @spec supports_input_log?(Adapter.opts()) :: boolean()
@@ -88,39 +88,39 @@ defmodule StatifierPersistence.Test.InputLogAdapter do
   twice.
   """
   @impl true
-  @spec append_input(Adapter.opts(), Adapter.run_id(), Adapter.input_record()) ::
+  @spec append_input(Adapter.opts(), Adapter.execution_id(), Adapter.input_record()) ::
           {:ok, Adapter.seq()} | {:error, Adapter.error()}
-  def append_input(opts, run_id, %{door: door, input_blob: input_blob}) do
+  def append_input(opts, execution_id, %{door: door, input_blob: input_blob}) do
     cap = Keyword.fetch!(opts, :input_log_cap)
 
     Agent.get_and_update(log_pid(opts), fn logs ->
-      entries = Map.get(logs, run_id, [])
+      entries = Map.get(logs, execution_id, [])
 
       case slot(entries, cap) do
         {:closed, _seq} ->
           {{:error, :input_log_full}, logs}
 
         {:marker, seq} ->
-          record = %{run_id: run_id, seq: seq, door: door, input_blob: nil}
-          {{:error, :input_log_full}, Map.put(logs, run_id, entries ++ [record])}
+          record = %{execution_id: execution_id, seq: seq, door: door, input_blob: nil}
+          {{:error, :input_log_full}, Map.put(logs, execution_id, entries ++ [record])}
 
         {:open, seq} ->
-          record = %{run_id: run_id, seq: seq, door: door, input_blob: input_blob}
-          {{:ok, seq}, Map.put(logs, run_id, entries ++ [record])}
+          record = %{execution_id: execution_id, seq: seq, door: door, input_blob: input_blob}
+          {{:ok, seq}, Map.put(logs, execution_id, entries ++ [record])}
       end
     end)
   end
 
   @doc """
-  Lists `run_id`'s whole log in ascending `seq`, or `:run_not_found` for a
-  run this adapter never stored.
+  Lists `execution_id`'s whole log in ascending `seq`, or `:execution_not_found` for a
+  execution this adapter never stored.
   """
   @impl true
-  @spec list_inputs(Adapter.opts(), Adapter.run_id()) ::
+  @spec list_inputs(Adapter.opts(), Adapter.execution_id()) ::
           {:ok, [Adapter.input_record()]} | {:error, Adapter.error()}
-  def list_inputs(opts, run_id) do
-    with {:ok, _run_record} <- InMemory.fetch_run(opts, run_id) do
-      {:ok, Agent.get(log_pid(opts), &Map.get(&1, run_id, []))}
+  def list_inputs(opts, execution_id) do
+    with {:ok, _execution_record} <- InMemory.fetch_execution(opts, execution_id) do
+      {:ok, Agent.get(log_pid(opts), &Map.get(&1, execution_id, []))}
     end
   end
 

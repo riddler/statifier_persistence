@@ -34,7 +34,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
   body, so the first write against the adapter is always the running
   test's own.
 
-  That matters because ExUnit runs `setup` callbacks in the order they are
+  That matters because ExUnit executions `setup` callbacks in the order they are
   defined, and the ones this template registers are defined where you write
   `use`. A host whose adapter needs a per-test binding established before
   any write - a session parameter, a connection-scoped setting, a sandbox
@@ -57,7 +57,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
   `context.store` is already open, and already isolated, by the time it is
   called.
 
-  The optional run `metadata` map (ADR-0006) is treated differently again:
+  The optional execution `metadata` map (ADR-0006) is treated differently again:
   its cases are generated for every adapter and assert the answer this
   adapter gives - a round trip when it declares support through
   `c:StatifierPersistence.Storage.Adapter.supports_metadata?/1`, a
@@ -65,24 +65,24 @@ defmodule StatifierPersistence.Testing.StorageConformance do
   Refusing is conformance; silently dropping the map is not, and that is
   the failure these cases exist to catch.
 
-  The optional `c:StatifierPersistence.Storage.Adapter.lock_run/3` gets the
+  The optional `c:StatifierPersistence.Storage.Adapter.lock_execution/3` gets the
   same treatment at generation time: when the adapter under test exports
-  it, the suite generates the per-run lock tests (mutual exclusion of two
+  it, the suite generates the per-execution lock tests (mutual exclusion of two
   concurrent bodies, release after a raising fun); when it does not, they
   are not generated at all - exporting the callback is what opts an
   adapter into its contract.
 
   Opting out by not exporting is the whole story for an adapter written
   from scratch. It is not the whole story for
-  `StatifierPersistence.Storage.Ecto`, which exports `lock_run/3`,
-  `list_runs_by_metadata/2` and `list_run_states_by_metadata/2` for every
+  `StatifierPersistence.Storage.Ecto`, which exports `lock_execution/3`,
+  `list_executions_by_metadata/2` and `list_execution_states_by_metadata/2` for every
   Ecto backend but implements all three in Postgres-only SQL
   (`pg_advisory_xact_lock` plus `FOR UPDATE`; `jsonb` containment). Point
   that adapter at a backend that is not Postgres and the four cases those
   three callbacks generate are generated and fail: the lock pair on SQL
   the backend does not parse, the two listings on the refusal they answer
-  with instead. `list_runs_by_metadata/2` and
-  `list_run_states_by_metadata/2` consult `supports_metadata?/1` before
+  with instead. `list_executions_by_metadata/2` and
+  `list_execution_states_by_metadata/2` consult `supports_metadata?/1` before
   they issue anything, so off Postgres they return
   `{:error, :metadata_unsupported}` rather than raising (sp-4eo) - a
   cleaner answer, but not the list these two cases assert over, so their
@@ -93,11 +93,11 @@ defmodule StatifierPersistence.Testing.StorageConformance do
 
       mix test --exclude postgres
 
-  Nothing else in the suite is tagged: every remaining case runs, and a
-  green run with four excluded is the honest report of what that backend
+  Nothing else in the suite is tagged: every remaining case executions, and a
+  green execution with four excluded is the honest report of what that backend
   supports. It is honest only alongside actually declining what the tag
   excludes - `serialization:` pointed at the host's own strategy rather
-  than the adapter's `lock_run/3`, and no reliance on the child listings.
+  than the adapter's `lock_execution/3`, and no reliance on the child listings.
   Excluding the tag while still routing serialization through a lock the
   backend cannot honor hides a failure instead of opting out of a
   contract. `docs/non-postgres-backends.md` in this package is the guide:
@@ -286,15 +286,15 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         assert fetched.position_blob == position_blob
       end
 
-      # -- Adapter level: run records ------------------------------------
+      # -- Adapter level: execution records ------------------------------------
 
-      # sabotage: in the adapter under test's insert_run/2, store under a
-      # fixed key instead of run_id -> red, fetch_run/2 below returned
-      # {:error, :run_not_found} instead of the round-tripped record.
+      # sabotage: in the adapter under test's insert_execution/2, store under a
+      # fixed key instead of execution_id -> red, fetch_execution/2 below returned
+      # {:error, :execution_not_found} instead of the round-tripped record.
       # Verified red, reverted.
-      test "adapter: round-trips an inserted run byte-identically", %{store: store} do
-        run_record = %{
-          run_id: "run-conformance-a",
+      test "adapter: round-trips an inserted execution byte-identically", %{store: store} do
+        execution_record = %{
+          execution_id: "execution-conformance-a",
           status: :active,
           content_hash: "sha256:conformance-chart-a",
           identity_blob: <<9, 0, 8, 255, 7>>,
@@ -304,20 +304,21 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           outcome_blob: nil
         }
 
-        assert :ok = @conformance_adapter.insert_run(store.opts, run_record)
+        assert :ok = @conformance_adapter.insert_execution(store.opts, execution_record)
 
-        assert {:ok, ^run_record} =
-                 @conformance_adapter.fetch_run(store.opts, "run-conformance-a")
+        assert {:ok, ^execution_record} =
+                 @conformance_adapter.fetch_execution(store.opts, "execution-conformance-a")
       end
 
-      # sabotage: in the adapter under test's insert_run/2, drop the
+      # sabotage: in the adapter under test's insert_execution/2, drop the
       # exists-check and always write with :ok -> red, the second insert
-      # below returned :ok instead of {:error, :run_exists}. Verified red
+      # below returned :ok instead of {:error, :execution_exists}. Verified red
       # (together with InMemoryTest's concurrent-insert test under this one
       # mutation), reverted.
-      test "adapter: insert_run/2 refuses a duplicate run_id with :run_exists", %{store: store} do
-        run_record = %{
-          run_id: "run-conformance-duplicate",
+      test "adapter: insert_execution/2 refuses a duplicate execution_id with :execution_exists",
+           %{store: store} do
+        execution_record = %{
+          execution_id: "execution-conformance-duplicate",
           status: :active,
           content_hash: "sha256:conformance-chart-a",
           identity_blob: <<1, 2, 3>>,
@@ -327,22 +328,29 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           outcome_blob: nil
         }
 
-        assert :ok = @conformance_adapter.insert_run(store.opts, run_record)
+        assert :ok = @conformance_adapter.insert_execution(store.opts, execution_record)
 
-        assert {:error, :run_exists} =
-                 @conformance_adapter.insert_run(store.opts, %{run_record | status: :failed})
+        assert {:error, :execution_exists} =
+                 @conformance_adapter.insert_execution(store.opts, %{
+                   execution_record
+                   | status: :failed
+                 })
 
-        assert {:ok, ^run_record} =
-                 @conformance_adapter.fetch_run(store.opts, "run-conformance-duplicate")
+        assert {:ok, ^execution_record} =
+                 @conformance_adapter.fetch_execution(
+                   store.opts,
+                   "execution-conformance-duplicate"
+                 )
       end
 
-      # sabotage: in the adapter under test's update_run/2, upsert on a
-      # missing run_id (write and return :ok) instead of refusing -> red,
-      # the update below returned :ok instead of {:error, :run_not_found}.
+      # sabotage: in the adapter under test's update_execution/2, upsert on a
+      # missing execution_id (write and return :ok) instead of refusing -> red,
+      # the update below returned :ok instead of {:error, :execution_not_found}.
       # Verified red, reverted.
-      test "adapter: update_run/2 reports :run_not_found for an unknown run_id", %{store: store} do
-        run_record = %{
-          run_id: "run-conformance-update-missing",
+      test "adapter: update_execution/2 reports :execution_not_found for an unknown execution_id",
+           %{store: store} do
+        execution_record = %{
+          execution_id: "execution-conformance-update-missing",
           status: :failed,
           content_hash: "sha256:conformance-chart-a",
           identity_blob: <<1, 2, 3>>,
@@ -352,31 +360,35 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           outcome_blob: nil
         }
 
-        assert {:error, :run_not_found} =
-                 @conformance_adapter.update_run(store.opts, run_record)
+        assert {:error, :execution_not_found} =
+                 @conformance_adapter.update_execution(store.opts, execution_record)
 
-        assert {:error, :run_not_found} =
-                 @conformance_adapter.fetch_run(store.opts, "run-conformance-update-missing")
+        assert {:error, :execution_not_found} =
+                 @conformance_adapter.fetch_execution(
+                   store.opts,
+                   "execution-conformance-update-missing"
+                 )
       end
 
-      # sabotage: in the adapter under test's fetch_run/2, return
-      # {:ok, a_placeholder_record} instead of :run_not_found for an
+      # sabotage: in the adapter under test's fetch_execution/2, return
+      # {:ok, a_placeholder_record} instead of :execution_not_found for an
       # unknown id -> red, this test's pattern match on
-      # {:error, :run_not_found} saw the placeholder. Verified red,
+      # {:error, :execution_not_found} saw the placeholder. Verified red,
       # reverted.
-      test "adapter: fetch_run/2 reports :run_not_found for an unknown run_id", %{store: store} do
-        assert {:error, :run_not_found} =
-                 @conformance_adapter.fetch_run(store.opts, "run-conformance-missing")
+      test "adapter: fetch_execution/2 reports :execution_not_found for an unknown execution_id",
+           %{store: store} do
+        assert {:error, :execution_not_found} =
+                 @conformance_adapter.fetch_execution(store.opts, "execution-conformance-missing")
       end
 
-      # sabotage: in the adapter under test's insert_run/2, normalize a nil
+      # sabotage: in the adapter under test's insert_execution/2, normalize a nil
       # position_blob to <<>> before storing -> red, the equality assertion
       # on nil below saw "" instead. This is the arm ADR-0004 decision 1
       # makes nullable; an adapter must not paper over it. Verified red,
       # reverted.
       test "adapter: a nil position_blob round-trips as nil", %{store: store} do
-        run_record = %{
-          run_id: "run-conformance-nil-blob",
+        execution_record = %{
+          execution_id: "execution-conformance-nil-blob",
           status: :failed,
           content_hash: "sha256:conformance-chart-a",
           identity_blob: <<1, 2, 3>>,
@@ -386,24 +398,28 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           outcome_blob: nil
         }
 
-        assert :ok = @conformance_adapter.insert_run(store.opts, run_record)
+        assert :ok = @conformance_adapter.insert_execution(store.opts, execution_record)
 
         assert {:ok, fetched} =
-                 @conformance_adapter.fetch_run(store.opts, "run-conformance-nil-blob")
+                 @conformance_adapter.fetch_execution(
+                   store.opts,
+                   "execution-conformance-nil-blob"
+                 )
 
         assert fetched.position_blob == nil
       end
 
-      # sabotage: in the adapter under test's update_run/2, keep the stored
+      # sabotage: in the adapter under test's update_execution/2, keep the stored
       # record's status and failure instead of overwriting them (a partial
       # update) -> red, the fetch below returned the inserted :active/nil
       # pair instead of the updated :failed/reason pair. Verified red,
       # reverted.
-      test "adapter: update_run/2 overwrites the full record, status and failure verbatim", %{
-        store: store
-      } do
+      test "adapter: update_execution/2 overwrites the full record, status and failure verbatim",
+           %{
+             store: store
+           } do
         inserted = %{
-          run_id: "run-conformance-overwrite",
+          execution_id: "execution-conformance-overwrite",
           status: :active,
           content_hash: "sha256:conformance-chart-a",
           identity_blob: <<1, 2, 3>>,
@@ -420,11 +436,14 @@ defmodule StatifierPersistence.Testing.StorageConformance do
             failure: "abandoned: operator request"
         }
 
-        assert :ok = @conformance_adapter.insert_run(store.opts, inserted)
-        assert :ok = @conformance_adapter.update_run(store.opts, updated)
+        assert :ok = @conformance_adapter.insert_execution(store.opts, inserted)
+        assert :ok = @conformance_adapter.update_execution(store.opts, updated)
 
         assert {:ok, ^updated} =
-                 @conformance_adapter.fetch_run(store.opts, "run-conformance-overwrite")
+                 @conformance_adapter.fetch_execution(
+                   store.opts,
+                   "execution-conformance-overwrite"
+                 )
       end
 
       # sabotage: in StatifierPersistence.Storage.Ecto's @statuses list,
@@ -432,10 +451,10 @@ defmodule StatifierPersistence.Testing.StorageConformance do
       # encode_status(:cancelled) has no matching clause and this test's
       # insert raises FunctionClauseError instead of storing the record.
       # Verified red on the Ecto conformance suite, reverted.
-      test "adapter: a :cancelled run round-trips through insert_run/2 and update_run/2 with its position untouched",
+      test "adapter: a :cancelled execution round-trips through insert_execution/2 and update_execution/2 with its position untouched",
            %{store: store} do
         inserted = %{
-          run_id: "run-conformance-cancelled",
+          execution_id: "execution-conformance-cancelled",
           status: :cancelled,
           content_hash: "sha256:conformance-chart-a",
           identity_blob: <<1, 2, 3>>,
@@ -445,16 +464,22 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           outcome_blob: nil
         }
 
-        assert :ok = @conformance_adapter.insert_run(store.opts, inserted)
+        assert :ok = @conformance_adapter.insert_execution(store.opts, inserted)
 
         assert {:ok, ^inserted} =
-                 @conformance_adapter.fetch_run(store.opts, "run-conformance-cancelled")
+                 @conformance_adapter.fetch_execution(
+                   store.opts,
+                   "execution-conformance-cancelled"
+                 )
 
         updated = %{inserted | status: :cancelled}
-        assert :ok = @conformance_adapter.update_run(store.opts, updated)
+        assert :ok = @conformance_adapter.update_execution(store.opts, updated)
 
         assert {:ok, fetched} =
-                 @conformance_adapter.fetch_run(store.opts, "run-conformance-cancelled")
+                 @conformance_adapter.fetch_execution(
+                   store.opts,
+                   "execution-conformance-cancelled"
+                 )
 
         assert fetched.status == :cancelled
         assert fetched.position_blob == inserted.position_blob
@@ -463,22 +488,22 @@ defmodule StatifierPersistence.Testing.StorageConformance do
       # -- Adapter level: the optional child enumeration (ADR-0008) -----
       #
       # Generated only when the adapter under test exports the optional
-      # list_runs_by_metadata/2 - the same opt-in-by-export shape lock_run/3
+      # list_executions_by_metadata/2 - the same opt-in-by-export shape lock_execution/3
       # gets above.
 
       if Code.ensure_loaded?(conformance_adapter) and
-           function_exported?(conformance_adapter, :list_runs_by_metadata, 2) do
+           function_exported?(conformance_adapter, :list_executions_by_metadata, 2) do
         # sabotage: in StatifierPersistence.Storage.InMemory's private
         # contains?/2, drop the is_map/is_map guarded clause that recurses
         # into a nested map value, leaving only the plain == comparison ->
-        # red, the nested-match assertion below found no runs instead of
+        # red, the nested-match assertion below found no executions instead of
         # the one whose nested map contains the given pair. Verified red on
         # the InMemory conformance suite, reverted.
         @tag :postgres
-        test "adapter: list_runs_by_metadata/2 matches a nested map by containment and excludes the rest",
+        test "adapter: list_executions_by_metadata/2 matches a nested map by containment and excludes the rest",
              %{store: store} do
           linked = %{
-            run_id: "run-conformance-child-linked",
+            execution_id: "execution-conformance-child-linked",
             status: :active,
             content_hash: "sha256:conformance-chart-a",
             identity_blob: <<1, 2, 3>>,
@@ -486,7 +511,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
             failure: nil,
             metadata: %{
               "statifier_persistence" => %{
-                "parent_run_id" => "run-conformance-parent",
+                "parent_execution_id" => "execution-conformance-parent",
                 "invoke_id" => "call"
               }
             },
@@ -495,27 +520,29 @@ defmodule StatifierPersistence.Testing.StorageConformance do
 
           other_parent = %{
             linked
-            | run_id: "run-conformance-child-other-parent",
+            | execution_id: "execution-conformance-child-other-parent",
               metadata: %{
                 "statifier_persistence" => %{
-                  "parent_run_id" => "run-conformance-other-parent",
+                  "parent_execution_id" => "execution-conformance-other-parent",
                   "invoke_id" => "call"
                 }
               }
           }
 
-          unrelated = %{linked | run_id: "run-conformance-unrelated", metadata: %{}}
+          unrelated = %{linked | execution_id: "execution-conformance-unrelated", metadata: %{}}
 
-          assert :ok = @conformance_adapter.insert_run(store.opts, linked)
-          assert :ok = @conformance_adapter.insert_run(store.opts, other_parent)
-          assert :ok = @conformance_adapter.insert_run(store.opts, unrelated)
+          assert :ok = @conformance_adapter.insert_execution(store.opts, linked)
+          assert :ok = @conformance_adapter.insert_execution(store.opts, other_parent)
+          assert :ok = @conformance_adapter.insert_execution(store.opts, unrelated)
 
           assert {:ok, matches} =
-                   @conformance_adapter.list_runs_by_metadata(store.opts, %{
-                     "statifier_persistence" => %{"parent_run_id" => "run-conformance-parent"}
+                   @conformance_adapter.list_executions_by_metadata(store.opts, %{
+                     "statifier_persistence" => %{
+                       "parent_execution_id" => "execution-conformance-parent"
+                     }
                    })
 
-          assert Enum.map(matches, & &1.run_id) == ["run-conformance-child-linked"]
+          assert Enum.map(matches, & &1.execution_id) == ["execution-conformance-child-linked"]
         end
       end
 
@@ -529,7 +556,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
       # rather than starting one it could not settle.
 
       if Code.ensure_loaded?(conformance_adapter) and
-           function_exported?(conformance_adapter, :supports_run_outcome?, 1) do
+           function_exported?(conformance_adapter, :supports_execution_outcome?, 1) do
         # sabotage: in StatifierPersistence.Storage.InMemory's private
         # carry_forward/2, drop the `|| Map.get(stored, :outcome_blob)`
         # fallback so a nil in the given record overwrites the stored one
@@ -541,7 +568,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         test "adapter: outcome_blob round-trips and survives a later status-only update",
              %{store: store} do
           inserted = %{
-            run_id: "run-conformance-outcome",
+            execution_id: "execution-conformance-outcome",
             status: :active,
             content_hash: "sha256:conformance-chart-a",
             identity_blob: <<1, 2, 3>>,
@@ -551,25 +578,34 @@ defmodule StatifierPersistence.Testing.StorageConformance do
             outcome_blob: nil
           }
 
-          assert :ok = @conformance_adapter.insert_run(store.opts, inserted)
+          assert :ok = @conformance_adapter.insert_execution(store.opts, inserted)
 
           assert {:ok, %{outcome_blob: nil}} =
-                   @conformance_adapter.fetch_run(store.opts, "run-conformance-outcome")
+                   @conformance_adapter.fetch_execution(
+                     store.opts,
+                     "execution-conformance-outcome"
+                   )
 
           answered = %{inserted | status: :completed, outcome_blob: <<42, 43>>}
-          assert :ok = @conformance_adapter.update_run(store.opts, answered)
+          assert :ok = @conformance_adapter.update_execution(store.opts, answered)
 
           assert {:ok, %{outcome_blob: <<42, 43>>}} =
-                   @conformance_adapter.fetch_run(store.opts, "run-conformance-outcome")
+                   @conformance_adapter.fetch_execution(
+                     store.opts,
+                     "execution-conformance-outcome"
+                   )
 
           # A later write carrying no payload must not erase the stored one:
           # nil means unchanged, which is what keeps an ordinary step of an
-          # already-answered run from clearing its answer.
+          # already-answered execution from clearing its answer.
           stepped = %{answered | position_blob: <<9, 9>>, outcome_blob: nil}
-          assert :ok = @conformance_adapter.update_run(store.opts, stepped)
+          assert :ok = @conformance_adapter.update_execution(store.opts, stepped)
 
           assert {:ok, fetched} =
-                   @conformance_adapter.fetch_run(store.opts, "run-conformance-outcome")
+                   @conformance_adapter.fetch_execution(
+                     store.opts,
+                     "execution-conformance-outcome"
+                   )
 
           assert fetched.outcome_blob == <<42, 43>>
           assert fetched.position_blob == <<9, 9>>
@@ -577,20 +613,20 @@ defmodule StatifierPersistence.Testing.StorageConformance do
       end
 
       if Code.ensure_loaded?(conformance_adapter) and
-           function_exported?(conformance_adapter, :list_run_states_by_metadata, 2) do
+           function_exported?(conformance_adapter, :list_execution_states_by_metadata, 2) do
         # sabotage: in StatifierPersistence.Storage.InMemory's private
-        # to_run_state/1, read "child_index" off the whole metadata map
+        # to_execution_state/1, read "child_index" off the whole metadata map
         # instead of the reserved sub-map -> red, every projected row came
         # back with a nil child_index instead of 0 and 1. Verified red on
         # the InMemory conformance suite, reverted. Also verified on the
         # Ecto side: replace the child_index fragment with NULL::text ->
         # red the same way.
         @tag :postgres
-        test "adapter: list_run_states_by_metadata/2 projects id, status and index without blobs",
+        test "adapter: list_execution_states_by_metadata/2 projects id, status and index without blobs",
              %{store: store} do
           child = fn index, status ->
             %{
-              run_id: "run-conformance-state-#{index}",
+              execution_id: "execution-conformance-state-#{index}",
               status: status,
               content_hash: "sha256:conformance-chart-a",
               identity_blob: <<1, 2, 3>>,
@@ -598,7 +634,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
               failure: nil,
               metadata: %{
                 "statifier_persistence" => %{
-                  "parent_run_id" => "run-conformance-state-parent",
+                  "parent_execution_id" => "execution-conformance-state-parent",
                   "invoke_id" => "call",
                   "child_index" => index,
                   "content_hash" => "sha256:conformance-chart-a",
@@ -610,20 +646,28 @@ defmodule StatifierPersistence.Testing.StorageConformance do
             }
           end
 
-          assert :ok = @conformance_adapter.insert_run(store.opts, child.(0, :completed))
-          assert :ok = @conformance_adapter.insert_run(store.opts, child.(1, :active))
+          assert :ok = @conformance_adapter.insert_execution(store.opts, child.(0, :completed))
+          assert :ok = @conformance_adapter.insert_execution(store.opts, child.(1, :active))
 
           assert {:ok, states} =
-                   @conformance_adapter.list_run_states_by_metadata(store.opts, %{
+                   @conformance_adapter.list_execution_states_by_metadata(store.opts, %{
                      "statifier_persistence" => %{
-                       "parent_run_id" => "run-conformance-state-parent",
+                       "parent_execution_id" => "execution-conformance-state-parent",
                        "invoke_id" => "call"
                      }
                    })
 
           assert Enum.sort_by(states, & &1.child_index) == [
-                   %{run_id: "run-conformance-state-0", status: :completed, child_index: 0},
-                   %{run_id: "run-conformance-state-1", status: :active, child_index: 1}
+                   %{
+                     execution_id: "execution-conformance-state-0",
+                     status: :completed,
+                     child_index: 0
+                   },
+                   %{
+                     execution_id: "execution-conformance-state-1",
+                     status: :active,
+                     child_index: 1
+                   }
                  ]
 
           # The rows are a projection, not records: no blob ever rides one.
@@ -634,7 +678,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         end
       end
 
-      # -- Adapter level: the optional run metadata (ADR-0006) -----------
+      # -- Adapter level: the optional execution metadata (ADR-0006) -----------
       #
       # A conformant adapter either round-trips a non-empty metadata map or
       # refuses it at open; what it must never do is accept the create and
@@ -643,7 +687,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
       # `Storage.metadata_supported?/1`, so the suite tests the answer this
       # adapter actually gives rather than only the supporting one.
 
-      # sabotage: in StatifierPersistence.Storage.insert_run/5, drop the
+      # sabotage: in StatifierPersistence.Storage.insert_execution/5, drop the
       # metadata from the built record (pass %{} instead of the validated
       # option) -> red for a supporting adapter: the fetched record's
       # metadata came back %{} instead of the two pairs. And in the same
@@ -662,21 +706,25 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         metadata = %{"tenant_id" => "acct_conformance", "processor_account_id" => "pacct_4471"}
 
         result =
-          Storage.insert_run(store, "run-conformance-metadata", machine_state, :active,
+          Storage.insert_execution(
+            store,
+            "execution-conformance-metadata",
+            machine_state,
+            :active,
             metadata: metadata
           )
 
         if Storage.metadata_supported?(store) do
           assert :ok = result
 
-          assert {:ok, fetched} = Storage.fetch_run(store, "run-conformance-metadata")
+          assert {:ok, fetched} = Storage.fetch_execution(store, "execution-conformance-metadata")
           assert fetched.metadata == metadata
         else
           assert {:error, :metadata_unsupported} = result
 
           # Refusal is at open, so nothing was written either.
-          assert {:error, :run_not_found} =
-                   Storage.fetch_run(store, "run-conformance-metadata")
+          assert {:error, :execution_not_found} =
+                   Storage.fetch_execution(store, "execution-conformance-metadata")
         end
       end
 
@@ -695,15 +743,22 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           Statifier.MachineState.new(machine, session_id: "sess_conformance_no_metadata")
 
         assert :ok =
-                 Storage.insert_run(store, "run-conformance-no-metadata", machine_state, :active)
+                 Storage.insert_execution(
+                   store,
+                   "execution-conformance-no-metadata",
+                   machine_state,
+                   :active
+                 )
 
-        assert {:ok, fetched} = Storage.fetch_run(store, "run-conformance-no-metadata")
+        assert {:ok, fetched} =
+                 Storage.fetch_execution(store, "execution-conformance-no-metadata")
+
         assert fetched.metadata == %{}
       end
 
-      # sabotage: in the adapter under test's update_run/2, write the given
+      # sabotage: in the adapter under test's update_execution/2, write the given
       # record's metadata instead of carrying the stored map forward (for
-      # the Ecto adapter, add metadata: run_record.metadata to the set:
+      # the Ecto adapter, add metadata: execution_record.metadata to the set:
       # list; for InMemory, drop the Map.put that restores it) -> red, the
       # fetch below saw %{} where the created map should still be.
       # Verified red on both, reverted.
@@ -719,45 +774,49 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           metadata = %{"tenant_id" => "acct_conformance_update"}
 
           assert :ok =
-                   Storage.insert_run(
+                   Storage.insert_execution(
                      store,
-                     "run-conformance-metadata-update",
+                     "execution-conformance-metadata-update",
                      machine_state,
                      :active,
                      metadata: metadata
                    )
 
           assert :ok =
-                   Storage.update_run(
+                   Storage.update_execution(
                      store,
-                     "run-conformance-metadata-update",
+                     "execution-conformance-metadata-update",
                      machine_state,
                      :completed
                    )
 
-          assert {:ok, fetched} = Storage.fetch_run(store, "run-conformance-metadata-update")
+          assert {:ok, fetched} =
+                   Storage.fetch_execution(store, "execution-conformance-metadata-update")
+
           assert fetched.status == :completed
           assert fetched.metadata == metadata
         end
       end
 
-      # -- Adapter level: the optional per-run lock ----------------------
+      # -- Adapter level: the optional per-execution lock ----------------------
       #
       # Generated only when the adapter under test exports the optional
-      # lock_run/3 (ADR-0003 amendment 2026-08-22, ADR-0004 decision 5) -
+      # lock_execution/3 (ADR-0003 amendment 2026-08-22, ADR-0004 decision 5) -
       # the same shape as the isolate/1 hook: exporting the callback is
       # what opts an adapter into its contract.
 
       if Code.ensure_loaded?(conformance_adapter) and
-           function_exported?(conformance_adapter, :lock_run, 3) do
-        # sabotage: in the adapter under test's lock_run/3, run fun without
+           function_exported?(conformance_adapter, :lock_execution, 3) do
+        # sabotage: in the adapter under test's lock_execution/3, execution fun without
         # the exclusion ({:ok, fun.()} with no acquire) -> red, the two
         # sleeping bodies below interleave and the enter/enter prefix
         # breaks the paired pattern. Verified red (together with
-        # RunsTest's concurrent-step test under this one mutation),
+        # ExecutionsTest's concurrent-step test under this one mutation),
         # reverted.
         @tag :postgres
-        test "adapter: lock_run/3 never overlaps two bodies for one run_id", %{store: store} do
+        test "adapter: lock_execution/3 never overlaps two bodies for one execution_id", %{
+          store: store
+        } do
           {:ok, events} = Agent.start_link(fn -> [] end)
 
           body = fn tag ->
@@ -772,7 +831,11 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           tasks =
             for tag <- [:first, :second] do
               Task.async(fn ->
-                @conformance_adapter.lock_run(store.opts, "run-conformance-lock", body.(tag))
+                @conformance_adapter.lock_execution(
+                  store.opts,
+                  "execution-conformance-lock",
+                  body.(tag)
+                )
               end)
             end
 
@@ -783,24 +846,32 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           assert one != other
         end
 
-        # sabotage: in the adapter under test's lock_run/3, release only on
+        # sabotage: in the adapter under test's lock_execution/3, release only on
         # a normal return (move the release out of the after block, after
         # {:ok, fun.()}) -> red, the raise leaks the lock and the
         # reacquisition below times out (Task.yield returns nil). Verified
         # red, reverted.
         @tag :postgres
-        test "adapter: lock_run/3 releases the lock after a raising fun", %{store: store} do
+        test "adapter: lock_execution/3 releases the lock after a raising fun", %{store: store} do
           assert_raise RuntimeError, "lock body boom", fn ->
-            @conformance_adapter.lock_run(store.opts, "run-conformance-lock-raise", fn ->
-              raise "lock body boom"
-            end)
+            @conformance_adapter.lock_execution(
+              store.opts,
+              "execution-conformance-lock-raise",
+              fn ->
+                raise "lock body boom"
+              end
+            )
           end
 
           task =
             Task.async(fn ->
-              @conformance_adapter.lock_run(store.opts, "run-conformance-lock-raise", fn ->
-                :reacquired
-              end)
+              @conformance_adapter.lock_execution(
+                store.opts,
+                "execution-conformance-lock-raise",
+                fn ->
+                  :reacquired
+                end
+              )
             end)
 
           assert {:ok, {:ok, :reacquired}} = Task.yield(task, 1_000) || Task.shutdown(task)
@@ -823,7 +894,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
       if Code.ensure_loaded?(conformance_adapter) and
            function_exported?(conformance_adapter, :append_input, 3) do
         # sabotage: in the adapter under test's append_input/3, assign a
-        # fixed ordinal (0) instead of the run's next one -> red on both
+        # fixed ordinal (0) instead of the execution's next one -> red on both
         # adapters and on the SQLite mirror of this case, on the second
         # append: the in-memory one handed out 0 twice, and the Ecto one
         # returned {:adapter, :seq_conflict} off the V05 unique index.
@@ -831,19 +902,19 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # reverted.
         test "adapter: append_input/3 assigns dense ordinals from zero and lists them in order",
              %{store: store} do
-          run_id = input_log_run(store, "run-conformance-input-log")
+          execution_id = input_log_execution(store, "execution-conformance-input-log")
 
           for {door, index} <- Enum.with_index(["create", "step", "done_invocation"]) do
             assert {:ok, ^index} =
-                     @conformance_adapter.append_input(store.opts, run_id, %{
-                       run_id: run_id,
+                     @conformance_adapter.append_input(store.opts, execution_id, %{
+                       execution_id: execution_id,
                        seq: 0,
                        door: door,
                        input_blob: <<index>>
                      })
           end
 
-          assert {:ok, entries} = @conformance_adapter.list_inputs(store.opts, run_id)
+          assert {:ok, entries} = @conformance_adapter.list_inputs(store.opts, execution_id)
 
           assert Enum.map(entries, & &1.seq) == [0, 1, 2]
           assert Enum.map(entries, & &1.door) == ["create", "step", "done_invocation"]
@@ -851,28 +922,31 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         end
 
         # sabotage: in the adapter under test's list_inputs/2, drop the
-        # run-existence check -> red, this case asserted :run_not_found and
+        # execution-existence check -> red, this case asserted :execution_not_found and
         # got `{:ok, []}`. Verified red on both conformance modules and on
         # the SQLite mirror (three failures, exactly this case), reverted.
-        test "adapter: list_inputs/2 reports :run_not_found for an unknown run_id", %{
+        test "adapter: list_inputs/2 reports :execution_not_found for an unknown execution_id", %{
           store: store
         } do
-          assert {:error, :run_not_found} =
-                   @conformance_adapter.list_inputs(store.opts, "run-conformance-absent-log")
+          assert {:error, :execution_not_found} =
+                   @conformance_adapter.list_inputs(
+                     store.opts,
+                     "execution-conformance-absent-log"
+                   )
         end
 
         # sabotage: in the adapter under test's list_inputs/2, return every
-        # stored entry rather than the given run's -> red on both
-        # conformance modules and on the SQLite mirror: one run's log came
+        # stored entry rather than the given execution's -> red on both
+        # conformance modules and on the SQLite mirror: one execution's log came
         # back carrying the other's entries. Verified red, reverted.
-        test "adapter: two runs' logs never see each other's entries", %{store: store} do
-          run_id = input_log_run(store, "run-conformance-input-log")
-          other = input_log_run(store, "run-conformance-input-log-other")
+        test "adapter: two executions' logs never see each other's entries", %{store: store} do
+          execution_id = input_log_execution(store, "execution-conformance-input-log")
+          other = input_log_execution(store, "execution-conformance-input-log-other")
 
           for door <- ["step", "step"] do
             assert {:ok, _seq} =
-                     @conformance_adapter.append_input(store.opts, run_id, %{
-                       run_id: run_id,
+                     @conformance_adapter.append_input(store.opts, execution_id, %{
+                       execution_id: execution_id,
                        seq: 0,
                        door: door,
                        input_blob: <<1>>
@@ -881,13 +955,13 @@ defmodule StatifierPersistence.Testing.StorageConformance do
 
           assert {:ok, 0} =
                    @conformance_adapter.append_input(store.opts, other, %{
-                     run_id: other,
+                     execution_id: other,
                      seq: 0,
                      door: "answer_parent",
                      input_blob: <<2>>
                    })
 
-          assert {:ok, mine} = @conformance_adapter.list_inputs(store.opts, run_id)
+          assert {:ok, mine} = @conformance_adapter.list_inputs(store.opts, execution_id)
           assert {:ok, theirs} = @conformance_adapter.list_inputs(store.opts, other)
 
           assert Enum.map(mine, & &1.seq) == [0, 1]
@@ -897,7 +971,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # sabotage: in the adapter under test's `:marker` arm, return
         # {:error, :input_log_full} without inserting the marker row -> red
         # on both conformance modules, on the SQLite mirror, and on
-        # RunsInputLogTest's cap case: the log ended one entry short and
+        # ExecutionsInputLogTest's cap case: the log ended one entry short and
         # its last entry was a real input rather than the nil-blob marker.
         # Verified red, reverted.
         test "adapter: a cap of n admits n - 1 inputs, then closes the log with a marker" do
@@ -909,11 +983,11 @@ defmodule StatifierPersistence.Testing.StorageConformance do
             :ok = apply(@conformance_adapter, :isolate, [capped.opts])
           end
 
-          run_id = input_log_run(capped, "run-conformance-input-log-cap")
+          execution_id = input_log_execution(capped, "execution-conformance-input-log-cap")
 
           append = fn ->
-            @conformance_adapter.append_input(capped.opts, run_id, %{
-              run_id: run_id,
+            @conformance_adapter.append_input(capped.opts, execution_id, %{
+              execution_id: execution_id,
               seq: 0,
               door: "step",
               input_blob: <<7>>
@@ -925,14 +999,14 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           assert {:error, :input_log_full} = append.()
           assert {:error, :input_log_full} = append.()
 
-          assert {:ok, entries} = @conformance_adapter.list_inputs(capped.opts, run_id)
+          assert {:ok, entries} = @conformance_adapter.list_inputs(capped.opts, execution_id)
 
           assert Enum.map(entries, &{&1.seq, &1.input_blob}) ==
                    [{0, <<7>>}, {1, <<7>>}, {2, nil}]
 
-          # The refusal is the log's, never the run's: the record is
+          # The refusal is the log's, never the execution's: the record is
           # untouched and still writable (ADR-0010 decision 5).
-          assert {:ok, %{status: :active}} = Storage.fetch_run(capped, run_id)
+          assert {:ok, %{status: :active}} = Storage.fetch_execution(capped, execution_id)
         end
 
         # sabotage: in StatifierPersistence.Storage.append_input/4, encode
@@ -943,7 +1017,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         test "facade: an event round-trips through the log equal to what was delivered", %{
           store: store
         } do
-          run_id = input_log_run(store, "run-conformance-input-log")
+          execution_id = input_log_execution(store, "execution-conformance-input-log")
 
           event = %Statifier.Event{
             name: "done.invoke.call",
@@ -957,28 +1031,28 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           }
 
           assert Storage.input_log_supported?(store)
-          assert {:ok, 0} = Storage.append_input(store, run_id, :done_invocation, event)
+          assert {:ok, 0} = Storage.append_input(store, execution_id, :done_invocation, event)
 
-          assert {:ok, [entry]} = Storage.list_inputs(store, run_id)
+          assert {:ok, [entry]} = Storage.list_inputs(store, execution_id)
           assert entry.seq == 0
           assert entry.door == "done_invocation"
           assert entry.event == event
         end
 
-        # Inserts a run for the log to hang off, since list_inputs/2 is
-        # required to distinguish an empty log from a run that is not
+        # Inserts an execution for the log to hang off, since list_inputs/2 is
+        # required to distinguish an empty log from an execution that is not
         # there. Called from inside each case that needs it rather than
         # from a `setup`, so nothing this template registers writes before
         # a host's own callbacks have run (see the moduledoc).
-        defp input_log_run(store, run_id) do
+        defp input_log_execution(store, execution_id) do
           {_source, machine} = Charts.chart_a()
 
           machine_state =
-            Statifier.MachineState.new(machine, session_id: "sess_" <> run_id)
+            Statifier.MachineState.new(machine, session_id: "sess_" <> execution_id)
 
-          :ok = Storage.insert_run(store, run_id, machine_state, :active)
+          :ok = Storage.insert_execution(store, execution_id, machine_state, :active)
 
-          run_id
+          execution_id
         end
       end
 

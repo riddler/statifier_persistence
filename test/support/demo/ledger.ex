@@ -12,12 +12,12 @@ defmodule StatifierPersistence.Demo.Ledger do
 
   Four tables:
 
-  - `timers` - pending durable sends, keyed by `{run_id, ordinal}`
+  - `timers` - pending durable sends, keyed by `{execution_id, ordinal}`
     (st-ADR-0059's dedup key: the counter triple and the content position
     alone cannot tell two `<foreach>` iterations of the same `<send>` apart,
     only `ordinal` can).
   - `invocations` - open/closed async invocations, keyed by
-    `{run_id, invoke_id}`.
+    `{execution_id, invoke_id}`.
   - `side_effects` - the append-only idempotency ledger: `arm_timer/3` and
     `record_invocation/3` each append here only the first time their key is
     seen, which is what lets a test assert "no duplicate side effects"
@@ -29,10 +29,10 @@ defmodule StatifierPersistence.Demo.Ledger do
 
   use Agent
 
-  @type run_id :: String.t()
+  @type execution_id :: String.t()
   @type ordinal :: pos_integer()
-  @type timer_key :: {run_id(), ordinal()}
-  @type invocation_key :: {run_id(), String.t()}
+  @type timer_key :: {execution_id(), ordinal()}
+  @type invocation_key :: {execution_id(), String.t()}
   @type timer_row :: %{
           send_id: String.t() | nil,
           event: String.t(),
@@ -66,13 +66,13 @@ defmodule StatifierPersistence.Demo.Ledger do
   end
 
   @doc """
-  Records a pending durable timer, idempotent on `{run_id, timer.ordinal}`.
+  Records a pending durable timer, idempotent on `{execution_id, timer.ordinal}`.
   A second call under the same key (a re-driven step, or `recover/1`
   re-arming) leaves the stored row and the `side_effects` log untouched.
   """
-  @spec arm_timer(t(), run_id(), timer_row()) :: :ok
-  def arm_timer(ledger, run_id, %{ordinal: ordinal} = row) do
-    key = {run_id, ordinal}
+  @spec arm_timer(t(), execution_id(), timer_row()) :: :ok
+  def arm_timer(ledger, execution_id, %{ordinal: ordinal} = row) do
+    key = {execution_id, ordinal}
 
     Agent.update(ledger, fn state ->
       if Map.has_key?(state.timers, key) do
@@ -86,17 +86,17 @@ defmodule StatifierPersistence.Demo.Ledger do
   end
 
   @doc """
-  Drops every timer row under `run_id` whose `send_id` matches, returning
+  Drops every timer row under `execution_id` whose `send_id` matches, returning
   the removed rows' ordinals. `<cancel sendid>` names a send id, not an
   ordinal, and more than one armed row can share a send id (two iterations
   of the same authored `<send>`), so this can remove more than one row.
   """
-  @spec cancel_timer(t(), run_id(), String.t() | nil) :: [ordinal()]
-  def cancel_timer(ledger, run_id, send_id) do
+  @spec cancel_timer(t(), execution_id(), String.t() | nil) :: [ordinal()]
+  def cancel_timer(ledger, execution_id, send_id) do
     Agent.get_and_update(ledger, fn state ->
       {removed, kept} =
         Enum.split_with(state.timers, fn {{r, _ordinal}, row} ->
-          r == run_id and row.send_id == send_id
+          r == execution_id and row.send_id == send_id
         end)
 
       ordinals = removed |> Enum.map(fn {{_r, ordinal}, _row} -> ordinal end) |> Enum.sort()
@@ -104,35 +104,39 @@ defmodule StatifierPersistence.Demo.Ledger do
     end)
   end
 
-  @doc "Unconditionally drops the timer row for `{run_id, ordinal}`, after it fired or was consumed."
-  @spec drop_timer(t(), run_id(), ordinal()) :: :ok
-  def drop_timer(ledger, run_id, ordinal) do
+  @doc "Unconditionally drops the timer row for `{execution_id, ordinal}`, after it fired or was consumed."
+  @spec drop_timer(t(), execution_id(), ordinal()) :: :ok
+  def drop_timer(ledger, execution_id, ordinal) do
     Agent.update(ledger, fn state ->
-      update_in(state.timers, &Map.delete(&1, {run_id, ordinal}))
+      update_in(state.timers, &Map.delete(&1, {execution_id, ordinal}))
     end)
   end
 
-  @doc "Every open timer row for `run_id`, oldest ordinal first."
-  @spec open_timers(t(), run_id()) :: [timer_row()]
-  def open_timers(ledger, run_id) do
+  @doc "Every open timer row for `execution_id`, oldest ordinal first."
+  @spec open_timers(t(), execution_id()) :: [timer_row()]
+  def open_timers(ledger, execution_id) do
     Agent.get(ledger, fn state ->
       state.timers
-      |> Enum.filter(fn {{r, _ordinal}, _row} -> r == run_id end)
+      |> Enum.filter(fn {{r, _ordinal}, _row} -> r == execution_id end)
       |> Enum.sort_by(fn {{_r, ordinal}, _row} -> ordinal end)
       |> Enum.map(fn {_key, row} -> row end)
     end)
   end
 
   @doc """
-  Records an invocation as `:open`, idempotent on `{run_id, invoke_id}`. A
+  Records an invocation as `:open`, idempotent on `{execution_id, invoke_id}`. A
   second call under the same key (`recover/1` re-running `handler.start/2`)
   leaves the stored row and the `side_effects` log untouched - the ledger,
   not the handler, is what makes re-establishment idempotent.
   """
-  @spec record_invocation(t(), run_id(), %{invoke_id: String.t(), type: term(), params: term()}) ::
+  @spec record_invocation(t(), execution_id(), %{
+          invoke_id: String.t(),
+          type: term(),
+          params: term()
+        }) ::
           :ok
-  def record_invocation(ledger, run_id, %{invoke_id: invoke_id} = attrs) do
-    key = {run_id, invoke_id}
+  def record_invocation(ledger, execution_id, %{invoke_id: invoke_id} = attrs) do
+    key = {execution_id, invoke_id}
 
     Agent.update(ledger, fn state ->
       if Map.has_key?(state.invocations, key) do
@@ -147,10 +151,10 @@ defmodule StatifierPersistence.Demo.Ledger do
     end)
   end
 
-  @doc "Marks the invocation under `{run_id, invoke_id}` `:done`. A no-op when no such row exists."
-  @spec close_invocation(t(), run_id(), String.t()) :: :ok
-  def close_invocation(ledger, run_id, invoke_id) do
-    key = {run_id, invoke_id}
+  @doc "Marks the invocation under `{execution_id, invoke_id}` `:done`. A no-op when no such row exists."
+  @spec close_invocation(t(), execution_id(), String.t()) :: :ok
+  def close_invocation(ledger, execution_id, invoke_id) do
+    key = {execution_id, invoke_id}
 
     Agent.update(ledger, fn state ->
       update_in(state.invocations[key], fn
@@ -160,12 +164,12 @@ defmodule StatifierPersistence.Demo.Ledger do
     end)
   end
 
-  @doc "Every `:open` invocation row for `run_id`, sorted by `invoke_id`."
-  @spec open_invocations(t(), run_id()) :: [invocation_row()]
-  def open_invocations(ledger, run_id) do
+  @doc "Every `:open` invocation row for `execution_id`, sorted by `invoke_id`."
+  @spec open_invocations(t(), execution_id()) :: [invocation_row()]
+  def open_invocations(ledger, execution_id) do
     Agent.get(ledger, fn state ->
       state.invocations
-      |> Enum.filter(fn {{r, _id}, row} -> r == run_id and row.status == :open end)
+      |> Enum.filter(fn {{r, _id}, row} -> r == execution_id and row.status == :open end)
       |> Enum.sort_by(fn {{_r, invoke_id}, _row} -> invoke_id end)
       |> Enum.map(fn {_key, row} -> row end)
     end)

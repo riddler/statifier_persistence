@@ -2,7 +2,7 @@ defmodule StatifierPersistence.Storage.InMemory do
   @moduledoc """
   The reference `StatifierPersistence.Storage.Adapter`: an Agent holding
   three maps - charts keyed by content hash, positions keyed by session id,
-  and runs keyed by run id.
+  and executions keyed by execution id.
 
   The chart map is keyed by the content hash alone, as every adapter's is:
   byte-identical charts stored by two tenants are one entry, and tenant
@@ -17,21 +17,21 @@ defmodule StatifierPersistence.Storage.InMemory do
 
   @behaviour StatifierPersistence.Storage.Adapter
 
-  alias StatifierPersistence.Run.Linkage
+  alias StatifierPersistence.Execution.Linkage
   alias StatifierPersistence.Storage.Adapter
 
   @typedoc """
   This adapter's state: the three record maps `init/1` starts the Agent
-  with, plus the per-run lock table `lock_run/3` acquires through.
+  with, plus the per-execution lock table `lock_execution/3` acquires through.
   """
   @type state :: %{
           charts: %{Adapter.content_hash() => Adapter.chart_record()},
           positions: %{Adapter.session_id() => Adapter.position_record()},
-          runs: %{Adapter.run_id() => Adapter.run_record()},
-          locks: %{Adapter.run_id() => reference()}
+          executions: %{Adapter.execution_id() => Adapter.execution_record()},
+          locks: %{Adapter.execution_id() => reference()}
         }
 
-  # How long a contended lock_run/3 sleeps between acquisition attempts.
+  # How long a contended lock_execution/3 sleeps between acquisition attempts.
   @lock_spin_sleep_ms 5
 
   @doc """
@@ -41,7 +41,7 @@ defmodule StatifierPersistence.Storage.InMemory do
   @impl Adapter
   @spec init(Adapter.opts()) :: {:ok, Adapter.opts()} | {:error, Adapter.error()}
   def init(opts) do
-    case Agent.start_link(fn -> %{charts: %{}, positions: %{}, runs: %{}, locks: %{}} end) do
+    case Agent.start_link(fn -> %{charts: %{}, positions: %{}, executions: %{}, locks: %{}} end) do
       {:ok, pid} -> {:ok, Keyword.put(opts, :pid, pid)}
       {:error, reason} -> {:error, {:adapter, reason}}
     end
@@ -99,51 +99,52 @@ defmodule StatifierPersistence.Storage.InMemory do
   end
 
   @doc """
-  Inserts `run_record` under its `run_id`, refusing a duplicate with
-  `{:error, :run_exists}`.
+  Inserts `execution_record` under its `execution_id`, refusing a duplicate with
+  `{:error, :execution_exists}`.
 
   The exists-check and the write run inside one `Agent.get_and_update/2`
   call, so they are a single atomic state transition: two concurrent
-  inserts of the same `run_id` cannot both return `:ok`.
+  inserts of the same `execution_id` cannot both return `:ok`.
 
   This adapter supports the optional `metadata` map (ADR-0006 decision 3):
-  the map is stored with the record and returned by `fetch_run/2` verbatim,
+  the map is stored with the record and returned by `fetch_execution/2` verbatim,
   whatever Elixir terms it holds - an Agent has no type system to refuse
   one.
   """
   @impl Adapter
-  @spec insert_run(Adapter.opts(), Adapter.run_record()) :: :ok | {:error, Adapter.error()}
-  def insert_run(opts, %{run_id: run_id} = run_record) do
-    run_record =
-      run_record
+  @spec insert_execution(Adapter.opts(), Adapter.execution_record()) ::
+          :ok | {:error, Adapter.error()}
+  def insert_execution(opts, %{execution_id: execution_id} = execution_record) do
+    execution_record =
+      execution_record
       |> Map.put_new(:metadata, %{})
       |> Map.put_new(:outcome_blob, nil)
 
     Agent.get_and_update(pid(opts), fn state ->
-      if Map.has_key?(state.runs, run_id) do
-        {{:error, :run_exists}, state}
+      if Map.has_key?(state.executions, execution_id) do
+        {{:error, :execution_exists}, state}
       else
-        {:ok, put_in(state, [:runs, run_id], run_record)}
+        {:ok, put_in(state, [:executions, execution_id], execution_record)}
       end
     end)
   end
 
   @doc """
-  Fetches the run stored under `run_id`, or `:run_not_found`.
+  Fetches the execution stored under `execution_id`, or `:execution_not_found`.
   """
   @impl Adapter
-  @spec fetch_run(Adapter.opts(), Adapter.run_id()) ::
-          {:ok, Adapter.run_record()} | {:error, Adapter.error()}
-  def fetch_run(opts, run_id) do
-    case Agent.get(pid(opts), &get_in(&1, [:runs, run_id])) do
-      nil -> {:error, :run_not_found}
-      run_record -> {:ok, run_record}
+  @spec fetch_execution(Adapter.opts(), Adapter.execution_id()) ::
+          {:ok, Adapter.execution_record()} | {:error, Adapter.error()}
+  def fetch_execution(opts, execution_id) do
+    case Agent.get(pid(opts), &get_in(&1, [:executions, execution_id])) do
+      nil -> {:error, :execution_not_found}
+      execution_record -> {:ok, execution_record}
     end
   end
 
   @doc """
-  Overwrites the run stored under `run_record`'s `run_id` with the full
-  record, or refuses with `:run_not_found` when no run exists for the id.
+  Overwrites the execution stored under `execution_record`'s `execution_id` with the full
+  record, or refuses with `:execution_not_found` when no execution exists for the id.
 
   `metadata` is the documented exception to the full overwrite: it is
   write-once (ADR-0006 decision 1 grants no way to change it after create),
@@ -152,72 +153,79 @@ defmodule StatifierPersistence.Storage.InMemory do
   record carries the stored value forward, and a binary sets it.
   """
   @impl Adapter
-  @spec update_run(Adapter.opts(), Adapter.run_record()) :: :ok | {:error, Adapter.error()}
-  def update_run(opts, %{run_id: run_id} = run_record) do
+  @spec update_execution(Adapter.opts(), Adapter.execution_record()) ::
+          :ok | {:error, Adapter.error()}
+  def update_execution(opts, %{execution_id: execution_id} = execution_record) do
     Agent.get_and_update(pid(opts), fn state ->
-      case state.runs do
-        %{^run_id => stored} ->
-          {:ok, put_in(state, [:runs, run_id], carry_forward(run_record, stored))}
+      case state.executions do
+        %{^execution_id => stored} ->
+          {:ok,
+           put_in(state, [:executions, execution_id], carry_forward(execution_record, stored))}
 
         _absent ->
-          {{:error, :run_not_found}, state}
+          {{:error, :execution_not_found}, state}
       end
     end)
   end
 
-  @spec carry_forward(Adapter.run_record(), Adapter.run_record()) :: Adapter.run_record()
-  defp carry_forward(run_record, stored) do
-    outcome_blob = Map.get(run_record, :outcome_blob) || Map.get(stored, :outcome_blob)
+  @spec carry_forward(Adapter.execution_record(), Adapter.execution_record()) ::
+          Adapter.execution_record()
+  defp carry_forward(execution_record, stored) do
+    outcome_blob = Map.get(execution_record, :outcome_blob) || Map.get(stored, :outcome_blob)
 
-    run_record
+    execution_record
     |> Map.put(:metadata, Map.get(stored, :metadata, %{}))
     |> Map.put(:outcome_blob, outcome_blob)
   end
 
   @doc """
   Declares outcome support (the optional
-  `c:StatifierPersistence.Storage.Adapter.supports_run_outcome?/1`): this
-  adapter keeps the blob on the run record like every other field.
+  `c:StatifierPersistence.Storage.Adapter.supports_execution_outcome?/1`): this
+  adapter keeps the blob on the execution record like every other field.
   """
   @impl Adapter
-  @spec supports_run_outcome?(Adapter.opts()) :: boolean()
-  def supports_run_outcome?(_opts), do: true
+  @spec supports_execution_outcome?(Adapter.opts()) :: boolean()
+  def supports_execution_outcome?(_opts), do: true
 
   @doc """
   The status projection over a metadata match (the optional
-  `c:StatifierPersistence.Storage.Adapter.list_run_states_by_metadata/2`).
+  `c:StatifierPersistence.Storage.Adapter.list_execution_states_by_metadata/2`).
 
-  The same containment `list_runs_by_metadata/2` applies, projected down
-  to the three `t:StatifierPersistence.Storage.Adapter.run_state/0`
+  The same containment `list_executions_by_metadata/2` applies, projected down
+  to the three `t:StatifierPersistence.Storage.Adapter.execution_state/0`
   fields. There is no index to serve it from here - an Agent holds a map -
   so this is the reference implementation of the *contract*, not of the
   performance the contract exists for; the Ecto adapter is where the
   projection is a projection.
   """
   @impl Adapter
-  @spec list_run_states_by_metadata(Adapter.opts(), Adapter.metadata()) ::
-          {:ok, [Adapter.run_state()]} | {:error, Adapter.error()}
-  def list_run_states_by_metadata(opts, metadata) do
-    with {:ok, runs} <- list_runs_by_metadata(opts, metadata) do
-      {:ok, Enum.map(runs, &to_run_state/1)}
+  @spec list_execution_states_by_metadata(Adapter.opts(), Adapter.metadata()) ::
+          {:ok, [Adapter.execution_state()]} | {:error, Adapter.error()}
+  def list_execution_states_by_metadata(opts, metadata) do
+    with {:ok, executions} <- list_executions_by_metadata(opts, metadata) do
+      {:ok, Enum.map(executions, &to_execution_state/1)}
     end
   end
 
-  @spec to_run_state(Adapter.run_record()) :: Adapter.run_state()
-  defp to_run_state(run_record) do
+  @spec to_execution_state(Adapter.execution_record()) :: Adapter.execution_state()
+  defp to_execution_state(execution_record) do
     child_index =
-      run_record
+      execution_record
       |> Map.get(:metadata, %{})
       |> Map.get(Linkage.reserved_key(), %{})
       |> Map.get("child_index")
 
-    %{run_id: run_record.run_id, status: run_record.status, child_index: child_index}
+    %{
+      execution_id: execution_record.execution_id,
+      status: execution_record.status,
+      child_index: child_index
+    }
   end
 
   @doc """
   Declares metadata support (the optional
   `c:StatifierPersistence.Storage.Adapter.supports_metadata?/1`): this
-  adapter stores the map with the run record and returns it verbatim
+  adapter stores the map with the execution record and returns it verbatim
   (ADR-0006 decision 3).
   """
   @impl Adapter
@@ -225,26 +233,26 @@ defmodule StatifierPersistence.Storage.InMemory do
   def supports_metadata?(_opts), do: true
 
   @doc """
-  Lists the runs whose stored `metadata` contains **every** key/value pair
+  Lists the executions whose stored `metadata` contains **every** key/value pair
   in `metadata`, recursively for a nested map (the optional
-  `c:StatifierPersistence.Storage.Adapter.list_runs_by_metadata/2`,
+  `c:StatifierPersistence.Storage.Adapter.list_executions_by_metadata/2`,
   ADR-0008 decision 5) - the same subset semantics
   `StatifierPersistence.Storage.Ecto`'s `jsonb @>` gives, and the same
   `ArgumentError` on an empty or non-string-keyed map.
   """
   @impl Adapter
-  @spec list_runs_by_metadata(Adapter.opts(), Adapter.metadata()) ::
-          {:ok, [Adapter.run_record()]} | {:error, Adapter.error()}
-  def list_runs_by_metadata(opts, metadata) do
+  @spec list_executions_by_metadata(Adapter.opts(), Adapter.metadata()) ::
+          {:ok, [Adapter.execution_record()]} | {:error, Adapter.error()}
+  def list_executions_by_metadata(opts, metadata) do
     validate_match!(metadata)
 
-    runs =
+    executions =
       pid(opts)
-      |> Agent.get(& &1.runs)
+      |> Agent.get(& &1.executions)
       |> Map.values()
       |> Enum.filter(&contains?(Map.get(&1, :metadata, %{}), metadata))
 
-    {:ok, runs}
+    {:ok, executions}
   end
 
   # Recursive containment, matching the Ecto adapter's `jsonb @>`: every pair
@@ -273,20 +281,20 @@ defmodule StatifierPersistence.Storage.InMemory do
       :ok
     else
       raise ArgumentError,
-            "list_runs_by_metadata/2 takes a map with string keys, got keys: " <>
+            "list_executions_by_metadata/2 takes a map with string keys, got keys: " <>
               inspect(Map.keys(metadata))
     end
   end
 
   defp validate_match!(other) do
     raise ArgumentError,
-          "list_runs_by_metadata/2 takes a non-empty map with string keys, " <>
+          "list_executions_by_metadata/2 takes a non-empty map with string keys, " <>
             "got: #{inspect(other)}"
   end
 
   @doc """
-  Runs `fun` under this adapter's per-run mutual exclusion for `run_id`
-  (the optional `c:StatifierPersistence.Storage.Adapter.lock_run/3`).
+  Executions `fun` under this adapter's per-execution mutual exclusion for `execution_id`
+  (the optional `c:StatifierPersistence.Storage.Adapter.lock_execution/3`).
 
   Acquisition is an insert-if-absent on the Agent's lock table, one atomic
   `Agent.get_and_update/2` transition; contention spins with a small
@@ -300,29 +308,29 @@ defmodule StatifierPersistence.Storage.InMemory do
   amended 2026-08-22).
   """
   @impl Adapter
-  @spec lock_run(Adapter.opts(), Adapter.run_id(), (-> result)) ::
+  @spec lock_execution(Adapter.opts(), Adapter.execution_id(), (-> result)) ::
           {:ok, result} | {:error, Adapter.error()}
         when result: term()
-  def lock_run(opts, run_id, fun) do
-    token = acquire_lock(pid(opts), run_id)
+  def lock_execution(opts, execution_id, fun) do
+    token = acquire_lock(pid(opts), execution_id)
 
     try do
       {:ok, fun.()}
     after
-      release_lock(pid(opts), run_id, token)
+      release_lock(pid(opts), execution_id, token)
     end
   end
 
-  @spec acquire_lock(pid(), Adapter.run_id()) :: reference()
-  defp acquire_lock(pid, run_id) do
+  @spec acquire_lock(pid(), Adapter.execution_id()) :: reference()
+  defp acquire_lock(pid, execution_id) do
     token = make_ref()
 
     acquired? =
       Agent.get_and_update(pid, fn state ->
-        if Map.has_key?(state.locks, run_id) do
+        if Map.has_key?(state.locks, execution_id) do
           {false, state}
         else
-          {true, put_in(state, [:locks, run_id], token)}
+          {true, put_in(state, [:locks, execution_id], token)}
         end
       end)
 
@@ -330,17 +338,17 @@ defmodule StatifierPersistence.Storage.InMemory do
       token
     else
       Process.sleep(@lock_spin_sleep_ms)
-      acquire_lock(pid, run_id)
+      acquire_lock(pid, execution_id)
     end
   end
 
-  @spec release_lock(pid(), Adapter.run_id(), reference()) :: :ok
-  defp release_lock(pid, run_id, token) do
+  @spec release_lock(pid(), Adapter.execution_id(), reference()) :: :ok
+  defp release_lock(pid, execution_id, token) do
     Agent.update(pid, fn state ->
       case state.locks do
         # Only the holder's own token releases: a stray release can never
         # drop a lock some later acquirer holds.
-        %{^run_id => ^token} -> %{state | locks: Map.delete(state.locks, run_id)}
+        %{^execution_id => ^token} -> %{state | locks: Map.delete(state.locks, execution_id)}
         _other -> state
       end
     end)

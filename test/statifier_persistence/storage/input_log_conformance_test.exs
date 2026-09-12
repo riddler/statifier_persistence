@@ -1,6 +1,6 @@
 defmodule StatifierPersistence.Storage.InputLogConformanceTest do
   @moduledoc """
-  The lib-shipped conformance suite run against
+  The lib-shipped conformance suite execution against
   `StatifierPersistence.Test.InputLogAdapter` - `InMemory` plus ADR-0010's
   three input-log callbacks.
 

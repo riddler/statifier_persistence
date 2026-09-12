@@ -19,7 +19,7 @@ defmodule StatifierPersistence.CoreTelemetryTest do
   use ExUnit.Case, async: false
 
   alias Statifier.Event
-  alias StatifierPersistence.{Runs, Storage}
+  alias StatifierPersistence.{Executions, Storage}
   alias StatifierPersistence.Storage.InMemory
   alias StatifierPersistence.Test.RecordingExecutor
   alias StatifierPersistence.Testing.Charts
@@ -69,7 +69,7 @@ defmodule StatifierPersistence.CoreTelemetryTest do
   """
 
   # Quiescent at "idle"; "boom" enters a raise cycle that spends whatever
-  # macrostep budget the run was created with.
+  # macrostep budget the execution was created with.
   @loop_after_event_source """
   <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="idle">
       <state id="idle">
@@ -119,8 +119,8 @@ defmodule StatifierPersistence.CoreTelemetryTest do
          %{store: store} do
       {_source, machine} = Charts.chart_a()
 
-      {:ok, _run, machine_state} =
-        Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+      {:ok, _execution, machine_state} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
 
       assert {measurements, metadata} = await(@init)
       assert Map.keys(measurements) == [:system_time]
@@ -133,15 +133,20 @@ defmodule StatifierPersistence.CoreTelemetryTest do
 
     # Sabotage: moved the report_initialized/4 call into stepped/6 - red;
     # an :init per load means "process boot", which does not exist here,
-    # and would fire thousands of times per logical run.
+    # and would fire thousands of times per logical execution.
     test "never fires on a step - every load is a rehydration, not a boot",
          %{store: store} do
       {_source, machine} = Charts.chart_a()
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
       drain()
 
-      {:ok, _run, _ms} =
-        Runs.step(store, "run-1", machine, Event.external("go"), executor: RecordingExecutor)
+      {:ok, _execution, _ms} =
+        Executions.step(store, "execution-1", machine, Event.external("go"),
+          executor: RecordingExecutor
+        )
 
       refute_emitted([@init])
     end
@@ -149,12 +154,13 @@ defmodule StatifierPersistence.CoreTelemetryTest do
 
   describe "the macrostep span (st-ADR-0067 decision 5)" do
     # Sabotage: passed :event as report_initialized/4's trigger - red; a
-    # run's one initialization looked like an external delivery.
+    # execution's one initialization looked like an external delivery.
     test "brackets Interpreter.initialize/2 at create, as an :initialize pair",
          %{store: store} do
       {_source, machine} = Charts.chart_a()
 
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
 
       assert {start_m, start_meta} = await(@macrostep_start)
       assert {stop_m, stop_meta} = await(@macrostep_stop)
@@ -178,11 +184,16 @@ defmodule StatifierPersistence.CoreTelemetryTest do
     test "brackets Interpreter.handle_event/2 on a step, as an :event pair naming the event",
          %{store: store} do
       {_source, machine} = Charts.chart_a()
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
       drain()
 
-      {:ok, _run, _ms} =
-        Runs.step(store, "run-1", machine, Event.external("go"), executor: RecordingExecutor)
+      {:ok, _execution, _ms} =
+        Executions.step(store, "execution-1", machine, Event.external("go"),
+          executor: RecordingExecutor
+        )
 
       assert {_m, start_meta} = await(@macrostep_start)
       assert {_m, stop_meta} = await(@macrostep_stop)
@@ -197,20 +208,24 @@ defmodule StatifierPersistence.CoreTelemetryTest do
     end
 
     # Sabotage: covered by the `running: false` mutation on the test below;
-    # no separate local mutation exists, because a terminal run *record*
+    # no separate local mutation exists, because a terminal execution *record*
     # discards in step_tail/8 before the stepper seam is reached at all.
-    test "opens no span for a delivery to an already-terminal run", %{store: store} do
+    test "opens no span for a delivery to an already-terminal execution", %{store: store} do
       machine = compile!(@final_source)
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
 
-      {:ok, _run, _ms} =
-        Runs.step(store, "run-1", machine, Event.external("finish"), executor: RecordingExecutor)
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      {:ok, _execution, _ms} =
+        Executions.step(store, "execution-1", machine, Event.external("finish"),
+          executor: RecordingExecutor
+        )
 
       drain()
 
       # The record now says :completed, so this discards before any decode.
-      assert {:discarded, _run} =
-               Runs.step(store, "run-1", machine, Event.external("finish"),
+      assert {:discarded, _execution} =
+               Executions.step(store, "execution-1", machine, Event.external("finish"),
                  executor: RecordingExecutor
                )
 
@@ -223,13 +238,13 @@ defmodule StatifierPersistence.CoreTelemetryTest do
          %{store: store} do
       machine = compile!(@send_error_source)
 
-      {:ok, _run, _ms} =
-        Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
 
       drain()
 
-      {:ok, _run, _ms} =
-        Runs.step(store, "run-1", machine, Event.external("go"),
+      {:ok, _execution, _ms} =
+        Executions.step(store, "execution-1", machine, Event.external("go"),
           executor: failing_executor([:send])
         )
 
@@ -251,11 +266,13 @@ defmodule StatifierPersistence.CoreTelemetryTest do
          %{store: store} do
       machine = compile!(@final_with_send_source)
 
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
       drain()
 
-      {:ok, _run, _ms} =
-        Runs.step(store, "run-1", machine, Event.external("finish"),
+      {:ok, _execution, _ms} =
+        Executions.step(store, "execution-1", machine, Event.external("finish"),
           executor: failing_executor([:send])
         )
 
@@ -271,8 +288,8 @@ defmodule StatifierPersistence.CoreTelemetryTest do
          %{store: store} do
       machine = compile!(@loop_after_event_source)
 
-      {:ok, _run, _ms} =
-        Runs.create(store, "run-1", machine,
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine,
           executor: RecordingExecutor,
           initialize: [max_macrostep_rounds: 5]
         )
@@ -280,7 +297,7 @@ defmodule StatifierPersistence.CoreTelemetryTest do
       drain()
 
       assert {:error, {:budget_exhausted, _payload}} =
-               Runs.step(store, "run-1", machine, Event.external("boom"),
+               Executions.step(store, "execution-1", machine, Event.external("boom"),
                  executor: RecordingExecutor
                )
 
@@ -292,19 +309,24 @@ defmodule StatifierPersistence.CoreTelemetryTest do
   describe "[:statifier, :session, :halt]" do
     # Sabotage: removed report_halt/4's call from persist_tail/6 - red; the
     # one event ADR-0040 points "session finished" metrics at was missing
-    # for every durable run.
+    # for every durable execution.
     test "fires with reason :done on the step whose outcome is terminal", %{store: store} do
       machine = compile!(@final_source)
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
       drain()
 
-      {:ok, _run, _ms} =
-        Runs.step(store, "run-1", machine, Event.external("finish"), executor: RecordingExecutor)
+      {:ok, _execution, _ms} =
+        Executions.step(store, "execution-1", machine, Event.external("finish"),
+          executor: RecordingExecutor
+        )
 
       assert {measurements, metadata} = await(@halt)
       assert metadata.driver == :persistence
       assert metadata.reason == :done
-      # Empty, and correctly so: reaching a top-level final runs
+      # Empty, and correctly so: reaching a top-level final executions
       # `exit_interpreter`, so the halted position has no configuration left
       # - the same shape a session-driven halt reports.
       assert metadata.configuration == MapSet.new()
@@ -312,12 +334,12 @@ defmodule StatifierPersistence.CoreTelemetryTest do
     end
 
     # Sabotage: made report_halt/4 read the status rather than the
-    # lifecycle effects - red; a budget-exhausted run halted as :done.
+    # lifecycle effects - red; a budget-exhausted execution halted as :done.
     test "fires with reason :budget_exhausted on an exhausted step", %{store: store} do
       machine = compile!(@loop_after_event_source)
 
-      {:ok, _run, _ms} =
-        Runs.create(store, "run-1", machine,
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine,
           executor: RecordingExecutor,
           initialize: [max_macrostep_rounds: 5]
         )
@@ -325,7 +347,7 @@ defmodule StatifierPersistence.CoreTelemetryTest do
       drain()
 
       assert {:error, {:budget_exhausted, _payload}} =
-               Runs.step(store, "run-1", machine, Event.external("boom"),
+               Executions.step(store, "execution-1", machine, Event.external("boom"),
                  executor: RecordingExecutor
                )
 
@@ -337,17 +359,22 @@ defmodule StatifierPersistence.CoreTelemetryTest do
     # `fail/4` and `cancel/3` reach no interpreter and hold no
     # `%MachineState{}`, so there is nothing here for a halt to be emitted
     # from. This test is the standing guard against a refactor giving them
-    # one and reporting a host abandoning a run as a chart reaching a final
+    # one and reporting a host abandoning an execution as a chart reaching a final
     # state.
     test "never fires for fail/4 or cancel/3 - neither reaches an interpreter",
          %{store: store} do
       {_source, machine} = Charts.chart_a()
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
-      {:ok, _run, _ms} = Runs.create(store, "run-2", machine, executor: RecordingExecutor)
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-2", machine, executor: RecordingExecutor)
+
       drain()
 
-      {:ok, _run} = Runs.fail(store, "run-1", "operator: abandoned")
-      {:ok, _run} = Runs.cancel(store, "run-2")
+      {:ok, _execution} = Executions.fail(store, "execution-1", "operator: abandoned")
+      {:ok, _execution} = Executions.cancel(store, "execution-2")
 
       refute_emitted([@halt])
     end
@@ -356,15 +383,20 @@ defmodule StatifierPersistence.CoreTelemetryTest do
   describe "the effect and trace families (st-ADR-0067 decision 3)" do
     # Sabotage: passed `executable` rather than `effects` to
     # report_effects/3 - red; the :done the lifecycle consumes is exactly
-    # the effect the bridge needs to see a run finish.
+    # the effect the bridge needs to see an execution finish.
     test "reports every effect the advance produced, lifecycle ones included",
          %{store: store} do
       machine = compile!(@final_source)
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
       drain()
 
-      {:ok, _run, _ms} =
-        Runs.step(store, "run-1", machine, Event.external("finish"), executor: RecordingExecutor)
+      {:ok, _execution, _ms} =
+        Executions.step(store, "execution-1", machine, Event.external("finish"),
+          executor: RecordingExecutor
+        )
 
       assert {_m, metadata} = await([:statifier, :session, :effect, :done])
       assert metadata.driver == :persistence
@@ -378,13 +410,13 @@ defmodule StatifierPersistence.CoreTelemetryTest do
          %{store: store} do
       {_source, machine} = Charts.chart_a()
 
-      {:ok, _run, _ms} =
-        Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
 
       refute_emitted([[:statifier, :session, :trace, :entry_set]])
 
-      {:ok, _run, _ms} =
-        Runs.create(store, "run-2", machine,
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-2", machine,
           executor: RecordingExecutor,
           initialize: [trace: true]
         )
@@ -398,17 +430,19 @@ defmodule StatifierPersistence.CoreTelemetryTest do
     # Sabotage: added a CoreTelemetry.terminate/5 call beside report_halt/4 -
     # red; the event names a GenServer callback that does not exist here,
     # and the bridge's per-session cleanup keys on it.
-    test "never emits :terminate or :interpret across a full run", %{store: store} do
+    test "never emits :terminate or :interpret across a full execution", %{store: store} do
       machine = compile!(@final_source)
 
-      {:ok, _run, _ms} =
-        Runs.create(store, "run-1", machine,
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine,
           executor: RecordingExecutor,
           initialize: [trace: true]
         )
 
-      {:ok, _run, _ms} =
-        Runs.step(store, "run-1", machine, Event.external("finish"), executor: RecordingExecutor)
+      {:ok, _execution, _ms} =
+        Executions.step(store, "execution-1", machine, Event.external("finish"),
+          executor: RecordingExecutor
+        )
 
       refute_emitted([
         [:statifier, :session, :terminate],

@@ -1,9 +1,9 @@
 defmodule StatifierPersistence.Test.OutcomeWindowSerialization do
   @moduledoc """
   A `StatifierPersistence.Serialization` strategy that reports whether a
-  watched run's own answer (`outcome_blob`) was already stored when an
+  watched execution's own answer (`outcome_blob`) was already stored when an
   exclusion opened, and whether it was stored by the time it closed - the
-  real `StatifierPersistence.Serialization.AdapterLock` exclusion runs
+  real `StatifierPersistence.Serialization.AdapterLock` exclusion executions
   unchanged in between.
 
   The fixture for sp-kl3's ordering half: a fan-out child's answer has to
@@ -13,11 +13,11 @@ defmodule StatifierPersistence.Test.OutcomeWindowSerialization do
   outside it, the answer would already be there when the exclusion opened,
   which is what this observes.
 
-  It sends `{:exclusion, run_id, recorded_on_entry?, recorded_on_exit?}` to
-  the configured test process for every `with_run/3` it wraps, and orders
+  It sends `{:exclusion, execution_id, recorded_on_entry?, recorded_on_exit?}` to
+  the configured test process for every `with_execution/3` it wraps, and orders
   nothing itself.
 
-  `config` is `{test_pid, StatifierPersistence.Storage.t(), watched_run_id}`.
+  `config` is `{test_pid, StatifierPersistence.Storage.t(), watched_execution_id}`.
   """
 
   @behaviour StatifierPersistence.Serialization
@@ -26,20 +26,20 @@ defmodule StatifierPersistence.Test.OutcomeWindowSerialization do
   alias StatifierPersistence.Storage
 
   @impl StatifierPersistence.Serialization
-  @spec with_run(config :: term(), run_id :: String.t(), fun :: (-> result)) ::
+  @spec with_execution(config :: term(), execution_id :: String.t(), fun :: (-> result)) ::
           {:ok, result} | {:error, term()}
         when result: term()
-  def with_run({test_pid, store, watched_run_id}, run_id, fun) do
-    on_entry = recorded?(store, watched_run_id)
-    result = AdapterLock.with_run(store, run_id, fun)
-    send(test_pid, {:exclusion, run_id, on_entry, recorded?(store, watched_run_id)})
+  def with_execution({test_pid, store, watched_execution_id}, execution_id, fun) do
+    on_entry = recorded?(store, watched_execution_id)
+    result = AdapterLock.with_execution(store, execution_id, fun)
+    send(test_pid, {:exclusion, execution_id, on_entry, recorded?(store, watched_execution_id)})
 
     result
   end
 
   @spec recorded?(Storage.t(), String.t()) :: boolean()
-  defp recorded?(store, run_id) do
-    case Storage.fetch_run(store, run_id) do
+  defp recorded?(store, execution_id) do
+    case Storage.fetch_execution(store, execution_id) do
       {:ok, %{outcome_blob: blob}} -> is_binary(blob)
       _absent_or_error -> false
     end

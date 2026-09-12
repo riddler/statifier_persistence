@@ -12,10 +12,10 @@ if Code.ensure_loaded?(Ecto) do
     and gets, with zero further options: the resolved configuration
     readable via `MyApp.Persistence.__statifier_persistence__/1`, and
     four Ecto schema modules - `MyApp.Persistence.Chart`,
-    `MyApp.Persistence.Position`, `MyApp.Persistence.Run`,
+    `MyApp.Persistence.Position`, `MyApp.Persistence.Execution`,
     `MyApp.Persistence.Input` - over the `statifier_charts` /
     `statifier_positions` / `statifier_runs` / `statifier_inputs` tables
-    with UXID string primary keys (`chart_` / `pos_` / `run_` / `input_`
+    with UXID string primary keys (`chart_` / `pos_` / `exec_` / `input_`
     prefixes).
 
     Every knob is compile-time, on this `use`, never in application env
@@ -24,11 +24,11 @@ if Code.ensure_loaded?(Ecto) do
     `StatifierPersistence.Ecto.Config` for the options (`:key`,
     `:table_prefix`, `:tables`, `:prefix`, `:blob_type`).
 
-    The engine identity columns (`content_hash`, `session_id`, `run_id`)
+    The engine identity columns (`content_hash`, `session_id`, `execution_id`)
     are stored verbatim as strings and are never touched by the
     configured key scheme - ADR-0002 decision 1.
 
-    The runs schema also carries `metadata`, the optional opaque map of
+    The execution schema also carries `metadata`, the optional opaque map of
     host identities ADR-0006 grants, as a `jsonb` column (V02 of the
     migrations helper). It holds identities only, never personal data:
     `:blob_type` does not reach it, so anything filed there is at rest in
@@ -40,14 +40,14 @@ if Code.ensure_loaded?(Ecto) do
     wanting encryption at rest for those columns passes a custom
     `Ecto.Type` or `Ecto.ParameterizedType` there and gets it applied
     with zero further wiring. The identity and lookup columns
-    (`content_hash`, `session_id`, `run_id`, `status`, `failure`, and
+    (`content_hash`, `session_id`, `execution_id`, `status`, `failure`, and
     the input log's `seq` and `door`) stay plain regardless - the identity guard and the unique indexes
     depend on reading them back verbatim, and `metadata` stays `jsonb`
     regardless for the same reason: it is the column a host queries
     (ADR-0006 decision 3).
 
-    The inputs table is ADR-0010's per-run input log: one row per input
-    the interpreter saw, carrying the run it belongs to, its dense
+    The inputs table is ADR-0010's per-execution input log: one row per input
+    the interpreter saw, carrying the execution it belongs to, its dense
     zero-based `seq`, the public `door` it entered by, and the opaque
     `input_blob`. A `nil` `input_blob` is decision 6's closed marker. The
     log holds document payload - an event's `data` is the host's own
@@ -61,7 +61,7 @@ if Code.ensure_loaded?(Ecto) do
     @schema_modules [
       {Chart, :charts},
       {Position, :positions},
-      {Run, :runs},
+      {Execution, :runs},
       {Input, :inputs}
     ]
 
@@ -88,7 +88,7 @@ if Code.ensure_loaded?(Ecto) do
         position_blob: :binary
       ],
       runs: [
-        run_id: :string,
+        execution_id: :string,
         status: :string,
         content_hash: :string,
         identity_blob: :binary,
@@ -99,7 +99,7 @@ if Code.ensure_loaded?(Ecto) do
         outcome_blob: :binary
       ],
       inputs: [
-        run_id: :string,
+        execution_id: :string,
         seq: :integer,
         door: :string,
         input_blob: :binary
@@ -138,10 +138,20 @@ if Code.ensure_loaded?(Ecto) do
       fields =
         for {field, type} <- Map.fetch!(@fields, table) do
           args =
-            if field in @blob_columns do
-              Config.blob_field_args(config, field)
-            else
-              [field, type]
+            cond do
+              field in @blob_columns ->
+                Config.blob_field_args(config, field)
+
+              # ADR-0011 decision 2 renames the schema field; decision 3's V06
+              # renames the column it reads. sp-op4 lands the first and sp-j2y
+              # the second, so until V06 is applied the field is mapped onto
+              # the column it still has. sp-j2y removes this `source:` with the
+              # migration.
+              field == :execution_id ->
+                [field, type, [source: :run_id]]
+
+              true ->
+                [field, type]
             end
 
           quote do: field(unquote_splicing(args))

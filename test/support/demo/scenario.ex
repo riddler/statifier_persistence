@@ -2,7 +2,7 @@ defmodule StatifierPersistence.Demo.Scenario do
   @moduledoc """
   The demo chart and the scenario body that drives it
   (`docs/plans/260822-sp-4an.4-restart-demo-host.md`), parameterized on a
-  `{adapter, opts}` storage pair so the same body runs unchanged against
+  `{adapter, opts}` storage pair so the same body executions unchanged against
   `StatifierPersistence.Storage.InMemory` (Phase 1-3) and
   `StatifierPersistence.Storage.Ecto` (Phase 4).
 
@@ -28,7 +28,7 @@ defmodule StatifierPersistence.Demo.Scenario do
   alias Statifier.Invoke.Types, as: InvokeTypes
   alias Statifier.Send.Routes
   alias StatifierPersistence.Demo.{AuthorizeHandler, Host, Ledger, Runtime}
-  alias StatifierPersistence.{Runs, Storage}
+  alias StatifierPersistence.{Executions, Storage}
 
   @chart_source """
   <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="intake">
@@ -92,7 +92,7 @@ defmodule StatifierPersistence.Demo.Scenario do
   three non-terminal steps, in order.
 
   `{adapter, opts}` is handed straight to `Storage.new/2`, unchanged - this
-  function names no storage module itself, which is what lets Phase 4 run
+  function names no storage module itself, which is what lets Phase 4 execution
   it again against `Storage.Ecto` with no edit here.
   """
   @spec straight_through({module(), keyword()}) :: %{
@@ -102,13 +102,13 @@ defmodule StatifierPersistence.Demo.Scenario do
           configs: [[String.t()]]
         }
   def straight_through({adapter, opts}) do
-    run_id = unique_run_id()
+    execution_id = unique_execution_id()
     {:ok, store} = Storage.new(adapter, opts)
     {:ok, ledger} = Ledger.start_link([])
     {:ok, runtime} = Runtime.start_link([])
 
     {:ok, host} =
-      Host.start_run(store, ledger, runtime, run_id, @chart_source,
+      Host.start_execution(store, ledger, runtime, execution_id, @chart_source,
         invoke_handlers: handlers(),
         invoke_types: invoke_types()
       )
@@ -137,7 +137,7 @@ defmodule StatifierPersistence.Demo.Scenario do
   @doc """
   Drives the chart to the kill point (`authorizing`, `capture-timer` pending,
   `authorize` in flight), stops the volatile runtime to simulate the node
-  dying, cold-boots a fresh `Host.t()` from `run_id` alone, `recover/1`s
+  dying, cold-boots a fresh `Host.t()` from `execution_id` alone, `recover/1`s
   it, then drives the rest of the chart to `:completed` exactly as
   `straight_through/1` does after its own kill point.
 
@@ -167,17 +167,17 @@ defmodule StatifierPersistence.Demo.Scenario do
           open_timers_after_recover: [Ledger.timer_row()],
           host: Host.t(),
           ledger: Ledger.t(),
-          run_id: String.t(),
+          execution_id: String.t(),
           configs: [[String.t()]]
         }
   def across_restart({adapter, opts}) do
-    run_id = unique_run_id()
+    execution_id = unique_execution_id()
     {:ok, store} = Storage.new(adapter, opts)
     {:ok, ledger} = Ledger.start_link([])
     {:ok, runtime} = Runtime.start_link([])
 
     {:ok, host} =
-      Host.start_run(store, ledger, runtime, run_id, @chart_source,
+      Host.start_execution(store, ledger, runtime, execution_id, @chart_source,
         invoke_handlers: handlers(),
         invoke_types: invoke_types()
       )
@@ -191,8 +191,8 @@ defmodule StatifierPersistence.Demo.Scenario do
     # scenario drives any further step, not read back off `host_at_kill`
     # once this function has returned.
     config_at_kill = Host.config(host_at_kill)
-    open_timers_at_kill = Ledger.open_timers(ledger, run_id)
-    open_invocations_at_kill = Ledger.open_invocations(ledger, run_id)
+    open_timers_at_kill = Ledger.open_timers(ledger, execution_id)
+    open_invocations_at_kill = Ledger.open_invocations(ledger, execution_id)
     {:ok, machine_state_at_kill} = Host.position(host_at_kill)
     active_invocations_at_kill = map_size(machine_state_at_kill.active_invocations)
 
@@ -211,7 +211,7 @@ defmodule StatifierPersistence.Demo.Scenario do
     alive_after_stop = Process.alive?(pid_before)
 
     {:ok, new_runtime} = Runtime.start_link([])
-    {:ok, host_after_boot} = Host.boot(store, ledger, new_runtime, run_id)
+    {:ok, host_after_boot} = Host.boot(store, ledger, new_runtime, execution_id)
 
     # The input tape is the recorder's own log, carried across the restart
     # by this scenario (the recorder never died - only the node did), not
@@ -225,7 +225,7 @@ defmodule StatifierPersistence.Demo.Scenario do
         tape: Host.tape(host_at_kill)
     }
 
-    # Captured before `recover/1` runs, on the same fresh runtime pid
+    # Captured before `recover/1` executions, on the same fresh runtime pid
     # `host_after_recover` below goes on to arm - proving `boot/4` alone
     # restores nothing volatile.
     armed_after_boot = Runtime.armed(host_after_boot.runtime)
@@ -236,7 +236,7 @@ defmodule StatifierPersistence.Demo.Scenario do
     # very worker as part of driving the tail - same reason every other
     # "as of this moment" field here is captured eagerly.
     alive_after_recover = pid_after_recover != nil and Process.alive?(pid_after_recover)
-    open_timers_after_recover = Ledger.open_timers(ledger, run_id)
+    open_timers_after_recover = Ledger.open_timers(ledger, execution_id)
 
     host = Host.finish_invocation(host_after_recover, "authorize", %{"auth_code" => "A7F3C1"})
     after_finish = Host.config(host)
@@ -267,16 +267,16 @@ defmodule StatifierPersistence.Demo.Scenario do
       open_timers_after_recover: open_timers_after_recover,
       host: host,
       ledger: ledger,
-      run_id: run_id,
+      execution_id: execution_id,
       configs: [after_finish, after_tick]
     }
   end
 
   @doc """
   Replays `tape` (`Host.tape/1`'s events, oldest first) against a fresh
-  `{store, ledger}` pair and a fresh `run_id` - with **no `Demo.Runtime`
+  `{store, ledger}` pair and a fresh `execution_id` - with **no `Demo.Runtime`
   at all**: no timers, no workers, nothing but the recorded inputs driven
-  straight through `Runs.create/4` then one `Runs.step/5` per event. The
+  straight through `Executions.create/4` then one `Executions.step/5` per event. The
   executor here only records onto `ledger`; it dispatches nothing, because
   a replay proves the loop is deterministic, not that the demo host's
   side-effecting dispatch is (Phase 1-2 already prove that).
@@ -285,7 +285,7 @@ defmodule StatifierPersistence.Demo.Scenario do
   every step, in order (so `length(configs) == length(tape) + 1`), plus
   the exact effects the executor saw, in call order.
 
-  `opts` accepts `initialize:` (passed through to `Runs.create/4`'s own
+  `opts` accepts `initialize:` (passed through to `Executions.create/4`'s own
   `initialize:` option). The one non-deterministic input a create takes is
   the session id `MachineState.new/2` otherwise generates fresh - it is
   stamped into the `:datamodel_init` effect's `_sessionid` and
@@ -294,11 +294,11 @@ defmodule StatifierPersistence.Demo.Scenario do
   `initialize: [session_id: ...]`, the same way it re-supplies the
   recorded events.
   """
-  @spec replay([Event.t()], {Storage.t(), Ledger.t()}, Runs.run_id(), keyword()) :: %{
+  @spec replay([Event.t()], {Storage.t(), Ledger.t()}, Executions.execution_id(), keyword()) :: %{
           configs: [[String.t()]],
           effects: [Statifier.Effect.t()]
         }
-  def replay(tape, {%Storage{} = store, ledger}, run_id, opts \\ []) do
+  def replay(tape, {%Storage{} = store, ledger}, execution_id, opts \\ []) do
     machine = machine!()
 
     executor = fn effect, context ->
@@ -306,8 +306,8 @@ defmodule StatifierPersistence.Demo.Scenario do
       :ok
     end
 
-    {:ok, _run, machine_state} =
-      Runs.create(store, run_id, machine,
+    {:ok, _execution, machine_state} =
+      Executions.create(store, execution_id, machine,
         executor: executor,
         invoke_types: invoke_types(),
         initialize: Keyword.get(opts, :initialize, [])
@@ -316,8 +316,8 @@ defmodule StatifierPersistence.Demo.Scenario do
     {_final_state, configs} =
       Enum.reduce(tape, {machine_state, [leaf_config(machine_state)]}, fn event,
                                                                           {_state, configs} ->
-        {:ok, _run, machine_state} =
-          Runs.step(store, run_id, machine, event,
+        {:ok, _execution, machine_state} =
+          Executions.step(store, execution_id, machine, event,
             executor: executor,
             invoke_types: invoke_types(),
             routes: Routes.new()
@@ -339,6 +339,7 @@ defmodule StatifierPersistence.Demo.Scenario do
     |> Enum.sort()
   end
 
-  @spec unique_run_id() :: String.t()
-  defp unique_run_id, do: "restart-demo-" <> Integer.to_string(System.unique_integer([:positive]))
+  @spec unique_execution_id() :: String.t()
+  defp unique_execution_id,
+    do: "restart-demo-" <> Integer.to_string(System.unique_integer([:positive]))
 end

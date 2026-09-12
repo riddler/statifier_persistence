@@ -1,5 +1,5 @@
 defmodule StatifierPersistence.Storage.EctoLiveLockTest do
-  # Live lock tests run outside the SQL sandbox, like the live migration
+  # Live lock tests execution outside the SQL sandbox, like the live migration
   # tests: the sandbox funnels every caller through one shared
   # connection, which serializes transactions by ownership alone and
   # would mask a broken lock. Here each task takes its own pooled
@@ -16,7 +16,7 @@ defmodule StatifierPersistence.Storage.EctoLiveLockTest do
     Sandbox.mode(TestRepo, :auto)
 
     on_exit(fn ->
-      TestRepo.delete_all(Default.Run)
+      TestRepo.delete_all(Default.Execution)
       Sandbox.mode(TestRepo, :manual)
     end)
 
@@ -24,7 +24,7 @@ defmodule StatifierPersistence.Storage.EctoLiveLockTest do
     %{opts: opts}
   end
 
-  defp assert_no_overlap(opts, run_id) do
+  defp assert_no_overlap(opts, execution_id) do
     {:ok, events} = Agent.start_link(fn -> [] end)
 
     body = fn tag ->
@@ -38,7 +38,7 @@ defmodule StatifierPersistence.Storage.EctoLiveLockTest do
 
     tasks =
       for tag <- [:first, :second] do
-        Task.async(fn -> Storage.Ecto.lock_run(opts, run_id, body.(tag)) end)
+        Task.async(fn -> Storage.Ecto.lock_execution(opts, execution_id, body.(tag)) end)
       end
 
     assert [{:ok, _tag_a}, {:ok, _tag_b}] = Task.await_many(tasks, 10_000)
@@ -48,16 +48,16 @@ defmodule StatifierPersistence.Storage.EctoLiveLockTest do
     assert one != other
   end
 
-  # sabotage: replaced lock_run/3's transaction body with a bare
+  # sabotage: replaced lock_execution/3's transaction body with a bare
   # {:ok, fun.()} (no advisory lock, no row lock, no transaction) ->
   # red, the two sleeping bodies interleaved on separate pool
   # connections and the paired enter/exit pattern broke. Verified red
   # (this test and the rowless one below under the one mutation),
   # reverted.
-  test "two connections never overlap on an inserted run's lock", %{opts: opts} do
+  test "two connections never overlap on an inserted execution's lock", %{opts: opts} do
     :ok =
-      Storage.Ecto.insert_run(opts, %{
-        run_id: "run-live-lock-row",
+      Storage.Ecto.insert_execution(opts, %{
+        execution_id: "execution-live-lock-row",
         status: :active,
         content_hash: "sha256:live-lock",
         identity_blob: <<1>>,
@@ -65,16 +65,16 @@ defmodule StatifierPersistence.Storage.EctoLiveLockTest do
         failure: nil
       })
 
-    assert_no_overlap(opts, "run-live-lock-row")
+    assert_no_overlap(opts, "execution-live-lock-row")
   end
 
   # sabotage: dropped the pg_advisory_xact_lock query, leaving only the
   # SELECT ... FOR UPDATE row lock -> red on this test alone: with no
-  # row to lock, the two bodies interleaved (while the inserted-run
+  # row to lock, the two bodies interleaved (while the inserted-execution
   # test above stayed green on its row lock). The exact hole the
   # ADR-0004 amendment exists for. Verified red, reverted.
-  test "two connections never overlap on a rowless run_id", %{opts: opts} do
-    assert_no_overlap(opts, "run-live-lock-rowless")
+  test "two connections never overlap on a rowless execution_id", %{opts: opts} do
+    assert_no_overlap(opts, "execution-live-lock-rowless")
   end
 
   # sabotage: same bare {:ok, fun.()} mutation as above -> this test
@@ -86,14 +86,14 @@ defmodule StatifierPersistence.Storage.EctoLiveLockTest do
   # answering within the yield window.
   test "a raising fun releases the lock for the next caller", %{opts: opts} do
     assert_raise RuntimeError, "live lock boom", fn ->
-      Storage.Ecto.lock_run(opts, "run-live-lock-raise", fn ->
+      Storage.Ecto.lock_execution(opts, "execution-live-lock-raise", fn ->
         raise "live lock boom"
       end)
     end
 
     task =
       Task.async(fn ->
-        Storage.Ecto.lock_run(opts, "run-live-lock-raise", fn -> :reacquired end)
+        Storage.Ecto.lock_execution(opts, "execution-live-lock-raise", fn -> :reacquired end)
       end)
 
     assert {:ok, {:ok, :reacquired}} = Task.yield(task, 5_000) || Task.shutdown(task)

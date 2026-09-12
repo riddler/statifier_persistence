@@ -2,7 +2,7 @@ defmodule StatifierPersistence.TelemetryTest do
   @moduledoc """
   The `[:statifier_persistence, ...]` emit sites (ADR-0009, sp-m0i).
 
-  One test per event, each driving a real run through the public API and
+  One test per event, each driving a real execution through the public API and
   asserting the event's name, its measurement keys and its metadata keys
   against `docs/telemetry.md`'s tables - the contract is frozen by the
   record, so the shape assertions are deliberately exhaustive rather than
@@ -18,8 +18,8 @@ defmodule StatifierPersistence.TelemetryTest do
   alias Statifier.Event
   alias Statifier.Invoke.Types, as: InvokeTypes
   alias Statifier.Send.Routes
-  alias StatifierPersistence.{Driver, Run, Runs, Storage, Telemetry}
-  alias StatifierPersistence.Run.Linkage
+  alias StatifierPersistence.{Driver, Execution, Executions, Storage, Telemetry}
+  alias StatifierPersistence.Execution.Linkage
   alias StatifierPersistence.Storage.InMemory
   alias StatifierPersistence.Test.{NoChildListingAdapter, NoLockAdapter, RecordingExecutor}
   alias StatifierPersistence.Testing.Charts
@@ -119,7 +119,7 @@ defmodule StatifierPersistence.TelemetryTest do
       </final>
       <final id="refused">
           <donedata>
-              <param name="statifier_persistence:run_status" expr="'failed'"/>
+              <param name="statifier_persistence:execution_status" expr="'failed'"/>
           </donedata>
       </final>
   </scxml>
@@ -166,7 +166,7 @@ defmodule StatifierPersistence.TelemetryTest do
   end
 
   describe "events/0 (ADR-0009 decision 8)" do
-    # Sabotage: dropped @run_lock from @events - the count assertion went
+    # Sabotage: dropped @execution_lock from @events - the count assertion went
     # red, which is the whole point of a bridge attaching from this list.
     test "returns all sixteen names, unique, under this package's prefix" do
       events = Telemetry.events()
@@ -183,14 +183,14 @@ defmodule StatifierPersistence.TelemetryTest do
     # - red, and it is the exact break decision 8 calls breaking.
     test "names every event docs/telemetry.md tables" do
       assert Telemetry.events() == [
-               [:statifier_persistence, :run, :step, :start],
-               [:statifier_persistence, :run, :step, :stop],
-               [:statifier_persistence, :run, :lock],
+               [:statifier_persistence, :execution, :step, :start],
+               [:statifier_persistence, :execution, :step, :stop],
+               [:statifier_persistence, :execution, :lock],
                [:statifier_persistence, :adapter, :call],
                [:statifier_persistence, :identity, :refused],
-               [:statifier_persistence, :run, :created],
-               [:statifier_persistence, :run, :terminated],
-               [:statifier_persistence, :run, :discarded],
+               [:statifier_persistence, :execution, :created],
+               [:statifier_persistence, :execution, :terminated],
+               [:statifier_persistence, :execution, :discarded],
                [:statifier_persistence, :effect, :failed],
                [:statifier_persistence, :drive, :turns_exhausted],
                [:statifier_persistence, :child, :started],
@@ -204,21 +204,22 @@ defmodule StatifierPersistence.TelemetryTest do
   end
 
   describe "the step seam (ADR-0009 decision 5)" do
-    # Sabotage: replaced serialized/5's run_step_start/3 call with a bare
+    # Sabotage: replaced serialized/5's execution_step_start/3 call with a bare
     # monotonic reading - the start half never arrived and the pair could
     # not be assembled.
     test "brackets one serialized drive as a start/stop pair sharing one span_ref",
          %{store: store} do
       {_source, machine} = Charts.chart_a()
 
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
 
-      {start_m, start_meta} = await([:statifier_persistence, :run, :step, :start])
-      {stop_m, stop_meta} = await([:statifier_persistence, :run, :step, :stop])
+      {start_m, start_meta} = await([:statifier_persistence, :execution, :step, :start])
+      {stop_m, stop_meta} = await([:statifier_persistence, :execution, :step, :stop])
 
       assert Map.keys(start_m) |> Enum.sort() == [:monotonic_time, :system_time]
-      assert Map.keys(start_meta) |> Enum.sort() == [:entry, :run_id, :span_ref]
-      assert start_meta.run_id == "run-1"
+      assert Map.keys(start_meta) |> Enum.sort() == [:entry, :execution_id, :span_ref]
+      assert start_meta.execution_id == "execution-1"
       assert start_meta.entry == :create
       assert is_reference(start_meta.span_ref)
 
@@ -229,10 +230,10 @@ defmodule StatifierPersistence.TelemetryTest do
                :child_count,
                :content_hash,
                :entry,
+               :execution_id,
                :invoke_id,
                :outcome,
                :reason,
-               :run_id,
                :session_id,
                :span_ref,
                :status
@@ -253,22 +254,26 @@ defmodule StatifierPersistence.TelemetryTest do
 
     # Sabotage: made stop_shape/1 report :ok for a discard - red, and a
     # host counting discards would have counted none.
-    test "reports outcome :discarded with a nil session_id on a terminal-run discard",
+    test "reports outcome :discarded with a nil session_id on a terminal-execution discard",
          %{store: store} do
       machine = compile!(@final_source)
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
 
-      {:ok, _run, _ms} =
-        Runs.step(store, "run-1", machine, Event.external("finish"), executor: RecordingExecutor)
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      {:ok, _execution, _ms} =
+        Executions.step(store, "execution-1", machine, Event.external("finish"),
+          executor: RecordingExecutor
+        )
 
       drain()
 
-      assert {:discarded, %Run{}} =
-               Runs.step(store, "run-1", machine, Event.external("finish"),
+      assert {:discarded, %Execution{}} =
+               Executions.step(store, "execution-1", machine, Event.external("finish"),
                  executor: RecordingExecutor
                )
 
-      assert {_m, meta} = await([:statifier_persistence, :run, :step, :stop])
+      assert {_m, meta} = await([:statifier_persistence, :execution, :step, :stop])
       assert meta.outcome == :discarded
       assert meta.status == :completed
       assert meta.session_id == nil
@@ -280,14 +285,14 @@ defmodule StatifierPersistence.TelemetryTest do
     test "reports outcome :error with the error term and no status", %{store: store} do
       {_source, machine} = Charts.chart_a()
 
-      assert {:error, :run_not_found} =
-               Runs.step(store, "absent", machine, Event.external("go"),
+      assert {:error, :execution_not_found} =
+               Executions.step(store, "absent", machine, Event.external("go"),
                  executor: RecordingExecutor
                )
 
-      assert {_m, meta} = await([:statifier_persistence, :run, :step, :stop])
+      assert {_m, meta} = await([:statifier_persistence, :execution, :step, :stop])
       assert meta.outcome == :error
-      assert meta.reason == :run_not_found
+      assert meta.reason == :execution_not_found
       assert meta.status == nil
       assert meta.content_hash == nil
     end
@@ -296,32 +301,39 @@ defmodule StatifierPersistence.TelemetryTest do
     # dimension an operator slices step latency by first was wrong.
     test "names the public door each drive came through", %{store: store} do
       {_source, machine} = Charts.chart_a()
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
-      {:ok, _run, _ms} = Runs.create(store, "run-2", machine, executor: RecordingExecutor)
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-2", machine, executor: RecordingExecutor)
+
       drain()
 
-      {:ok, _run} = Runs.fail(store, "run-1", "operator: abandoned")
-      assert {_m, %{entry: :fail}} = await([:statifier_persistence, :run, :step, :stop])
+      {:ok, _execution} = Executions.fail(store, "execution-1", "operator: abandoned")
+      assert {_m, %{entry: :fail}} = await([:statifier_persistence, :execution, :step, :stop])
 
-      {:ok, _run} = Runs.cancel(store, "run-2")
-      assert {_m, %{entry: :cancel}} = await([:statifier_persistence, :run, :step, :stop])
+      {:ok, _execution} = Executions.cancel(store, "execution-2")
+      assert {_m, %{entry: :cancel}} = await([:statifier_persistence, :execution, :step, :stop])
     end
   end
 
-  describe "[:statifier_persistence, :run, :lock]" do
+  describe "[:statifier_persistence, :execution, :lock]" do
     # Sabotage: dropped the :acquired emit from inside with_run/3's body -
-    # red; the wait for the per-run exclusion is invisible from every
+    # red; the wait for the per-execution exclusion is invisible from every
     # other surface.
     test "reports the wait and an :acquired outcome for the default strategy",
          %{store: store} do
       {_source, machine} = Charts.chart_a()
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
 
-      assert {m, meta} = await([:statifier_persistence, :run, :lock])
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      assert {m, meta} = await([:statifier_persistence, :execution, :lock])
       assert Map.keys(m) |> Enum.sort() == [:duration, :system_time]
       assert m.duration >= 0
-      assert Map.keys(meta) |> Enum.sort() == [:outcome, :reason, :run_id, :strategy]
-      assert meta.run_id == "run-1"
+      assert Map.keys(meta) |> Enum.sort() == [:execution_id, :outcome, :reason, :strategy]
+      assert meta.execution_id == "execution-1"
       assert meta.outcome == :acquired
       assert meta.reason == nil
       assert meta.strategy == StatifierPersistence.Serialization.AdapterLock
@@ -334,9 +346,9 @@ defmodule StatifierPersistence.TelemetryTest do
       {_source, machine} = Charts.chart_a()
 
       assert {:error, {:serialization, :not_supported}} =
-               Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+               Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
 
-      assert {_m, meta} = await([:statifier_persistence, :run, :lock])
+      assert {_m, meta} = await([:statifier_persistence, :execution, :lock])
       assert meta.outcome == :unavailable
       assert meta.reason == {:serialization, :not_supported}
     end
@@ -347,9 +359,11 @@ defmodule StatifierPersistence.TelemetryTest do
     # half the question, and the in-memory one no SQL tracer can see.
     test "times every adapter callback with its keys and an :ok outcome", %{store: store} do
       {_source, machine} = Charts.chart_a()
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
 
-      insert = one([:statifier_persistence, :adapter, :call], &(&1.callback == :insert_run))
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      insert = one([:statifier_persistence, :adapter, :call], &(&1.callback == :insert_execution))
       {m, meta} = insert
 
       assert Map.keys(m) |> Enum.sort() == [:duration, :system_time]
@@ -359,16 +373,16 @@ defmodule StatifierPersistence.TelemetryTest do
                :adapter,
                :callback,
                :content_hash,
+               :execution_id,
                :outcome,
                :reason,
-               :run_id,
                :session_id
              ]
 
       assert meta.adapter == InMemory
       assert meta.outcome == :ok
       assert meta.reason == nil
-      assert meta.run_id == "run-1"
+      assert meta.execution_id == "execution-1"
       assert meta.session_id == nil
       assert is_binary(meta.content_hash)
     end
@@ -376,13 +390,13 @@ defmodule StatifierPersistence.TelemetryTest do
     # Sabotage: made call_outcome/1 answer :ok for every result - red;
     # "which storage call is failing" is the question this answers.
     test "reports the adapter's own error arm as the reason", %{store: store} do
-      assert {:error, :run_not_found} = Storage.fetch_run(store, "absent")
+      assert {:error, :execution_not_found} = Storage.fetch_execution(store, "absent")
 
       assert {_m, meta} = await([:statifier_persistence, :adapter, :call])
-      assert meta.callback == :fetch_run
+      assert meta.callback == :fetch_execution
       assert meta.outcome == :error
-      assert meta.reason == :run_not_found
-      assert meta.run_id == "absent"
+      assert meta.reason == :execution_not_found
+      assert meta.execution_id == "absent"
     end
   end
 
@@ -394,11 +408,13 @@ defmodule StatifierPersistence.TelemetryTest do
       {_source, chart_a} = Charts.chart_a()
       {_source, chart_b} = Charts.chart_b()
 
-      {:ok, _run, _ms} = Runs.create(store, "run-1", chart_a, executor: RecordingExecutor)
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", chart_a, executor: RecordingExecutor)
+
       drain()
 
       assert {:error, {:identity_mismatch, _stored, _supplied}} =
-               Runs.step(store, "run-1", chart_b, Event.external("go"),
+               Executions.step(store, "execution-1", chart_b, Event.external("go"),
                  executor: RecordingExecutor
                )
 
@@ -406,17 +422,17 @@ defmodule StatifierPersistence.TelemetryTest do
       assert Map.keys(m) == [:system_time]
 
       assert Map.keys(meta) |> Enum.sort() == [
+               :execution_id,
                :reason,
-               :run_id,
                :session_id,
                :stage,
                :stored_content_hash,
                :supplied_content_hash
              ]
 
-      assert meta.stage == :run
+      assert meta.stage == :execution
       assert meta.reason == :identity_mismatch
-      assert meta.run_id == "run-1"
+      assert meta.execution_id == "execution-1"
       assert meta.session_id == nil
       assert is_binary(meta.stored_content_hash)
       assert is_binary(meta.supplied_content_hash)
@@ -430,41 +446,41 @@ defmodule StatifierPersistence.TelemetryTest do
       machine = Charts.unidentified_machine()
 
       assert {:error, :unidentified_chart} =
-               Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+               Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
 
       assert {_m, meta} = await([:statifier_persistence, :identity, :refused])
       assert meta.reason == :unidentified_chart
-      assert meta.stage == :run
-      assert meta.run_id == "run-1"
+      assert meta.stage == :execution
+      assert meta.execution_id == "execution-1"
       assert meta.stored_content_hash == nil
       assert meta.supplied_content_hash == nil
     end
   end
 
-  describe "the run lifecycle seam" do
+  describe "the execution lifecycle seam" do
     # Sabotage: hardcoded `child?: true` - red; a host slicing fan-out by
-    # it would have counted every run as a child.
+    # it would have counted every execution as a child.
     test "reports a create with child? and metadata? booleans and no map", %{store: store} do
       {_source, machine} = Charts.chart_a()
 
-      {:ok, _run, _ms} =
-        Runs.create(store, "run-1", machine,
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine,
           executor: RecordingExecutor,
           metadata: %{"tenant" => "t1"}
         )
 
-      assert {m, meta} = await([:statifier_persistence, :run, :created])
+      assert {m, meta} = await([:statifier_persistence, :execution, :created])
       assert Map.keys(m) == [:system_time]
 
       assert Map.keys(meta) |> Enum.sort() == [
                :child?,
                :content_hash,
+               :execution_id,
                :metadata?,
-               :run_id,
                :session_id
              ]
 
-      assert meta.run_id == "run-1"
+      assert meta.execution_id == "execution-1"
       assert meta.child? == false
       assert meta.metadata? == true
       assert is_binary(meta.session_id)
@@ -478,10 +494,13 @@ defmodule StatifierPersistence.TelemetryTest do
       {_source, machine} = Charts.chart_a()
       linkage = Linkage.new("parent-1", "call", 0, "sha256:pinned")
 
-      {:ok, _run, _ms} =
-        Runs.create(store, "child-1", machine, executor: RecordingExecutor, linkage: linkage)
+      {:ok, _execution, _ms} =
+        Executions.create(store, "child-1", machine,
+          executor: RecordingExecutor,
+          linkage: linkage
+        )
 
-      assert {_m, meta} = await([:statifier_persistence, :run, :created])
+      assert {_m, meta} = await([:statifier_persistence, :execution, :created])
       assert meta.child? == true
       assert meta.metadata? == false
     end
@@ -490,20 +509,25 @@ defmodule StatifierPersistence.TelemetryTest do
     # the whole reason this event exists is that the two are different.
     test "reports a chart-driven termination with driven_by :chart", %{store: store} do
       machine = compile!(@final_source)
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
       drain()
 
-      {:ok, _run, _ms} =
-        Runs.step(store, "run-1", machine, Event.external("finish"), executor: RecordingExecutor)
+      {:ok, _execution, _ms} =
+        Executions.step(store, "execution-1", machine, Event.external("finish"),
+          executor: RecordingExecutor
+        )
 
-      assert {m, meta} = await([:statifier_persistence, :run, :terminated])
+      assert {m, meta} = await([:statifier_persistence, :execution, :terminated])
       assert Map.keys(m) == [:system_time]
 
       assert Map.keys(meta) |> Enum.sort() == [
                :content_hash,
                :driven_by,
+               :execution_id,
                :reason,
-               :run_id,
                :session_id,
                :status
              ]
@@ -519,70 +543,87 @@ defmodule StatifierPersistence.TelemetryTest do
     # terminations by exactly these.
     test "reports fail/4 and cancel/3 as host-driven terminations", %{store: store} do
       {_source, machine} = Charts.chart_a()
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
-      {:ok, _run, _ms} = Runs.create(store, "run-2", machine, executor: RecordingExecutor)
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-2", machine, executor: RecordingExecutor)
+
       drain()
 
-      {:ok, _run} = Runs.fail(store, "run-1", "operator: abandoned")
-      assert {_m, failed} = await([:statifier_persistence, :run, :terminated])
+      {:ok, _execution} = Executions.fail(store, "execution-1", "operator: abandoned")
+      assert {_m, failed} = await([:statifier_persistence, :execution, :terminated])
       assert failed.status == :failed
       assert failed.driven_by == :host
       assert failed.reason == "operator: abandoned"
       assert failed.session_id == nil
 
-      {:ok, _run} = Runs.cancel(store, "run-2")
-      assert {_m, cancelled} = await([:statifier_persistence, :run, :terminated])
+      {:ok, _execution} = Executions.cancel(store, "execution-2")
+      assert {_m, cancelled} = await([:statifier_persistence, :execution, :terminated])
       assert cancelled.status == :cancelled
       assert cancelled.driven_by == :host
       assert cancelled.reason == nil
     end
 
-    # Sabotage: passed :terminal_run for the builder's decline - red; the
+    # Sabotage: passed :terminal_execution for the builder's decline - red; the
     # two are different non-events and the vocabulary is closed.
     test "names each of the three ways a delivery becomes a non-event", %{store: store} do
       machine = compile!(@final_source)
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: RecordingExecutor)
 
-      {:ok, _run, terminal_ms} =
-        Runs.step(store, "run-1", machine, Event.external("finish"), executor: RecordingExecutor)
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      {:ok, _execution, terminal_ms} =
+        Executions.step(store, "execution-1", machine, Event.external("finish"),
+          executor: RecordingExecutor
+        )
 
       drain()
 
       # 1. the record was already terminal, read before any position decode
-      {:discarded, _run} =
-        Runs.step(store, "run-1", machine, Event.external("finish"), executor: RecordingExecutor)
+      {:discarded, _execution} =
+        Executions.step(store, "execution-1", machine, Event.external("finish"),
+          executor: RecordingExecutor
+        )
 
-      assert {m, meta} = await([:statifier_persistence, :run, :discarded])
+      assert {m, meta} = await([:statifier_persistence, :execution, :discarded])
       assert Map.keys(m) == [:system_time]
-      assert Map.keys(meta) |> Enum.sort() == [:entry, :reason, :repaired?, :run_id]
-      assert meta.reason == :terminal_run
+      assert Map.keys(meta) |> Enum.sort() == [:entry, :execution_id, :reason, :repaired?]
+      assert meta.reason == :terminal_execution
       assert meta.repaired? == false
       assert meta.entry == :step
 
       # 2. an event builder declined under the exclusion
-      {:ok, _run, _ms} = Runs.create(store, "run-2", machine, executor: RecordingExecutor)
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-2", machine, executor: RecordingExecutor)
+
       drain()
 
-      {:discarded, _run} =
-        Runs.step(store, "run-2", machine, fn _ms -> :discard end, executor: RecordingExecutor)
+      {:discarded, _execution} =
+        Executions.step(store, "execution-2", machine, fn _ms -> :discard end,
+          executor: RecordingExecutor
+        )
 
-      assert {_m, declined} = await([:statifier_persistence, :run, :discarded])
+      assert {_m, declined} = await([:statifier_persistence, :execution, :discarded])
       assert declined.reason == :builder_declined
       assert declined.repaired? == false
 
       # 3. the record's :active status lied about a terminal position
-      :ok = Storage.update_run(store, "run-1", terminal_ms, :active)
+      :ok = Storage.update_execution(store, "execution-1", terminal_ms, :active)
       drain()
 
-      {:discarded, _run} =
-        Runs.step(store, "run-1", machine, Event.external("finish"), executor: RecordingExecutor)
+      {:discarded, _execution} =
+        Executions.step(store, "execution-1", machine, Event.external("finish"),
+          executor: RecordingExecutor
+        )
 
-      assert {_m, repaired} = await([:statifier_persistence, :run, :discarded])
+      assert {_m, repaired} = await([:statifier_persistence, :execution, :discarded])
       assert repaired.reason == :position_terminal
       assert repaired.repaired? == true
 
       # ... and the repair is also a termination, chart-driven
-      assert {_m, terminated} = await([:statifier_persistence, :run, :terminated])
+      assert {_m, terminated} = await([:statifier_persistence, :execution, :terminated])
       assert terminated.status == :completed
       assert terminated.driven_by == :chart
     end
@@ -595,11 +636,14 @@ defmodule StatifierPersistence.TelemetryTest do
     test "reports an actionable failure that re-entered the chart", %{store: store} do
       machine = compile!(@send_error_source)
       executor = failing_executor([:send])
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: executor)
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: executor)
+
       drain()
 
-      {:ok, _run, _ms} =
-        Runs.step(store, "run-1", machine, Event.external("go"),
+      {:ok, _execution, _ms} =
+        Executions.step(store, "execution-1", machine, Event.external("go"),
           executor: executor,
           routes: Routes.new(parent?: true)
         )
@@ -609,11 +653,11 @@ defmodule StatifierPersistence.TelemetryTest do
 
       assert Map.keys(meta) |> Enum.sort() == [
                :content_hash,
+               :execution_id,
                :executor,
                :kind,
                :reason,
                :reentered?,
-               :run_id,
                :session_id
              ]
 
@@ -621,21 +665,24 @@ defmodule StatifierPersistence.TelemetryTest do
       assert meta.reason == :down
       assert meta.reentered? == true
       assert meta.executor == :fun
-      assert meta.run_id == "run-1"
+      assert meta.execution_id == "execution-1"
       assert is_binary(meta.session_id)
       assert is_binary(meta.content_hash)
     end
 
     # Sabotage: made reenter_one/3's :observational clause report true -
-    # red; observation must never look like it steered a run.
+    # red; observation must never look like it steered an execution.
     test "reports an observational failure as not re-entered", %{store: store} do
       machine = compile!(@log_error_source)
       executor = failing_executor([:log])
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: executor)
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: executor)
+
       drain()
 
-      {:ok, _run, _ms} =
-        Runs.step(store, "run-1", machine, Event.external("go"), executor: executor)
+      {:ok, _execution, _ms} =
+        Executions.step(store, "execution-1", machine, Event.external("go"), executor: executor)
 
       assert {_m, meta} = await([:statifier_persistence, :effect, :failed])
       assert meta.kind == :log
@@ -655,11 +702,16 @@ defmodule StatifierPersistence.TelemetryTest do
       end
 
       machine = compile!(@log_error_source)
-      {:ok, _run, _ms} = Runs.create(store, "run-1", machine, executor: FailingModule)
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: FailingModule)
+
       drain()
 
-      {:ok, _run, _ms} =
-        Runs.step(store, "run-1", machine, Event.external("go"), executor: FailingModule)
+      {:ok, _execution, _ms} =
+        Executions.step(store, "execution-1", machine, Event.external("go"),
+          executor: FailingModule
+        )
 
       assert {_m, meta} = await([:statifier_persistence, :effect, :failed])
       assert meta.executor == FailingModule
@@ -678,13 +730,13 @@ defmodule StatifierPersistence.TelemetryTest do
           max_turns: 3
         )
 
-      assert {:error, {:turns_exhausted, 3}} = Driver.create(driver, "run-1")
+      assert {:error, {:turns_exhausted, 3}} = Driver.create(driver, "execution-1")
 
       assert {m, meta} = await([:statifier_persistence, :drive, :turns_exhausted])
       assert Map.keys(m) |> Enum.sort() == [:system_time, :turns]
       assert m.turns == 3
-      assert Map.keys(meta) |> Enum.sort() == [:entry, :run_id]
-      assert meta.run_id == "run-1"
+      assert Map.keys(meta) |> Enum.sort() == [:entry, :execution_id]
+      assert meta.execution_id == "execution-1"
       assert meta.entry == :create
     end
   end
@@ -697,22 +749,22 @@ defmodule StatifierPersistence.TelemetryTest do
          %{store: store} do
       driver = subchart_driver(store, @parent_source, @child_done_source)
 
-      assert {:ok, _run, _ms} = Driver.create(driver, "run-1")
+      assert {:ok, _execution, _ms} = Driver.create(driver, "execution-1")
 
       assert {m, meta} = await([:statifier_persistence, :child, :started])
       assert Map.keys(m) == [:system_time]
 
       assert Map.keys(meta) |> Enum.sort() == [
+               :child_execution_id,
                :child_index,
-               :child_run_id,
                :content_hash,
                :invoke_id,
-               :parent_run_id,
+               :parent_execution_id,
                :session_id
              ]
 
-      assert meta.parent_run_id == "run-1"
-      assert meta.child_run_id == Linkage.child_run_id("run-1", "call", 0)
+      assert meta.parent_execution_id == "execution-1"
+      assert meta.child_execution_id == Linkage.child_execution_id("execution-1", "call", 0)
       assert meta.invoke_id == "call"
       assert meta.child_index == 0
       assert is_binary(meta.content_hash)
@@ -726,12 +778,12 @@ defmodule StatifierPersistence.TelemetryTest do
       {:ok, no_children} = Storage.new(NoChildListingAdapter, [])
       driver = subchart_driver(no_children, @parent_source, @child_done_source)
 
-      assert {:ok, _run, _ms} = Driver.create(driver, "run-1")
+      assert {:ok, _execution, _ms} = Driver.create(driver, "execution-1")
 
       assert {m, meta} = await([:statifier_persistence, :child, :refused])
       assert Map.keys(m) == [:system_time]
-      assert Map.keys(meta) |> Enum.sort() == [:invoke_id, :parent_run_id, :reason]
-      assert meta.parent_run_id == "run-1"
+      assert Map.keys(meta) |> Enum.sort() == [:invoke_id, :parent_execution_id, :reason]
+      assert meta.parent_execution_id == "execution-1"
       assert meta.invoke_id == "call"
       assert meta.reason == :child_listing_unsupported
 
@@ -743,29 +795,29 @@ defmodule StatifierPersistence.TelemetryTest do
     # the two doors and a consumer counts them apart.
     test "reports a child answering its parent", %{store: store} do
       driver = subchart_driver(store, @parent_source, @child_done_source)
-      {:ok, _run, _ms} = Driver.create(driver, "run-1")
-      child_run_id = Linkage.child_run_id("run-1", "call", 0)
+      {:ok, _execution, _ms} = Driver.create(driver, "execution-1")
+      child_execution_id = Linkage.child_execution_id("execution-1", "call", 0)
       drain()
 
       child_driver = %{driver | machine: compile!(@child_done_source)}
 
-      assert {:ok, _run, _ms} =
-               Driver.send_event(child_driver, child_run_id, Event.external("go"))
+      assert {:ok, _execution, _ms} =
+               Driver.send_event(child_driver, child_execution_id, Event.external("go"))
 
       assert {m, meta} = await([:statifier_persistence, :child, :answered])
       assert Map.keys(m) == [:system_time]
 
       assert Map.keys(meta) |> Enum.sort() == [
                :child_count,
-               :child_run_id,
+               :child_execution_id,
                :failed_count,
                :invoke_id,
                :outcome,
-               :parent_run_id
+               :parent_execution_id
              ]
 
-      assert meta.child_run_id == child_run_id
-      assert meta.parent_run_id == "run-1"
+      assert meta.child_execution_id == child_execution_id
+      assert meta.parent_execution_id == "execution-1"
       assert meta.invoke_id == "call"
       assert meta.outcome == :done
 
@@ -779,45 +831,48 @@ defmodule StatifierPersistence.TelemetryTest do
       refute_received {:telemetry, [:statifier_persistence, :child, :settled], _m, _meta}
     end
 
-    # Sabotage: made cancel_counted/3 tally an already-terminal run as
+    # Sabotage: made cancel_counted/3 tally an already-terminal execution as
     # neither cancelled nor retained - red on the replay, and ADR-0008
     # decision 5's retain semantics stopped being countable.
     test "reports one cascade per public call, with its cancelled and retained counts",
          %{store: store} do
       driver = subchart_driver(store, @parent_source, @child_done_source)
-      {:ok, _run, _ms} = Driver.create(driver, "run-1")
+      {:ok, _execution, _ms} = Driver.create(driver, "execution-1")
       drain()
 
-      assert {:ok, 1} = Runs.cascade_cancel(store, Linkage.invocation_match("run-1", "call"))
+      assert {:ok, 1} =
+               Executions.cascade_cancel(store, Linkage.invocation_match("execution-1", "call"))
 
       assert {m, meta} = await([:statifier_persistence, :child, :cascade_cancelled])
       assert Map.keys(m) |> Enum.sort() == [:count, :retained, :system_time]
       assert m.count == 1
       assert m.retained == 0
-      assert Map.keys(meta) |> Enum.sort() == [:invoke_id, :parent_run_id]
-      assert meta.parent_run_id == "run-1"
+      assert Map.keys(meta) |> Enum.sort() == [:invoke_id, :parent_execution_id]
+      assert meta.parent_execution_id == "execution-1"
       assert meta.invoke_id == "call"
 
       # Re-running the same cascade is a no-op that retains what it finds.
       drain()
-      assert {:ok, 0} = Runs.cascade_cancel(store, Linkage.invocation_match("run-1", "call"))
+
+      assert {:ok, 0} =
+               Executions.cascade_cancel(store, Linkage.invocation_match("execution-1", "call"))
 
       assert {m, _meta} = await([:statifier_persistence, :child, :cascade_cancelled])
       assert m.count == 0
       assert m.retained == 1
     end
 
-    # Sabotage: read parent_run_id into the invoke_id slot - red; nil is
+    # Sabotage: read parent_execution_id into the invoke_id slot - red; nil is
     # the contract's value for "every invocation".
     test "reports a nil invoke_id for a whole-parent sweep", %{store: store} do
       driver = subchart_driver(store, @parent_source, @child_done_source)
-      {:ok, _run, _ms} = Driver.create(driver, "run-1")
+      {:ok, _execution, _ms} = Driver.create(driver, "execution-1")
       drain()
 
-      assert {:ok, 1} = Runs.cascade_cancel(store, Linkage.parent_match("run-1"))
+      assert {:ok, 1} = Executions.cascade_cancel(store, Linkage.parent_match("execution-1"))
 
       assert {_m, meta} = await([:statifier_persistence, :child, :cascade_cancelled])
-      assert meta.parent_run_id == "run-1"
+      assert meta.parent_execution_id == "execution-1"
       assert meta.invoke_id == nil
     end
   end
@@ -840,16 +895,19 @@ defmodule StatifierPersistence.TelemetryTest do
           assert Map.keys(m) == [:system_time]
 
           assert Map.keys(meta) |> Enum.sort() == [
+                   :child_execution_id,
                    :child_index,
-                   :child_run_id,
                    :invoke_id,
                    :outcome,
-                   :parent_run_id
+                   :parent_execution_id
                  ]
 
-          assert meta.parent_run_id == "run-1"
+          assert meta.parent_execution_id == "execution-1"
           assert meta.invoke_id == "call"
-          assert meta.child_run_id == Linkage.child_run_id("run-1", "call", meta.child_index)
+
+          assert meta.child_execution_id ==
+                   Linkage.child_execution_id("execution-1", "call", meta.child_index)
+
           assert meta.outcome == :done
           meta.child_index
         end
@@ -880,9 +938,14 @@ defmodule StatifierPersistence.TelemetryTest do
                :unstarted
              ]
 
-      assert Map.keys(meta) |> Enum.sort() == [:decision, :invoke_id, :parent_run_id, :policy]
+      assert Map.keys(meta) |> Enum.sort() == [
+               :decision,
+               :invoke_id,
+               :parent_execution_id,
+               :policy
+             ]
 
-      assert meta.parent_run_id == "run-1"
+      assert meta.parent_execution_id == "execution-1"
       assert meta.invoke_id == "call"
       assert meta.policy == :all
       assert meta.decision == :not_yet
@@ -891,7 +954,7 @@ defmodule StatifierPersistence.TelemetryTest do
       assert m.failed == 0
       assert m.cancelled == 0
 
-      # Two indexes have a run of their own and have not finished; none is
+      # Two indexes have an execution of their own and have not finished; none is
       # unstarted, because the scheduler already created all three.
       assert m.unstarted == 0
 
@@ -925,7 +988,7 @@ defmodule StatifierPersistence.TelemetryTest do
       assert meta.outcome == :failed
       assert meta.child_count == 3
       assert meta.failed_count == 1
-      assert meta.parent_run_id == "run-1"
+      assert meta.parent_execution_id == "execution-1"
       assert meta.invoke_id == "call"
 
       # The settlement that answered says the same thing in tallies: one
@@ -953,9 +1016,12 @@ defmodule StatifierPersistence.TelemetryTest do
       finish_child(store, 1)
 
       assert {_m, meta} =
-               one([:statifier_persistence, :run, :step, :stop], &(&1.entry == :answer_parent))
+               one(
+                 [:statifier_persistence, :execution, :step, :stop],
+                 &(&1.entry == :answer_parent)
+               )
 
-      assert meta.run_id == "run-1"
+      assert meta.execution_id == "execution-1"
       assert meta.invoke_id == "call"
       assert meta.child_count == 2
     end
@@ -1028,15 +1094,15 @@ defmodule StatifierPersistence.TelemetryTest do
         chart_resolver: fn content_hash -> Map.fetch(charts, content_hash) end
       )
 
-    {:ok, _run, _ms} = Driver.create(driver, "run-1")
+    {:ok, _execution, _ms} = Driver.create(driver, "execution-1")
     driver
   end
 
-  # Starts `count` children of "run-1" under one policy, each seeded with
+  # Starts `count` children of "execution-1" under one policy, each seeded with
   # its own item so the assembled list is a function of the index.
   defp start_children(driver, count, opts \\ []) do
     for index <- 0..(count - 1) do
-      :ok = Driver.start_child_at(driver, "run-1", fanout_effect(index), index, count, opts)
+      :ok = Driver.start_child_at(driver, "execution-1", fanout_effect(index), index, count, opts)
     end
   end
 
@@ -1066,10 +1132,10 @@ defmodule StatifierPersistence.TelemetryTest do
   defp drive_child(store, index, event) do
     child = %{fanout_driver_for_child(store) | machine: compile!(@fanout_child_source)}
 
-    {:ok, _run, _ms} =
+    {:ok, _execution, _ms} =
       Driver.send_event(
         child,
-        Linkage.child_run_id("run-1", "call", index),
+        Linkage.child_execution_id("execution-1", "call", index),
         Event.external(event)
       )
 

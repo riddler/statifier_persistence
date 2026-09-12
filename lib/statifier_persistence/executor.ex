@@ -1,20 +1,20 @@
 defmodule StatifierPersistence.Executor do
   @moduledoc """
-  The seam through which a stepped run's effects reach the host (ADR-0004
+  The seam through which a stepped execution's effects reach the host (ADR-0004
   decision 4).
 
   An executor is a module implementing this behaviour, or an arity-2 fun
-  accepted anywhere a module is. `StatifierPersistence.Runs` invokes it once
+  accepted anywhere a module is. `StatifierPersistence.Executions` invokes it once
   per effect, in the effect list's own order, for every effect the lifecycle
   does not consume itself.
   """
 
   @typedoc """
-  What `c:execute/2` receives alongside each effect: the run's
-  caller-supplied id and the content hash of the chart revision it runs -
+  What `c:execute/2` receives alongside each effect: the execution's
+  caller-supplied id and the content hash of the chart revision it executions -
   enough to key idempotency storage and telemetry without another lookup.
   """
-  @type context :: %{run_id: String.t(), content_hash: String.t()}
+  @type context :: %{execution_id: String.t(), content_hash: String.t()}
 
   @typedoc """
   An executor: a module implementing this behaviour, or an arity-2 fun with
@@ -32,7 +32,7 @@ defmodule StatifierPersistence.Executor do
   - Only the public effect vocabulary (`t:Statifier.Effect.t/0`) ever
     arrives - never Session instruction tuples (st-ADR-0054 decision 1).
   - `:done` and `:budget_exhausted` never arrive: the lifecycle consumes
-    both into run status itself.
+    both into execution status itself.
   - At-least-once redelivery is the contract: a crash between step and
     persist re-drives the same event and re-emits the same effects carrying
     identical deterministic keys (st-ADR-0054 decision 3, st-ADR-0059's
@@ -43,7 +43,7 @@ defmodule StatifierPersistence.Executor do
               :ok | {:error, term()}
 
   # Package-internal: normalizes the module-or-fun shapes of `t:t/0` into
-  # one call. `StatifierPersistence.Runs` is the only intended caller.
+  # one call. `StatifierPersistence.Executions` is the only intended caller.
   @doc false
   @spec run(executor :: t(), effect :: Statifier.Effect.t(), context :: context()) ::
           :ok | {:error, term()}

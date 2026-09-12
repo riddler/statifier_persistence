@@ -3,13 +3,13 @@ defmodule StatifierPersistence.DriverSubchartEctoTest do
   Cascading cancel (sp-nt8 Phase 5, ADR-0008 decision 5) against
   `StatifierPersistence.Storage.Ecto` over real Postgres (ADR-0005) - the
   manual-verification item `driver_subchart_test.exs` cannot cover: that a
-  cascade's nested `lock_run/3` calls commit as nested Ecto transactions
+  cascade's nested `lock_execution/3` calls commit as nested Ecto transactions
   rather than deadlocking. The `{:cancel_invoke, _}` effect fires from
-  inside the parent's own `AdapterLock`/`lock_run/3` transaction (its
+  inside the parent's own `AdapterLock`/`lock_execution/3` transaction (its
   advisory lock already held), and the cascade's own `cancel/3` calls for
-  the child and then the grandchild each open a `lock_run/3` transaction of
+  the child and then the grandchild each open a `lock_execution/3` transaction of
   their own underneath it, parent-first every time by construction (the
-  walk cancels a run before it ever queries for that run's own children).
+  walk cancels an execution before it ever queries for that execution's own children).
 
   `async: false`, the demo variant's own reason
   (`StatifierPersistence.Demo.RestartDemoEctoTest`): one sandbox-checked-out
@@ -21,9 +21,9 @@ defmodule StatifierPersistence.DriverSubchartEctoTest do
   alias Statifier.Event
   alias Statifier.Invoke.Types, as: InvokeTypes
   alias Statifier.Machine
-  alias StatifierPersistence.{Driver, Runs, Storage}
+  alias StatifierPersistence.{Driver, Executions, Storage}
   alias StatifierPersistence.EctoHosts
-  alias StatifierPersistence.Run.Linkage
+  alias StatifierPersistence.Execution.Linkage
 
   @adapter Storage.Ecto
   @adapter_opts [persistence: EctoHosts.Default, sandbox: true]
@@ -78,34 +78,36 @@ defmodule StatifierPersistence.DriverSubchartEctoTest do
     %{store: store}
   end
 
-  # Manual verification (sp-nt8 Phase 5): run this against Postgres, not
+  # Manual verification (sp-nt8 Phase 5): execution this against Postgres, not
   # only the in-memory Agent, and confirm no lock timeout and no
   # `deadlock detected` - a plain pass is the confirmation, the same way
   # the demo's own Ecto variant confirms its default `AdapterLock`
   # serialization by running to completion.
-  # sabotage: cancel_and_descend/3 (runs.ex) short-circuited to skip the
+  # sabotage: cancel_and_descend/3 (executions.ex) short-circuited to skip the
   # recursive cascade_cancel/3 call -> red, the grandchild stayed :active
   # instead of :cancelled. Verified red against Postgres, reverted.
-  test "a three-deep cascade commits under nested Ecto lock_run/3 transactions", %{store: store} do
+  test "a three-deep cascade commits under nested Ecto lock_execution/3 transactions", %{
+    store: store
+  } do
     driver = driver(store, @parent_source, nesting_dispatch())
 
-    assert {:ok, _run, _ms} = Driver.create(driver, "run_ecto_1")
+    assert {:ok, _execution, _ms} = Driver.create(driver, "execution_ecto_1")
 
-    child_run_id = Linkage.child_run_id("run_ecto_1", "call", 0)
-    grandchild_run_id = Linkage.child_run_id(child_run_id, "nested", 0)
+    child_execution_id = Linkage.child_execution_id("execution_ecto_1", "call", 0)
+    grandchild_execution_id = Linkage.child_execution_id(child_execution_id, "nested", 0)
 
-    assert {:ok, before_child} = Storage.fetch_run(store, child_run_id)
-    assert {:ok, before_grandchild} = Storage.fetch_run(store, grandchild_run_id)
+    assert {:ok, before_child} = Storage.fetch_execution(store, child_execution_id)
+    assert {:ok, before_grandchild} = Storage.fetch_execution(store, grandchild_execution_id)
     assert before_child.status == :active
     assert before_grandchild.status == :active
 
-    assert {:ok, _run, machine_state} =
-             Driver.send_event(driver, "run_ecto_1", Event.external("timeout"))
+    assert {:ok, _execution, machine_state} =
+             Driver.send_event(driver, "execution_ecto_1", Event.external("timeout"))
 
     assert leaves(machine_state) == ["abandoned"]
 
-    assert {:ok, child_record} = Storage.fetch_run(store, child_run_id)
-    assert {:ok, grandchild_record} = Storage.fetch_run(store, grandchild_run_id)
+    assert {:ok, child_record} = Storage.fetch_execution(store, child_execution_id)
+    assert {:ok, grandchild_record} = Storage.fetch_execution(store, grandchild_execution_id)
     assert child_record.status == :cancelled
     assert grandchild_record.status == :cancelled
     assert child_record.position_blob == before_child.position_blob
@@ -114,15 +116,15 @@ defmodule StatifierPersistence.DriverSubchartEctoTest do
 
   # sp-y7n / RQ-SF035-9, the Postgres half of the pair whose SQLite half is
   # `StatifierPersistence.Ecto.SqliteMigrationsTest`: a linked child failed
-  # from outside the interpreter through `Runs.fail/4` answers its parent.
+  # from outside the interpreter through `Executions.fail/4` answers its parent.
   # What this backend adds over the in-memory case in
   # `StatifierPersistence.DriverSubchartTest` is the one thing that could
   # only fail here - the child's status write commits under its own
-  # `lock_run/3` transaction and the parent's answer opens a second one
+  # `lock_execution/3` transaction and the parent's answer opens a second one
   # after it, sequentially rather than nested, so a real advisory lock has
   # no deadlock to find.
   #
-  # sabotage: in `Runs.answer_parent_of_failed/4`, replaced the `driver`
+  # sabotage: in `Executions.answer_parent_of_failed/4`, replaced the `driver`
   # clause's `Driver.resolve_and_answer_parent/3` call with a bare
   # `result` -> red against Postgres, with the parent still in "calling"
   # and its `_event` never written. Verified red, reverted.
@@ -134,19 +136,21 @@ defmodule StatifierPersistence.DriverSubchartEctoTest do
         chart_resolver: parent_resolver(parent_machine)
       )
 
-    assert {:ok, _run, _ms} = Driver.create(driver, "run_ecto_fail_1")
+    assert {:ok, _execution, _ms} = Driver.create(driver, "execution_ecto_fail_1")
 
-    child_run_id = Linkage.child_run_id("run_ecto_fail_1", "call", 0)
+    child_execution_id = Linkage.child_execution_id("execution_ecto_fail_1", "call", 0)
 
-    assert {:ok, child_run} = Runs.fail(store, child_run_id, "boom", driver: driver)
-    assert child_run.status == :failed
+    assert {:ok, child_execution} =
+             Executions.fail(store, child_execution_id, "boom", driver: driver)
 
-    assert {:ok, child_record} = Storage.fetch_run(store, child_run_id)
+    assert child_execution.status == :failed
+
+    assert {:ok, child_record} = Storage.fetch_execution(store, child_execution_id)
     assert child_record.status == :failed
     assert child_record.failure == "boom"
 
     assert {:ok, parent_reloaded} =
-             Storage.load_run_position(store, "run_ecto_fail_1", parent_machine)
+             Storage.load_execution_position(store, "execution_ecto_fail_1", parent_machine)
 
     assert leaves(parent_reloaded) == ["refused"]
     assert parent_reloaded.datamodel["_event"]["data"]["reason"] == "boom"
