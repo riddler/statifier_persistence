@@ -893,11 +893,12 @@ What was checked at `e33cd7a`, and holds:
   `docs/telemetry.md:291`), read at `e33cd7a`.
 - **Decision 2's pinned test.** It exists as
   `test/statifier_persistence/execution_vocabulary_test.exs` at `e33cd7a`,
-  and its survivor list is **wider than decision 2's text predicts**: four
-  line-level survivors (`@survivor_lines`, `:23-32`, and `@survivor_names`,
-  `:37`) plus a file-level exemption for V06 (`@renaming_migration`, `:20`).
-  Decision 3 forces every one of them; item **4** below records the
-  supersession.
+  and its survivor list is **wider than decision 2's text predicts**: three
+  line-level survivors (`@survivor_lines`, `:23-32`) and a fourth matched by
+  name (`@survivor_names`, `:37`), plus a file-level exemption for V06
+  (`@renaming_migration`, `:20`). Decision 3 forces the exemption and two of
+  the line-level survivors; the other two are decision 4's and decision 1's.
+  Item **4** below records the supersession.
 - **Decision 3's configuration and tables.** `@table_keys [:charts,
   :positions, :executions, :inputs]` (`ecto/config.ex:46`), no `:runs`
   alias - `validate_tables!/1` raises on an unknown key
@@ -1025,8 +1026,15 @@ Decision 3 of this same record falsifies both, and neither is reworded.
 Decision 3's full cutover requires V06 to name **both** spellings - the
 `statifier_runs` it finds on a pre-`0.12.0` database and the
 `statifier_executions` it leaves behind - so the one module whose whole job
-is the rename cannot satisfy the atom or name arms of the pinned test. The
-shipped test therefore exempts it by file
+is the rename cannot satisfy the test's fourth arm, "no `run_id` or
+`run_status` spelling survives in `lib/`"
+(`test/statifier_persistence/execution_vocabulary_test.exs:136`,
+`@e33cd7a`), which `@old_column "run_id"` (`v06.ex:134`, `@e33cd7a`) and the
+rename statements around it match. The atom and name arms are not the
+problem: V06 carries the old names only as string literals (`@old_table_name
+"runs"`, `v06.ex:136`, `@e33cd7a`) and as moduledoc prose, never as an atom
+literal or a declared name. The test's own comment gives exactly that reason
+(`:14-19`, `@e33cd7a`). The shipped test therefore exempts it by file
 (`@renaming_migration ["lib/statifier_persistence/ecto/migrations/v06.ex"]`,
 `test/statifier_persistence/execution_vocabulary_test.exs:20`, applied at
 `:65`, `:84` and `:139`, `@e33cd7a`): the `migrations/` exemption decision 2
