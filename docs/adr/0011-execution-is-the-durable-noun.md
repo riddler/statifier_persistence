@@ -874,14 +874,16 @@ What was checked at `e33cd7a`, and holds:
   `child_execution_id/3` (`execution/linkage.ex:285`); the six renamed
   telemetry emitters (`telemetry.ex:219`, `:236`, `:262`, `:322`, `:343`,
   `:360`) over the `[:statifier_persistence, :execution, ...]` event names
-  (`telemetry.ex:160-167`); `with_execution/3` on both the behaviour and
+  (`telemetry.ex:160`, `:161`, `:162`, `:165`, `:166`, `:167` - `:163` and
+  `:164` are `@adapter_call` and `@identity_refused`); `with_execution/3`
+  on both the behaviour and
   `AdapterLock` (`serialization.ex:29`, `serialization/adapter_lock.ex:22`);
   the public types outside the adapter (`executions.ex:119`,
   `storage.ex:114`, `executor.ex:17`, `ecto/key_generator.ex:28`) and
   `Driver.dispatch_context/0`'s `execution_id:` key (`driver.ex:206`); the
   seven renamed error atoms (`storage.ex:71`, `:74`, `:75`;
   `storage/adapter.ex:202`, `:203`, `:205`, `:206`); the generated schema
-  module and its two `execution_id` fields (`ecto.ex:65`, `:92`, `:102`);
+  module and its two `execution_id` fields (`ecto.ex:65`, `:92`, `:103`);
   and the `@prefixes` map's `executions: "exec"` (`ecto/key_generator/uxid.ex:18`).
   All read at `e33cd7a`.
 - **Decision 2's two metadata values.** `stage: :execution`
@@ -891,10 +893,11 @@ What was checked at `e33cd7a`, and holds:
   `docs/telemetry.md:291`), read at `e33cd7a`.
 - **Decision 2's pinned test.** It exists as
   `test/statifier_persistence/execution_vocabulary_test.exs` at `e33cd7a`,
-  and its survivor list is the one this record names: the old donedata
-  *string* (`@survivor_lines`, `:23-26`) and the English verb
-  (`@survivor_names`, `:37`). No atom-literal survivor, as decision 2
-  requires.
+  and its survivor list is **wider than decision 2's text predicts**: four
+  line-level survivors (`@survivor_lines`, `:23-32`, and `@survivor_names`,
+  `:37`) plus a file-level exemption for V06 (`@renaming_migration`, `:20`).
+  Decision 3 forces every one of them; item **4** below records the
+  supersession.
 - **Decision 3's configuration and tables.** `@table_keys [:charts,
   :positions, :executions, :inputs]` (`ecto/config.ex:46`), no `:runs`
   alias - `validate_tables!/1` raises on an unknown key
@@ -1007,3 +1010,47 @@ correction: `docs/telemetry.md`'s `persist_tail/7` is the right arity
 attribution of the discoverability argument to ADR-0002 decision 4
 (`docs/adr/0002-configurable-keys-and-table-names.md:88-95`, `@e33cd7a`) was
 already corrected before the record merged.
+
+### 4. Decision 2's survivor count is superseded by decision 3 (RQ-SF041-26)
+
+Ruled by the operator 2026-09-13 (**RQ-SF041-26**, option A): the sentences
+below are met by this dated item rather than reworded.
+
+Decision 2 says, of its atom-literal clause, that "the survivor list is
+**empty**" and that "no `migrations/` exemption is needed either"
+(`:227-231` at `e33cd7a`), and of the test as a whole that it "names its
+permitted survivors, and there are exactly two" (`:233` at `e33cd7a`).
+Decision 3 of this same record falsifies both, and neither is reworded.
+
+Decision 3's full cutover requires V06 to name **both** spellings - the
+`statifier_runs` it finds on a pre-`0.12.0` database and the
+`statifier_executions` it leaves behind - so the one module whose whole job
+is the rename cannot satisfy the atom or name arms of the pinned test. The
+shipped test therefore exempts it by file
+(`@renaming_migration ["lib/statifier_persistence/ecto/migrations/v06.ex"]`,
+`test/statifier_persistence/execution_vocabulary_test.exs:20`, applied at
+`:65`, `:84` and `:139`, `@e33cd7a`): the `migrations/` exemption decision 2
+calls unnecessary, narrowed to that one file.
+
+And it names **four** survivors, not two, each forced by a decision of this
+record or by the moduledoc RQ-SF041-25 put in place:
+
+1. the old donedata **string** `statifier_persistence:run_status`
+   (`@survivor_lines`, `:26`, `@e33cd7a`), which decision 4 keeps readable
+   for one release - the survivor decision 2 already names;
+2. the migration helper's own recipe prose naming the `runs` table that
+   version `6` renames (`@survivor_lines`, `:30`, over
+   `lib/statifier_persistence/ecto/migrations.ex`, `@e33cd7a`);
+3. the same recipe's naming of the two `run_id` columns
+   (`@survivor_lines`, `:31`, `@e33cd7a`) - 2 and 3 are both forced by
+   decision 3, and are downstream of the `ecto/migrations.ex` moduledoc
+   that RQ-SF041-25 put there (item 2 above): a host reading the recipe
+   cannot tell which of its databases version `6` is for unless the recipe
+   spells the name it finds;
+4. `run` as the ordinary English verb (`@survivor_names ["run"]`, `:37`,
+   `@e33cd7a`), which decision 1 keeps.
+
+What decision 2's rule *means* is unchanged: every `run`, `runs` or `run_id`
+spelling left in `lib/` outside that list is still a miss, and the four
+survivors are exactly the ones decisions 1, 3 and 4 compel. Only the count
+and the "no exemption" clause are superseded.
