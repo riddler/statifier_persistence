@@ -145,8 +145,8 @@ rename through the modules, the types, the adapter callbacks and the
 tables (`docs/adr/0011-execution-is-the-durable-noun.md`, accepted; the
 table half is V06, `lib/statifier_persistence/ecto/migrations/v06.ex`,
 read at `8211e03`). Read every `run`, `runs` and `run_id` in this
-record - the `statifier_runs` table of decision 1, the `run_` row prefix
-of decision 4, the lifecycle nouns of decision 5 - as `execution`,
+record - the `statifier_runs` table of decision 4, the `run_` row prefix
+of decision 2, the lifecycle nouns of decision 5 - as `execution`,
 `executions` and `execution_id`. The file name and the decision numbers
 are cite targets and do not move.
 
