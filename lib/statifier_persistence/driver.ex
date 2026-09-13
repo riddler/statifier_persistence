@@ -34,7 +34,7 @@ defmodule StatifierPersistence.Driver do
   5. repeat from 4 until no answer is left. The result is the last step's
      own result.
 
-  The ordering in 3 and 4 is forced rather than stylistic. Dispatch executions
+  The ordering in 3 and 4 is forced rather than stylistic. Dispatch runs
   inside the tail because a call the chart made and a call the host
   performed have to be the same event in the same durable step; stepping
   runs outside it because the tail is already inside the execution's

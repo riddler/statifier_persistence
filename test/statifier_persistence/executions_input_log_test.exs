@@ -262,7 +262,7 @@ defmodule StatifierPersistence.ExecutionsInputLogTest do
     # first step, which is the whole "an adapter written before ADR-0010
     # sees no behaviour change" promise failing loudly. Verified red,
     # reverted.
-    test "executions a chart unchanged, and reports :not_supported for its log" do
+    test "runs a chart unchanged, and reports :not_supported for its log" do
       {:ok, store} = Storage.new(InMemory, [])
       driver = driver(store, @plain_source, fn _t, _p, _c -> :pending end)
 

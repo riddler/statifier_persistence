@@ -34,7 +34,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
   body, so the first write against the adapter is always the running
   test's own.
 
-  That matters because ExUnit executions `setup` callbacks in the order they are
+  That matters because ExUnit runs `setup` callbacks in the order they are
   defined, and the ones this template registers are defined where you write
   `use`. A host whose adapter needs a per-test binding established before
   any write - a session parameter, a connection-scoped setting, a sandbox

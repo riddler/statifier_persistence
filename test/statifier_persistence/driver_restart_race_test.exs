@@ -260,7 +260,7 @@ defmodule StatifierPersistence.DriverRestartRaceTest do
     # completion was delivered into the now-abandoned parent's "leaked"
     # transition instead of being discarded. Verified red, reverted.
     test "child completes while the parent is mid-restart", %{store: store} do
-      # `create/3` executions under the ordinary default serialization - only
+      # `create/3` runs under the ordinary default serialization - only
       # the answering `done_invocation/5` call below is paused, via a
       # per-call `serialization:` override rather than a driver-level
       # one, so this line does not block on its own caller.

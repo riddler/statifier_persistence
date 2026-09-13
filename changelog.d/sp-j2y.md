@@ -9,11 +9,16 @@
   `StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, from: 6)`
   from an ordinary host migration; a fresh install gets the new names from
   V01 and needs nothing extra. That one-line upgrade is for an install
-  already at V05: one that still owes V02, V03 or V04 runs
-  `up(for: MyApp.Persistence, from: 6, version: 6)` **first** and then
-  `up(for: MyApp.Persistence, from: 2, version: 5)`, because V02-V04 alter
-  the executions table, which on such a database carries that name only
-  once V06 has renamed it. Rename the table in any raw query, view,
+  already at V05: one capped below V04, which still owes V02, V03 or V04,
+  runs `up(for: MyApp.Persistence, from: 6, version: 6)` **first** and
+  then `up(for: MyApp.Persistence, from: <its cap + 1>, version: 5)` -
+  `from: 2` for a host capped at V01, `from: 3` at V02, `from: 4` at V03 -
+  because V02-V04 alter the executions table, which on such a database
+  carries that name only once V06 has renamed it; the migration's `down`
+  mirrors the two calls in reverse,
+  `down(for: MyApp.Persistence, from: 5, version: <its cap + 1>)` and then
+  `down(for: MyApp.Persistence, from: 6, version: 6)`. Rename the table in
+  any raw query, view,
   materialized view, hand-written Ecto schema or dashboard of your own that
   names it - it is `statifier_executions` on both paths. "In place" is exact
   for the table and the columns on every backend; off Postgres, which has no
@@ -27,15 +32,12 @@
   untouched: V06 renames the columns and indexes under whatever name you
   gave, and the table keeps that name.
 
-- **Rolling back below V06 drops the tables under their new names.**
-  `StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence,
-  version: 6)` undoes V06 alone and leaves an upgraded install back on the
-  pre-0.12.0 names. A rollback that continues below version 6 skips V06's
-  rename, because V01-V05 are rewritten to the new noun and drop the tables
-  under those names - so `down(for: MyApp.Persistence)` still removes
-  everything this package owns, on a fresh install and on an upgraded one
-  alike. What it is not is a downgrade: to run 0.11.x again, restore a
-  backup or migrate up with 0.11.x's own migrations.
+- **Rolling back drops the tables under their new names.** V01-V05 are
+  rewritten to the new noun and drop the tables under those names, so
+  `StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence)`
+  still removes everything this package owns, on a fresh install and on an
+  upgraded one alike. What it is not is a downgrade: to run 0.11.x again,
+  restore a backup or migrate up with 0.11.x's own migrations.
 
 - **An in-flight durable subchart child does not survive the upgrade.** A
   child created under 0.11.x carries its parent link in `metadata` under the
