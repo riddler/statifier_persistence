@@ -1064,3 +1064,17 @@ Nothing in clause 3 changes, then, and no wording is replaced. What is worth
 carrying forward is the reading, which item 1's noun sharpens: the guarantee is
 per-execution, not per-process. A callback handed execution E never runs inside
 E's own exclusion, and may run inside E's parent's.
+
+## Note (2026-09-13, sp-478): the donedata key is the one `run` the Note above does not sweep in
+
+Pure addition, one clause on the 2026-09-12 Note's item 1. That item reads
+every `run` in this file as an `execution` from 0.12.0. The reserved donedata
+key is the exception: `statifier_persistence:run_status` keeps its spelling as
+a key that is still *read* for one release. 0.12.0 reads both it and
+`statifier_persistence:execution_status` - the new key wins where both are
+present, and the old one logs one deprecation line - and 0.13.0 reads only the
+new one (ADR-0011 decision 4; `@execution_status_key`
+`lib/statifier_persistence/executions.ex:1686` and
+`@legacy_execution_status_key` `:1694`, read at `71537dc`). The failure-classed
+final this record's amendment decides is otherwise unchanged: same mechanism,
+same closed value set, only the key name moves.

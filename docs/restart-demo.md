@@ -2,11 +2,11 @@
 
 `test/statifier_persistence/demo/` is a demo embedder that runs a
 multi-step chart across a simulated restart with no `Statifier.Session`
-process at all: persist mid-run, drop every volatile process and struct,
-cold-boot from the run id alone, continue, finish. It exists to validate
-this package's whole surface - the identity guard (ADR-0003), the run
-lifecycle and executor seam (ADR-0004), and both storage adapters - the
-way the charter demands: driven by an embedder-shaped pipeline, not by
+process at all: persist mid-execution, drop every volatile process and
+struct, cold-boot from the execution id alone, continue, finish. It exists
+to validate this package's whole surface - the identity guard (ADR-0003),
+the execution lifecycle and executor seam (ADR-0004), and both storage
+adapters - the way the charter demands: driven by an embedder-shaped pipeline, not by
 unit tests alone.
 
 Every claim below is asserted by a test; when the prose and the tests
@@ -38,13 +38,13 @@ maximum in flight:
 
 At that moment the volatile runtime is stopped - every worker pid and
 armed in-memory timer dies with it - and a fresh host is booted from
-nothing but the run id.
+nothing but the execution id.
 
 ## What survives, and what the host must rebuild
 
 | Piece | Lives in | Survives the restart |
 |---|---|---|
-| the run's position and status | `StatifierPersistence.Storage` (InMemory / Postgres) | yes |
+| the execution's position and status | `StatifierPersistence.Storage` (InMemory / Postgres) | yes |
 | the chart blob | `StatifierPersistence.Storage` | yes |
 | the host's own timer and invocation rows | `Demo.Ledger` (stands in for the embedder's tables) | yes |
 | armed timers, live worker pids | `Demo.Runtime` (supervisor over volatile state) | no - stopped and rebuilt |
@@ -55,7 +55,7 @@ nothing but the run id.
 st-ADR-0060's rule is "resume restores position, not liveness", and the
 demo makes each half of that visible:
 
-1. **Position restores.** `boot/4` re-reads the run record and the chart
+1. **Position restores.** `boot/4` re-reads the execution record and the chart
    blob, recompiles a freshly interned machine, and the next step's
    identity guard proves the pair still match. The restart tests assert
    the boot really re-read stored bytes rather than reusing a carried
@@ -73,11 +73,11 @@ demo makes each half of that visible:
    source. The tests assert the post-restart worker is a live pid
    different from the dead pre-restart one.
 4. **Nothing runs twice.** Re-arming and re-establishing are idempotent
-   on their durable keys (`{run_id, ordinal}` for timers, `invoke_id`
+   on their durable keys (`{execution_id, ordinal}` for timers, `invoke_id`
    for invocations), and recovery goes through the host's own hands, not
    back through the executor seam - so the executor call log after the
-   restarted run is exactly the straight-through run's, asserted on
-   exact contents.
+   restarted execution is exactly the straight-through execution's, asserted
+   on exact contents.
 5. **The inputs are the host's to record.** `boot/4` restores no input
    tape; the recorder carries it. A replay of the recorded events -
    plus the one generated create input, the session id - against a
