@@ -1016,3 +1016,51 @@ is deliberately the wrong tool - decision 5 below says why". Read "decision
 5" there as **clause 5**, the amendment's own fifth clause ("What it is
 not"), which is what the sentence points at; this record's decision 5 is the
 cascade, and the section's other self-references say "clause N".
+
+## Note (2026-09-12, sp-pcw): `run` in this record is the noun now called `execution`, and the clause 3 wording the SF039 wrap queued is already the amendment's text
+
+Two items, both met by addition: nothing above is edited, and this record is
+read at the dates its sections were decided.
+
+**1. Read `run` as `execution` from 0.12.0.** Every `run` in this file - the
+durable noun, the module and function names, the ids and the column names it
+cites - names the record this package now calls an `execution`. The rename
+landed on `main` at `5f8ca12` (sp-op4, campaign SF041) with its pin tightened
+at `05993b0`. `StatifierPersistence.Execution` and
+`StatifierPersistence.Executions` are the modules
+(`lib/statifier_persistence/execution.ex:1`,
+`lib/statifier_persistence/executions.ex:1`), the error atom is
+`:execution_not_found` (`lib/statifier_persistence/executions.ex:710`), and the
+telemetry family is `[:statifier_persistence, :execution, ...]` carrying
+`execution_id` metadata (`lib/statifier_persistence/telemetry.ex:60-62`) - each
+read at `05993b0`. The table, column and index half (sp-j2y's V06) follows in
+the same release, and the whole rename ships in 0.12.0.
+**ADR-0011 governs the noun** (`docs/adr/0011-execution-is-the-durable-noun.md`,
+proposed at `05993b0`; it flips once the code and the migration are on `main`).
+This record's decisions are unchanged by the rename - only the word is - and
+the file name keeps `child-runs` because a file name is a cite target.
+
+**2. Clause 3 of the `after_step:` amendment already carries the narrow
+promise the SF039 wrap queued, scoped to the run it reports.** The SF039 wrap queued an item on the reading
+that clause 3 promises the callback fires outside *any* run lock, asking for the
+narrower wording on the grounds that decision 3's child is created inside its
+parent's serialization section, so the child's callback fires while the parent's
+exclusion is still held. That is a correct reading of the mechanism and it is
+already the record's text - so the queued item is answered here rather than
+corrected above. Clause 3's own sentence is scoped to one run: "It fires after
+that step's persist, in the order the steps happened, and outside the exclusion
+of the run it reports" (:871-872, read at `05993b0`). The paragraph beneath it
+states both halves of the queued concern explicitly - the child case ("the
+callback fires for the child's own steps - correctly, with the child's run id -
+while the parent's exclusion is still held", :889-890) and the refusal of the
+broad reading with the narrow promise in its place ("a host must not read clause
+3 as a promise that no run lock is held anywhere when its callback runs. What it
+promises is narrower and is the part a host can act on: the callback for a given
+run never runs inside that run's own exclusion", :891-894). The sp-nhl Note
+above restates that same sentence where it records that the claim holds by
+construction and that no test asserts it (:1001-1003).
+
+Nothing in clause 3 changes, then, and no wording is replaced. What is worth
+carrying forward is the reading, which item 1's noun sharpens: the guarantee is
+per-execution, not per-process. A callback handed execution E never runs inside
+E's own exclusion, and may run inside E's parent's.
