@@ -303,7 +303,7 @@ defmodule StatifierPersistence.DriverRestartRaceTest do
       send(blocked_pid, :go_ahead)
 
       # The completion's read happens only now, inside the one exclusion
-      # that also executions Task B's cancel - so it sees the cancellation and
+      # that also runs Task B's cancel - so it sees the cancellation and
       # discards, exactly as the ordinary restart case above does.
       assert {:discarded, execution} = Task.await(task_a)
       assert execution.status == :active
