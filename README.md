@@ -405,17 +405,27 @@ an index nobody's query needs yet.
 
 From 0.12.0 an install that still owes V02, V03 or V04 - one capped below
 version 4 - runs **V06 first, on its own**, and the versions it skipped
-afterwards:
+afterwards. For a host capped at V01:
 
     def up do
       StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, from: 6, version: 6)
       StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, from: 2, version: 5)
     end
 
-V02, V03 and V04 alter the executions table, which on a database built
-before 0.12.0 carries that name only once V06 has renamed it (ADR-0011
-decision 3). An install already at V05 needs none of this: `from: 6` is the
-whole upgrade.
+    def down do
+      StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence, from: 5, version: 2)
+      StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence, from: 6, version: 6)
+    end
+
+Substitute your own cap in both spans - a host capped at V02 writes
+`from: 3` on the second `up` and `version: 3` on the first `down`. V02, V03
+and V04 alter the executions table, which on a database built before 0.12.0
+carries that name only once V06 has renamed it (ADR-0011 decision 3), and
+the `down` calls mirror the `up` calls in reverse so that the rename is the
+last step down rather than the first: `down/1` skips V06 whenever
+`version:` is below 6, so one uncapped call would leave the execution names
+standing over a V01-shaped table. An install already at V05 needs none of
+this: `from: 6` is the whole upgrade.
 
 A host already on V02 picks V03 up with an ordinary migration of its own:
 

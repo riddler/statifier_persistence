@@ -110,7 +110,7 @@ if Code.ensure_loaded?(Ecto.Migration) do
     V04 - one capped below version 4 - runs V06 on its own first and the
     versions it skipped afterwards, because those three alter the executions
     table, which on a database built before `0.12.0` carries that name only
-    once V06 has renamed it:
+    once V06 has renamed it. For a host capped at V01:
 
         defmodule MyApp.Repo.Migrations.RenameStatifierPersistenceExecutions do
           use Ecto.Migration
@@ -120,14 +120,25 @@ if Code.ensure_loaded?(Ecto.Migration) do
             StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, from: 2, version: 5)
           end
 
-          def down,
-            do:
-              StatifierPersistence.Ecto.Migrations.down(
-                for: MyApp.Persistence,
-                from: 6,
-                version: 2
-              )
+          def down do
+            StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence, from: 5, version: 2)
+            StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence, from: 6, version: 6)
+          end
         end
+
+    Substitute your own cap in both spans: a host capped at V02 writes
+    `from: 3` on the second `up` and `version: 3` on the first `down`, and
+    one capped at V03 writes `from: 4` and `version: 4`. The two `down`
+    calls mirror the two `up` calls in reverse, which is what makes the
+    rename the last step down rather than the first: `down/1` skips V06
+    whenever `version:` is below 6 - it is about to drop the tables under
+    the execution names - so a single `down(from: 6, version: 2)` would
+    roll V02-V05 back and leave the execution names standing. In this order
+    those versions come down first and V06 then renames, leaving the
+    install on the pre-`0.12.0` names at the shape this migration found.
+    Further down is V01's own migration's business, and running `0.11.x`
+    against a database that was ever upgraded is unsupported either way
+    (ADR-0011 decision 3).
 
     An install already at V05 needs none of that: `up(from: 6)` is the whole
     upgrade.
