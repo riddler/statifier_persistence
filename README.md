@@ -6,6 +6,14 @@
 [![Hex Docs](https://img.shields.io/badge/hex-docs-lightgreen.svg)](https://hexdocs.pm/statifier_persistence/)
 [![License](https://img.shields.io/hexpm/l/statifier_persistence.svg)](https://github.com/riddler/statifier_persistence/blob/main/LICENSE)
 
+> **Pre-1.0.** Until `statifier_persistence` reaches v1.0, its public surface may change
+> between minor releases, sometimes drastically: a release may rename modules,
+> callbacks, table columns, telemetry events or error vocabulary with no
+> compatibility shim. Every such change is recorded in
+> [CHANGELOG.md](CHANGELOG.md) under a bold **Breaking** heading that says what
+> to do about it. Pinning to an exact minor - `~> X.Y.0` - is the recommended way
+> to consume the package until 1.0.
+
 Durable stepper and storage adapters for
 [Statifier](https://github.com/riddler/statifier-ex).
 
