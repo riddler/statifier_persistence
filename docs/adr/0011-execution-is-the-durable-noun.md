@@ -1062,3 +1062,29 @@ What decision 2's rule *means* is unchanged: every `run`, `runs` or `run_id`
 spelling left in `lib/` outside that list is still a miss, and the four
 survivors are exactly the ones decisions 1, 3 and 4 compel. Only the count
 and the "no exemption" clause are superseded.
+
+## Note (2026-09-13, sp-bij): one attribution correction to the PR #101 Note's item 4
+
+Pure addition, one correction to a single clause; nothing above is
+edited and no decision changes.
+
+Item 4 of the 2026-09-13 Note lists four survivors and says of its second
+and third - the migration helper's recipe prose naming the `runs` table
+that version `6` renames, and the same recipe's naming of the two
+`run_id` columns - that they are "downstream of the `ecto/migrations.ex`
+moduledoc that RQ-SF041-25 put there (item 2 above)". **That attribution
+is wrong.** `git blame -L 94,103
+lib/statifier_persistence/ecto/migrations.ex`, run at `8211e03`, puts
+both lines on `71537dc`: `:98` ("renames the `runs` table to") and `:99`
+("`executions`, both `run_id` columns"), each blamed to that commit.
+`71537dc` is **PR #97** (sp-j2y, "Renames the durable table and its
+columns to the execution names"), not PR #99 (`2630aed`, "Cures the
+pass-1 review: the record cite and the drop attribution"), which is where
+item 2's moduledoc ordering rule came in. Read survivors 2 and 3 as
+added by PR #97.
+
+Nothing else in item 4 moves: the survivor list is the same four, the
+count of four still supersedes decision 2's "exactly two", and the reason
+survivors 2 and 3 are forced - decision 3's full cutover requires the
+recipe to name what V06 finds - is unchanged and is not an attribution
+claim.
