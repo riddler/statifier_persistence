@@ -126,8 +126,100 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
     def down, do: Migrations.down(@opts ++ [from: 6, version: 6])
   end
 
+  # A fresh install of its own, migrated up and rolled all the way back in
+  # one call - the `down(for: Host)` this package advertises, on a database
+  # that has never held the retired names.
+  defmodule MigrateSqliteFreshRollback do
+    @moduledoc false
+    use Ecto.Migration
+
+    alias StatifierPersistence.Ecto.Migrations
+
+    @opts [
+      repo: StatifierPersistence.SqliteTestRepo,
+      key: :uxid,
+      table_prefix: "sq_fr_"
+    ]
+
+    def up, do: Migrations.up(@opts)
+    def down, do: Migrations.down(@opts)
+  end
+
+  # V06 up over a hand-declared pre-`0.12.0` schema, then the whole
+  # rollback in one call: V01-V05 drop the tables under the execution names
+  # V06 has just given them, and V06's own `down/1` does nothing.
+  defmodule MigrateSqliteUpgradedFull do
+    @moduledoc false
+    use Ecto.Migration
+
+    alias StatifierPersistence.Ecto.Migrations
+
+    @opts [
+      repo: StatifierPersistence.SqliteTestRepo,
+      key: :uxid,
+      table_prefix: "sq_uf_"
+    ]
+
+    def up, do: Migrations.up(@opts ++ [from: 6, version: 6])
+    def down, do: Migrations.down(@opts)
+  end
+
+  # The capped host pattern, spelled out: one host migration per package
+  # version, each capped in both directions, which is the shape this
+  # package's own moduledoc recommends and the shape sp-tae was measured
+  # failing on. `mix ecto.rollback --all` runs their `down`s newest-first,
+  # one `Migrations.down/1` call per step, so no single call can see where
+  # the rollback ends - the reason V06's `down/1` is a no-op rather than a
+  # conditional rename (RQ-SF041-25).
+  for version <- 1..6 do
+    defmodule Module.concat(__MODULE__, "MigratePerVersionV0#{version}") do
+      @moduledoc false
+      use Ecto.Migration
+
+      alias StatifierPersistence.Ecto.Migrations
+
+      @opts [
+        repo: StatifierPersistence.SqliteTestRepo,
+        key: :uxid,
+        table_prefix: "sq_c6_"
+      ]
+      @version version
+
+      def up, do: Migrations.up(@opts ++ [from: @version, version: @version])
+      def down, do: Migrations.down(@opts ++ [from: @version, version: @version])
+    end
+  end
+
   @concurrent_version 20_260_906_000_401
   @v06_version 20_260_912_000_603
+  @fresh_rollback_version 20_260_913_000_701
+  @upgraded_full_version 20_260_913_000_702
+
+  # The same pattern over a database that was built before `0.12.0`: its
+  # V01-V05 host migrations ran under `0.11.x` and are recorded as such,
+  # and V06 is the one it is picking up now.
+  for version <- 1..6 do
+    defmodule Module.concat(__MODULE__, "MigrateUpgradedPerVersionV0#{version}") do
+      @moduledoc false
+      use Ecto.Migration
+
+      alias StatifierPersistence.Ecto.Migrations
+
+      @opts [
+        repo: StatifierPersistence.SqliteTestRepo,
+        key: :uxid,
+        table_prefix: "sq_x6_"
+      ]
+      @version version
+
+      def up, do: Migrations.up(@opts ++ [from: @version, version: @version])
+      def down, do: Migrations.down(@opts ++ [from: @version, version: @version])
+    end
+  end
+
+  # One host migration timestamp per package version, in order.
+  @capped_per_version Enum.map(1..6, &(20_260_913_000_710 + &1))
+  @upgraded_per_version Enum.map(1..6, &(20_260_913_000_810 + &1))
 
   @capped_versions [20_260_906_000_301, 20_260_906_000_302]
 
@@ -263,8 +355,9 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
     #
     # sabotage: dropped V06's non-Postgres index branch, leaving the
     # `ALTER INDEX` arm for every adapter -> red here with
-    # `** (Exqlite.Error) near "INDEX": syntax error`. Verified red,
-    # reverted from a copy.
+    # `** (Exqlite.Error) near "INDEX": syntax error`. A second mutation:
+    # gave V06's `down/1` back its rename -> red on the tail, the tables
+    # came back as `sq_up_runs`. Both verified red, reverted from a copy.
     test "renames the table, both columns and both unique indexes, keeping every row" do
       before_rows = rows("sq_up_runs")
       before_inputs = rows("sq_up_inputs")
@@ -284,13 +377,17 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
       assert rows("sq_up_executions") == before_rows
       assert rows("sq_up_inputs") == before_inputs
 
+      # V06's `down/1` is a no-op (RQ-SF041-25), so rolling this migration
+      # back leaves the execution names standing: a downgrade to
+      # pre-`0.12.0` code is unsupported, and the way down is the drop the
+      # cases below exercise, not a rename.
       :ok = migrate_capped(:down, @v06_version, MigrateSqliteV06)
 
-      assert upgraded_tables() == ["sq_up_inputs", "sq_up_runs"]
-      assert "run_id" in columns("sq_up_runs")
-      assert "sq_up_runs_run_id_index" in indexes("sq_up_runs")
-      assert "sq_up_inputs_run_id_seq_index" in indexes("sq_up_inputs")
-      assert rows("sq_up_runs") == before_rows
+      assert upgraded_tables() == ["sq_up_executions", "sq_up_inputs"]
+      assert "execution_id" in columns("sq_up_executions")
+      assert "sq_up_executions_execution_id_index" in indexes("sq_up_executions")
+      assert "sq_up_inputs_execution_id_seq_index" in indexes("sq_up_inputs")
+      assert rows("sq_up_executions") == before_rows
       assert rows("sq_up_inputs") == before_inputs
     end
 
@@ -302,6 +399,123 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
       refute "sq_runs" in tables()
       assert "execution_id" in columns("sq_executions")
       assert "sq_executions_execution_id_index" in indexes("sq_executions")
+    end
+  end
+
+  describe "rolling all the way back on this adapter" do
+    setup do
+      drop_prefixed("sq_fr_", @fresh_rollback_version)
+      drop_prefixed("sq_uf_", @upgraded_full_version)
+
+      on_exit(fn ->
+        drop_prefixed("sq_fr_", @fresh_rollback_version)
+        drop_prefixed("sq_uf_", @upgraded_full_version)
+      end)
+
+      :ok
+    end
+
+    # Case (a): a fresh install, one call each way.
+    #
+    # sabotage: gave V06's `down/1` back its rename -> red here,
+    # `** (Exqlite.Error) no such table: sq_fr_executions` - V06 renamed
+    # the table away and the arms behind it named what was no longer
+    # there. Verified red, reverted from a copy.
+    test "a fresh install rolls back to nothing" do
+      :ok = migrate_capped(:up, @fresh_rollback_version, MigrateSqliteFreshRollback)
+
+      assert prefixed_tables("sq_fr_") ==
+               ["sq_fr_charts", "sq_fr_executions", "sq_fr_inputs", "sq_fr_positions"]
+
+      :ok = migrate_capped(:down, @fresh_rollback_version, MigrateSqliteFreshRollback)
+
+      assert prefixed_tables("sq_fr_") == []
+    end
+
+    # Case (b): an upgraded install - the hand-declared pre-`0.12.0` schema
+    # plus V06 up - rolls back to nothing too, because V01-V05 drop the
+    # tables under the names V06 left them on.
+    #
+    # sabotage: gave V06's `down/1` back its rename -> red here,
+    # `** (Exqlite.Error) no such table: sq_uf_executions`. Verified red,
+    # reverted from a copy.
+    test "an upgraded install rolls back to nothing" do
+      create_pre_0_12_schema("sq_uf_", :with_chart_and_position_tables)
+
+      :ok = migrate_capped(:up, @upgraded_full_version, MigrateSqliteUpgradedFull)
+
+      assert "sq_uf_executions" in prefixed_tables("sq_uf_")
+      refute "sq_uf_runs" in prefixed_tables("sq_uf_")
+
+      :ok = migrate_capped(:down, @upgraded_full_version, MigrateSqliteUpgradedFull)
+
+      assert prefixed_tables("sq_uf_") == []
+    end
+  end
+
+  describe "the capped host pattern - one host migration per version" do
+    setup do
+      drop_capped_per_version()
+      on_exit(&drop_capped_per_version/0)
+
+      :ok
+    end
+
+    # Case (c): what sp-tae was filed for, on the backend it was measured
+    # on. Six host migrations, one per package version; the rollback runs
+    # their `down`s newest-first, one `Migrations.down/1` call per step.
+    #
+    # sabotage: gave V06's `down/1` back its rename -> red here,
+    # `** (Exqlite.Error) no such table: sq_c6_executions` - step 6 had
+    # renamed the table to `sq_c6_runs` before the steps behind it ran,
+    # which is the failure the bead reports. Verified red, reverted from a
+    # copy.
+    test "a fresh install migrates up and rolls back --all, one version per step" do
+      Enum.each(1..6, fn version ->
+        :ok = migrate_capped(:up, capped_per_version(version), capped_per_version_module(version))
+      end)
+
+      assert prefixed_tables("sq_c6_") ==
+               ["sq_c6_charts", "sq_c6_executions", "sq_c6_inputs", "sq_c6_positions"]
+
+      assert "execution_id" in columns("sq_c6_executions")
+
+      # Newest first, which is the order `mix ecto.rollback --all` uses.
+      Enum.each(6..1//-1, fn version ->
+        :ok =
+          migrate_capped(:down, capped_per_version(version), capped_per_version_module(version))
+      end)
+
+      assert prefixed_tables("sq_c6_") == []
+      refute "sq_c6_runs" in tables()
+    end
+
+    # The same six steps over an UPGRADED install on this adapter: the
+    # pre-`0.12.0` schema its V01-V05 host migrations built under `0.11.x`,
+    # recorded as run, plus the V06 migration it is picking up now.
+    #
+    # sabotage: gave V06's `down/1` back its rename -> red here,
+    # `** (Exqlite.Error) no such table: sq_x6_executions`. Verified red,
+    # reverted from a copy.
+    test "an upgraded install rolls back --all the same way" do
+      create_pre_0_12_schema("sq_x6_", :with_chart_and_position_tables)
+      record_as_already_run(Enum.take(@upgraded_per_version, 5))
+
+      :ok = migrate_capped(:up, upgraded_per_version(6), upgraded_per_version_module(6))
+
+      assert "sq_x6_executions" in prefixed_tables("sq_x6_")
+      refute "sq_x6_runs" in prefixed_tables("sq_x6_")
+
+      Enum.each(6..1//-1, fn version ->
+        :ok =
+          migrate_capped(
+            :down,
+            upgraded_per_version(version),
+            upgraded_per_version_module(version)
+          )
+      end)
+
+      assert prefixed_tables("sq_x6_") == []
     end
   end
 
@@ -688,9 +902,15 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
   # The shape V05 left behind at 0.11.x. The migrations that built it have
   # been rewritten to the new noun, so the only way to hold the old shape
   # is to declare it.
-  defp create_pre_0_12_schema do
+  #
+  # The durable pair is all the rename cases need; a case that rolls the
+  # whole DDL back needs the chart and position tables too, because V01's
+  # `down/1` drops all three.
+  defp create_pre_0_12_schema, do: create_pre_0_12_schema("sq_up_", :durable_tables_only)
+
+  defp create_pre_0_12_schema(prefix, extras) do
     SQL.query!(SqliteTestRepo, """
-    CREATE TABLE sq_up_runs (
+    CREATE TABLE #{prefix}runs (
       id TEXT NOT NULL PRIMARY KEY,
       run_id TEXT NOT NULL,
       status TEXT NOT NULL,
@@ -708,12 +928,12 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
 
     SQL.query!(
       SqliteTestRepo,
-      "CREATE UNIQUE INDEX sq_up_runs_run_id_index ON sq_up_runs (run_id)",
+      "CREATE UNIQUE INDEX #{prefix}runs_run_id_index ON #{prefix}runs (run_id)",
       []
     )
 
     SQL.query!(SqliteTestRepo, """
-    CREATE TABLE sq_up_inputs (
+    CREATE TABLE #{prefix}inputs (
       id TEXT NOT NULL PRIMARY KEY,
       run_id TEXT NOT NULL,
       seq INTEGER NOT NULL,
@@ -726,23 +946,100 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
 
     SQL.query!(
       SqliteTestRepo,
-      "CREATE UNIQUE INDEX sq_up_inputs_run_id_seq_index ON sq_up_inputs (run_id, seq)",
+      "CREATE UNIQUE INDEX #{prefix}inputs_run_id_seq_index ON #{prefix}inputs (run_id, seq)",
       []
     )
 
     SQL.query!(SqliteTestRepo, """
-    INSERT INTO sq_up_runs
+    INSERT INTO #{prefix}runs
       (id, run_id, status, content_hash, identity_blob, inserted_at, updated_at)
     VALUES ('run_pre012_0', 'execution-pre-0-12-0', 'running', 'sha256:pre-0-12',
             x'010203', '2026-09-12 00:00:00', '2026-09-12 00:00:00')
     """)
 
     SQL.query!(SqliteTestRepo, """
-    INSERT INTO sq_up_inputs
+    INSERT INTO #{prefix}inputs
       (id, run_id, seq, door, input_blob, inserted_at, updated_at)
     VALUES ('input_pre012_0', 'execution-pre-0-12-0', 0, 'step', x'0909',
             '2026-09-12 00:00:00', '2026-09-12 00:00:00')
     """)
+
+    if extras == :with_chart_and_position_tables do
+      SQL.query!(SqliteTestRepo, """
+      CREATE TABLE #{prefix}charts (
+        id TEXT NOT NULL PRIMARY KEY,
+        content_hash TEXT NOT NULL,
+        identity_blob BLOB NOT NULL,
+        chart_blob BLOB NOT NULL,
+        inserted_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+      """)
+
+      SQL.query!(SqliteTestRepo, """
+      CREATE TABLE #{prefix}positions (
+        id TEXT NOT NULL PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        identity_blob BLOB NOT NULL,
+        position_blob BLOB NOT NULL,
+        inserted_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+      """)
+    end
+
+    :ok
+  end
+
+  defp prefixed_tables(prefix) do
+    Enum.filter(tables(), &String.starts_with?(&1, prefix))
+  end
+
+  defp drop_prefixed(prefix, version) do
+    for suffix <- ~w(inputs runs executions positions charts) do
+      SQL.query!(SqliteTestRepo, "DROP TABLE IF EXISTS #{prefix}#{suffix}", [])
+    end
+
+    SQL.query!(SqliteTestRepo, "DELETE FROM schema_migrations WHERE version = ?1", [version])
+
+    :ok
+  end
+
+  defp capped_per_version(version), do: Enum.at(@capped_per_version, version - 1)
+
+  defp upgraded_per_version(version), do: Enum.at(@upgraded_per_version, version - 1)
+
+  defp upgraded_per_version_module(version),
+    do: Module.concat(__MODULE__, "MigrateUpgradedPerVersionV0#{version}")
+
+  # What a host's `schema_migrations` carries for the package migrations it
+  # ran under `0.11.x`: the rows, with no DDL behind them beyond the
+  # pre-`0.12.0` schema declared by hand above.
+  defp record_as_already_run(versions) do
+    for version <- versions do
+      SQL.query!(
+        SqliteTestRepo,
+        "INSERT INTO schema_migrations (version, inserted_at) VALUES (?1, datetime('now'))",
+        [version]
+      )
+    end
+
+    :ok
+  end
+
+  defp capped_per_version_module(version),
+    do: Module.concat(__MODULE__, "MigratePerVersionV0#{version}")
+
+  defp drop_capped_per_version do
+    for prefix <- ["sq_c6_", "sq_x6_"],
+        suffix <- ~w(inputs runs executions positions charts) do
+      SQL.query!(SqliteTestRepo, "DROP TABLE IF EXISTS #{prefix}#{suffix}", [])
+    end
+
+    for version <- @capped_per_version ++ @upgraded_per_version do
+      SQL.query!(SqliteTestRepo, "DELETE FROM schema_migrations WHERE version = ?1", [version])
+    end
 
     :ok
   end

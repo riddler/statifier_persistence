@@ -96,31 +96,32 @@ if Code.ensure_loaded?(Ecto.Migration) do
 
     ## Rolling back
 
-    `down/1` renames back when it finds the executions table, and does
-    nothing when it does not. It cannot tell a fresh install from an
-    upgraded one - nothing in the schema records which path built the
-    database, and a marker that did would be new stored surface bought for
-    one migration - so the rename back is unconditional on existence
-    whenever this function is called.
+    `down/1` is a **no-op**, and that is a decision rather than an omission
+    (RQ-SF041-25, ruled 2026-09-13; ADR-0011 decision 3 carries the clause
+    as a dated Note).
 
-    **Whether it is called is the runner's decision.** Rolling back below
-    V06 drops the tables under their new names; V06's own `down/1` renames
-    back only when it is the last step. `StatifierPersistence.Ecto.Migrations.down/1`
-    therefore runs this `down/1` when `version:` is 6 - the rollback stops
-    here, the pre-`0.12.0` names are what the database should be left with
-    - and skips it when `version:` is below 6, because V01-V05 then drop
-    the tables, and they drop them under the execution names they declare.
-    Restoring the retired names first is what would leave those arms
-    naming objects that are no longer there (RQ-SF041-23, ruled
-    2026-09-13; ADR-0011 decision 3 carries the clause as a dated Note).
+    Under the full cutover there is nothing for it to restore. V01-V05 are
+    rewritten to the execution names, so on `0.12.0` code every database
+    this package can reach - fresh or upgraded - is on those names, and
+    they are the names V01-V05 drop. Renaming back would only be
+    meaningful under a *downgrade to pre-`0.12.0` code*, and that is
+    exactly what the record declares unsupported: an install that must
+    return to the retired names restores from a backup, or migrates with
+    `0.11.x`'s own migrations.
 
-    So both rollbacks work, on both kinds of database. `down(for: Host,
-    version: 6)` puts an upgraded install back on the pre-`0.12.0` names
-    and leaves V01-V05's DDL standing. A full `down(for: Host)` drops
-    everything this package owns, on a fresh install and on an upgraded
-    one alike - which does mean an upgraded install cannot step back to a
-    working `0.11.x` schema without its `0.11.x` migrations or a backup:
-    the way down past V06 is a drop, not a downgrade.
+    Making it a no-op is also the only shape that survives the host
+    migration pattern this package recommends. A host that writes one
+    migration per package version rolls back one version per
+    `Ecto.Migrator` step, so a rename back would run in its own step and
+    the V05, V04, V03 and V01 steps behind it would then name objects that
+    are no longer there. A condition inside a single
+    `StatifierPersistence.Ecto.Migrations.down/1` call cannot see across
+    those steps, which is the defect this ruling removes.
+
+    So `down(for: Host, version: 6)` leaves the database exactly as it is,
+    and a full `down(for: Host)` drops everything this package owns - on a
+    fresh install and on an upgraded one alike, under one call or one call
+    per version. The way down past V06 is a drop, not a downgrade.
     """
 
     use Ecto.Migration
@@ -143,18 +144,12 @@ if Code.ensure_loaded?(Ecto.Migration) do
     end
 
     @doc """
-    Renames the execution names back to the pre-`0.12.0` names when the
-    executions table is there - see the moduledoc on why an upgraded
-    install cannot then roll further back.
+    Does nothing. Rolling back below `0.12.0` code is unsupported, and
+    V01-V05 drop the tables under the execution names either way - see the
+    moduledoc.
     """
     @spec down(Config.t()) :: :ok
-    def down(%Config{} = config) do
-      execute(fn ->
-        rename(config, Config.table(config, :executions), @new_column, @old_column)
-      end)
-
-      :ok
-    end
+    def down(%Config{} = _config), do: :ok
 
     # The name the executions table has on the side of the rename we are
     # coming from. A host that gave a `tables:` override for this table

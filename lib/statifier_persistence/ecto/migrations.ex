@@ -100,17 +100,22 @@ if Code.ensure_loaded?(Ecto.Migration) do
     over them - in place, copying no data. On a database built at `0.12.0`
     or later there is nothing to rename, because V01-V05 create the
     execution names directly, and V06 is a no-op. Either way it is the
-    version this package now expects. `StatifierPersistence.Ecto.Migrations.V06`
-    records the whole of it, including what rolling back does: `down/1`
-    skips V06's rename when the rollback continues below version 6, because
-    the tables are then dropped under their new names, and runs it when 6
-    is the last step.
+    version this package now expects.
 
-    One ordering rule comes with it. An install that still owes V02, V03 or
-    V04 - one capped below version 4 - runs V06 on its own first and the
-    versions it skipped afterwards, because those three alter the executions
-    table, which on a database built before `0.12.0` carries that name only
-    once V06 has renamed it. For a host capped at V01:
+    Rolling back never renames anything: V06's `down/1` is a no-op
+    (RQ-SF041-25, ruled 2026-09-13). V01-V05 are rewritten to the
+    execution names and drop the tables under them, on both kinds of
+    database, so there is nothing a rename back would leave in a better
+    state - and a downgrade to pre-`0.12.0` code is unsupported, by the
+    record and by this package. `StatifierPersistence.Ecto.Migrations.V06`
+    records the whole of it.
+
+    One ordering rule comes with it, on the way **up** only. An install
+    that still owes V02, V03 or V04 - one capped below version 4 - runs V06
+    on its own first and the versions it skipped afterwards, because those
+    three alter the executions table, which on a database built before
+    `0.12.0` carries that name only once V06 has renamed it. For a host
+    capped at V01:
 
         defmodule MyApp.Repo.Migrations.RenameStatifierPersistenceExecutions do
           use Ecto.Migration
@@ -129,14 +134,11 @@ if Code.ensure_loaded?(Ecto.Migration) do
     Substitute your own cap in both spans: a host capped at V02 writes
     `from: 3` on the second `up` and `version: 3` on the first `down`, and
     one capped at V03 writes `from: 4` and `version: 4`. The two `down`
-    calls mirror the two `up` calls in reverse, which is what makes the
-    rename the last step down rather than the first: `down/1` skips V06
-    whenever `version:` is below 6 - it is about to drop the tables under
-    the execution names - so a single `down(from: 6, version: 2)` would
-    roll V02-V05 back and leave the execution names standing. In this order
-    those versions come down first and V06 then renames, leaving the
-    install on the pre-`0.12.0` names at the shape this migration found.
-    Further down is V01's own migration's business, and running `0.11.x`
+    calls mirror the two `up` calls in reverse, and the V06 one does
+    nothing at all - V02-V05 drop the executions table under the name it
+    carries on `0.12.0` code, which is the name V06 gave it, and the way
+    back down is that drop rather than a rename. What happens below the cap
+    is the host's own earlier migration's business, and running `0.11.x`
     against a database that was ever upgraded is unsupported either way
     (ADR-0011 decision 3).
 
@@ -171,10 +173,6 @@ if Code.ensure_loaded?(Ecto.Migration) do
     # apart is the defect the derivation removes.
     @current_version @migrations |> Map.keys() |> Enum.max()
 
-    # The version whose `down/1` is conditional on where the rollback ends
-    # - see `down/1` and `StatifierPersistence.Ecto.Migrations.V06`.
-    @rename_version 6
-
     @doc """
     Migrates the tables from `from:` (default: V01) up through `version:`
     (default: the newest).
@@ -206,14 +204,11 @@ if Code.ensure_loaded?(Ecto.Migration) do
     with `from: N`, so the rollback stops at the cap instead of reaching
     versions a later migration has already rolled back - see the moduledoc.
 
-    V06's rename back is the one step this function can decide not to take.
-    When the rollback **continues below V06** the tables are about to be
-    dropped, and V01-V05 drop them under the names they declare - the
-    execution names - so restoring the retired names first would leave
-    those arms naming objects that are no longer there. `down/1` therefore
-    skips V06's rename whenever `version:` is below 6, and runs it when 6
-    is the last step. `StatifierPersistence.Ecto.Migrations.V06.down/1`
-    called on its own always renames back (ADR-0011 decision 3).
+    Every version's `down/1` runs, unconditionally. V06's is a no-op
+    (RQ-SF041-25, ruled 2026-09-13): V01-V05 are rewritten to the execution
+    names and drop the tables under them, so there is nothing to rename
+    back first, and a rollback reaches the same end state under one call or
+    under one host migration per version.
 
     Takes the same options as `up/1`.
     """
@@ -229,22 +224,9 @@ if Code.ensure_loaded?(Ecto.Migration) do
       end
 
       Enum.each(from..target//-1, fn version ->
-        unless skipped_on_the_way_down?(version, target) do
-          Map.fetch!(@migrations, version).down(config)
-        end
+        Map.fetch!(@migrations, version).down(config)
       end)
     end
-
-    # V06 renames the durable table and its columns back to their retired
-    # names, which is only the right thing to do when V06 is the last step
-    # of the rollback. A rollback that continues below it drops those
-    # tables, and V01-V05 drop them under the execution names - so the
-    # rename is skipped and the drops find what they name. V06's own
-    # `down/1` is unchanged: called directly, or with `version: 6`, it
-    # renames back.
-    @spec skipped_on_the_way_down?(pos_integer(), pos_integer()) :: boolean()
-    defp skipped_on_the_way_down?(@rename_version, target), do: target < @rename_version
-    defp skipped_on_the_way_down?(_version, _target), do: false
 
     @doc """
     The newest migration version this package knows - the newest key of the
