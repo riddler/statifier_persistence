@@ -21,8 +21,9 @@ steps are about a Postgres index.
 | `lock_run/3` | `SELECT pg_advisory_xact_lock(hashtextextended(...))` plus `FOR UPDATE` | The backend does not parse it. The callback raises |
 | `list_runs_by_metadata/2`, `list_run_states_by_metadata/2` | `jsonb` containment (`@>`) with a `-> ... ->>` extraction | The backend does not parse it, so the callbacks never issue it: each consults `supports_metadata?/1` first and answers `{:error, :metadata_unsupported}`, called directly or through the facade |
 | `supports_metadata?/1` | Declares the `jsonb` column *and* the list helpers as one capability | Already answers `false` off `repo.__adapter__()`, so both the facade and the two raw callbacks refuse the listings cleanly rather than reaching the Postgres-only SQL |
-| V03's `GIN jsonb_path_ops` index on `runs.metadata` | Serves the containment query above | The migration helper skips it, so `Migrations.up/1` runs to completion and the `outcome_blob` column arrives |
+| V03's `GIN jsonb_path_ops` index on `executions.metadata` | Serves the containment query above | The migration helper skips it, so `Migrations.up/1` runs to completion and the `outcome_blob` column arrives |
 | V04's concurrent rebuild of that index | `CREATE INDEX CONCURRENTLY` on the same index | A no-op in both directions: there is no index here to rebuild. The `@disable_ddl_transaction` / `@disable_migration_lock` attributes a Postgres host puts on that migration are not needed here |
+| V06's rename of that index | `ALTER INDEX ... RENAME TO` | Skipped: there is no `GIN` index here to rename. V06's table, column and unique-index renames do run - SQLite has no `ALTER INDEX`, so the two unique indexes are dropped and declared again under their new names, which reads and writes no row either |
 
 The last three rows are already engine-conditional and need nothing from
 you. Everything a host has to decide is about the first row.

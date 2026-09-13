@@ -93,9 +93,9 @@ defmodule StatifierPersistence.Storage.EctoTest do
   end
 
   describe "the schema-prefixed Overridden host" do
-    # sabotage: hardcoded init/1's runs_table to "statifier_runs" -> red,
+    # sabotage: hardcoded init/1's executions_table to "statifier_executions" -> red,
     # the duplicate insert below raised Ecto.ConstraintError (constraint
-    # workflow_runs_run_id_index not declared under the wrong name)
+    # workflow_runs_execution_id_index not declared under the wrong name)
     # instead of returning :execution_exists. Verified red, reverted.
     test "insert_execution/2 maps the renamed table's unique index to :execution_exists", %{
       overridden: opts

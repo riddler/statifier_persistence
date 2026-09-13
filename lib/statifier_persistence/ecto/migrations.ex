@@ -33,7 +33,7 @@ if Code.ensure_loaded?(Ecto.Migration) do
     host that ran the migration above when this package shipped only V01
     picks up V02 with a second ordinary migration,
 
-        defmodule MyApp.Repo.Migrations.AddStatifierPersistenceRunMetadata do
+        defmodule MyApp.Repo.Migrations.AddStatifierPersistenceExecutionMetadata do
           use Ecto.Migration
 
           def up, do: StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, from: 2)
@@ -84,14 +84,27 @@ if Code.ensure_loaded?(Ecto.Migration) do
     Inside a transaction V04 skips the rebuild and leaves V03's index in
     place, which is the same index under the same name - so the one-call
     recipe above stays correct on a fresh database, where a plain build
-    on an empty runs table costs nothing. It warns only when that table
-    already holds rows. `StatifierPersistence.Ecto.Migrations.V04`
+    on an empty executions table costs nothing. It warns only when that
+    table already holds rows. `StatifierPersistence.Ecto.Migrations.V04`
     records the whole of it.
 
     V05 needs no recipe of its own: it creates ADR-0010's input log table
-    and its unique `(run_id, seq)` index, on every backend, inside an
+    and its unique `(execution_id, seq)` index, on every backend, inside an
     ordinary transaction. A host already running V04 picks it up with
     `up(for: MyApp.Persistence, from: 5)`.
+
+    V06 needs no recipe of its own either, and what it does depends on
+    which database it finds (ADR-0011 decision 3). On a database this
+    package built before `0.12.0` it renames the `runs` table to
+    `executions`, both `run_id` columns to `execution_id`, and the indexes
+    over them - in place, copying no data. On a database built at `0.12.0`
+    or later there is nothing to rename, because V01-V05 create the
+    execution names directly, and V06 is a no-op. Either way it is the
+    version this package now expects. `StatifierPersistence.Ecto.Migrations.V06`
+    records the whole of it, including what rolling back does: `down/1`
+    skips V06's rename when the rollback continues below version 6, because
+    the tables are then dropped under their new names, and runs it when 6
+    is the last step.
 
     `expected_version/0` answers what that newest version is. A host that
     delegates its migrations here never needs it; a host whose schema is
@@ -112,13 +125,18 @@ if Code.ensure_loaded?(Ecto.Migration) do
       2 => StatifierPersistence.Ecto.Migrations.V02,
       3 => StatifierPersistence.Ecto.Migrations.V03,
       4 => StatifierPersistence.Ecto.Migrations.V04,
-      5 => StatifierPersistence.Ecto.Migrations.V05
+      5 => StatifierPersistence.Ecto.Migrations.V05,
+      6 => StatifierPersistence.Ecto.Migrations.V06
     }
 
     # Read off the map rather than written beside it: a version this module
     # cannot reach is not a version this package knows, and the two drifting
     # apart is the defect the derivation removes.
     @current_version @migrations |> Map.keys() |> Enum.max()
+
+    # The version whose `down/1` is conditional on where the rollback ends
+    # - see `down/1` and `StatifierPersistence.Ecto.Migrations.V06`.
+    @rename_version 6
 
     @doc """
     Migrates the tables from `from:` (default: V01) up through `version:`
@@ -151,6 +169,15 @@ if Code.ensure_loaded?(Ecto.Migration) do
     with `from: N`, so the rollback stops at the cap instead of reaching
     versions a later migration has already rolled back - see the moduledoc.
 
+    V06's rename back is the one step this function can decide not to take.
+    When the rollback **continues below V06** the tables are about to be
+    dropped, and V01-V05 drop them under the names they declare - the
+    execution names - so restoring the retired names first would leave
+    those arms naming objects that are no longer there. `down/1` therefore
+    skips V06's rename whenever `version:` is below 6, and runs it when 6
+    is the last step. `StatifierPersistence.Ecto.Migrations.V06.down/1`
+    called on its own always renames back (ADR-0011 decision 3).
+
     Takes the same options as `up/1`.
     """
     @spec down(keyword()) :: :ok
@@ -165,9 +192,22 @@ if Code.ensure_loaded?(Ecto.Migration) do
       end
 
       Enum.each(from..target//-1, fn version ->
-        Map.fetch!(@migrations, version).down(config)
+        unless skipped_on_the_way_down?(version, target) do
+          Map.fetch!(@migrations, version).down(config)
+        end
       end)
     end
+
+    # V06 renames the durable table and its columns back to their retired
+    # names, which is only the right thing to do when V06 is the last step
+    # of the rollback. A rollback that continues below it drops those
+    # tables, and V01-V05 drop them under the execution names - so the
+    # rename is skipped and the drops find what they name. V06's own
+    # `down/1` is unchanged: called directly, or with `version: 6`, it
+    # renames back.
+    @spec skipped_on_the_way_down?(pos_integer(), pos_integer()) :: boolean()
+    defp skipped_on_the_way_down?(@rename_version, target), do: target < @rename_version
+    defp skipped_on_the_way_down?(_version, _target), do: false
 
     @doc """
     The newest migration version this package knows - the newest key of the
@@ -191,7 +231,7 @@ if Code.ensure_loaded?(Ecto.Migration) do
     version against a repo means reading a marker out of that repo's schema,
     and this package records none: it writes no versions table, no marker row
     and no version column, and Ecto's own `schema_migrations` holds the
-    *host's* migration timestamps, which say nothing about which of V01..V05
+    *host's* migration timestamps, which say nothing about which of V01..V06
     a hand-written schema matches. The only way to grow such an assertion is
     to start writing a marker - a new table, in a new migration, carried by
     every host including the ones that delegate and already know - which is

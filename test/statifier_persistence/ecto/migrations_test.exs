@@ -289,17 +289,17 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
   end
 
   describe "identity columns across key configurations" do
-    # sabotage: made V01's runs content_hash :string (varchar) -> red on runs drift
-    test "content_hash/session_id/run_id columns identical across all three" do
+    # sabotage: made V01's executions content_hash :string (varchar) -> red on executions drift
+    test "content_hash/session_id/execution_id columns identical across all three" do
       # [column_name, data_type, is_nullable] per ADR-0002: identities are
-      # text, verbatim; only runs.session_id is nullable (decision 5).
+      # text, verbatim; only executions.session_id is nullable (decision 5).
       for {table, expected} <- [
             {"charts", [["content_hash", "text", "NO"]]},
             {"positions", [["content_hash", "text", "NO"], ["session_id", "text", "NO"]]},
-            {"runs",
+            {"executions",
              [
                ["content_hash", "text", "NO"],
-               ["run_id", "text", "NO"],
+               ["execution_id", "text", "NO"],
                ["session_id", "text", "YES"]
              ]}
           ] do
@@ -312,12 +312,12 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
       end
     end
 
-    # sabotage: removed V01's charts/runs unique_index calls -> red
+    # sabotage: removed V01's charts/executions unique_index calls -> red
     test "unique indexes on the identity columns identical across all three" do
       for {table, unique_columns} <- [
             {"charts", [["content_hash"]]},
             {"positions", [["session_id"]]},
-            {"runs", [["run_id"]]}
+            {"executions", [["execution_id"]]}
           ] do
         for prefix <- @key_prefixes do
           assert unique_index_columns(prefix <> table) == unique_columns
@@ -326,14 +326,14 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     end
   end
 
-  describe "V02: the runs metadata column" do
+  describe "V02: the executions metadata column" do
     # sabotage: removed V02's alter/add of the metadata column -> red, and
-    # red loudly: the generated runs schema declares the field, so every
+    # red loudly: the generated executions schema declares the field, so every
     # test in this module failed on the missing column, this one included.
     # Verified red, reverted.
-    test "is a nullable jsonb column on runs, across every key configuration" do
+    test "is a nullable jsonb column on executions, across every key configuration" do
       for prefix <- @key_prefixes do
-        assert identity_columns(prefix <> "runs", ["metadata"]) ==
+        assert identity_columns(prefix <> "executions", ["metadata"]) ==
                  [["metadata", "jsonb", "YES"]]
       end
     end
@@ -342,15 +342,15 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     # assertion moved to "V03: ..." below with it (sp-t57, ruling C6).
   end
 
-  describe "V03: the runs outcome column and the metadata index" do
+  describe "V03: the executions outcome column and the metadata index" do
     # sabotage: removed V03's alter/add of the outcome_blob column (from
     # up/1 and down/1 together, so the module's own cycle stayed clean)
     # -> red here and in the two schema-insert tests, which the generated
     # runs schema's declared field turns into a missing-column error.
     # Verified red, reverted.
-    test "outcome_blob is a nullable bytea column on runs, across every key configuration" do
+    test "outcome_blob is a nullable bytea column on executions, across every key configuration" do
       for prefix <- @key_prefixes do
-        assert identity_columns(prefix <> "runs", ["outcome_blob"]) ==
+        assert identity_columns(prefix <> "executions", ["outcome_blob"]) ==
                  [["outcome_blob", "bytea", "YES"]]
       end
     end
@@ -360,7 +360,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     # Verified red, reverted.
     test "metadata carries exactly one GIN jsonb_path_ops index" do
       for prefix <- @key_prefixes do
-        table = prefix <> "runs"
+        table = prefix <> "executions"
 
         assert metadata_indexes(table) == [[table <> "_metadata_gin_index"]]
         assert metadata_index_definition(table) =~ "USING gin"
@@ -375,13 +375,13 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     # `** (Postgrex.Error) ERROR 42703 (undefined_column) column "door" of
     # relation "kx_uxid_inputs" does not exist`, since the generated inputs
     # schema declares the field regardless. Verified red, reverted.
-    test "carries run_id, seq, door and a nullable input_blob, across every key configuration" do
+    test "carries execution_id, seq, door and a nullable input_blob, across every key configuration" do
       for prefix <- @key_prefixes do
-        assert identity_columns(prefix <> "inputs", ["run_id", "seq", "door", "input_blob"]) ==
+        assert identity_columns(prefix <> "inputs", ["execution_id", "seq", "door", "input_blob"]) ==
                  [
                    ["door", "text", "NO"],
+                   ["execution_id", "text", "NO"],
                    ["input_blob", "bytea", "YES"],
-                   ["run_id", "text", "NO"],
                    ["seq", "bigint", "NO"]
                  ]
       end
@@ -391,19 +391,19 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     # unique index list came back empty for every key configuration, and
     # red on the duplicate-insert case below, which stored the duplicate
     # ordinal instead of refusing it. Verified red, reverted.
-    test "carries the unique (run_id, seq) index denseness rests on" do
+    test "carries the unique (execution_id, seq) index denseness rests on" do
       for prefix <- @key_prefixes do
-        assert unique_index_columns(prefix <> "inputs") == [["run_id", "seq"]]
+        assert unique_index_columns(prefix <> "inputs") == [["execution_id", "seq"]]
       end
     end
 
     # sabotage: replaced V05's unique_index/3 with a plain index/3 -> red,
     # the duplicate insert below succeeded instead of raising, and red on
     # the index-shape case above. Verified red, reverted.
-    test "a duplicate (run_id, seq) insert violates the unique index" do
+    test "a duplicate (execution_id, seq) insert violates the unique index" do
       TestRepo.insert!(%KxUxid.Input{execution_id: "run-mig-input-dup", seq: 0, door: "step"})
 
-      assert_raise Ecto.ConstraintError, ~r/run_id_seq/, fn ->
+      assert_raise Ecto.ConstraintError, ~r/execution_id_seq/, fn ->
         TestRepo.insert!(%KxUxid.Input{execution_id: "run-mig-input-dup", seq: 0, door: "step"})
       end
     end
@@ -417,7 +417,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
 
       on_exit(fn ->
         SQL.query!(TestRepo, "DROP TABLE IF EXISTS kx_v05_inputs", [])
-        SQL.query!(TestRepo, "DROP TABLE IF EXISTS kx_v05_runs", [])
+        SQL.query!(TestRepo, "DROP TABLE IF EXISTS kx_v05_executions", [])
         SQL.query!(TestRepo, "DROP TABLE IF EXISTS kx_v05_positions", [])
         SQL.query!(TestRepo, "DROP TABLE IF EXISTS kx_v05_charts", [])
         SQL.query!(TestRepo, "DELETE FROM schema_migrations WHERE version = $1", [version])
@@ -426,7 +426,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
       :ok = migrate(:up, version, MigrateKxV05)
 
       assert tables_in_schema("public", "kx_v05_") ==
-               ["kx_v05_charts", "kx_v05_inputs", "kx_v05_positions", "kx_v05_runs"]
+               ["kx_v05_charts", "kx_v05_executions", "kx_v05_inputs", "kx_v05_positions"]
 
       :ok = migrate(:down, version, MigrateKxV05)
 
@@ -456,8 +456,8 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
       end
     end
 
-    # sabotage: removed V01's runs unique_index -> duplicate insert red
-    test "a duplicate run_id insert violates the runs unique index" do
+    # sabotage: removed V01's executions unique_index -> duplicate insert red
+    test "a duplicate execution_id insert violates the executions unique index" do
       TestRepo.insert!(%KxUuid.Execution{
         execution_id: "run-kx-dup",
         status: "running",
@@ -465,7 +465,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
         identity_blob: <<1>>
       })
 
-      assert_raise Ecto.ConstraintError, ~r/run_id/, fn ->
+      assert_raise Ecto.ConstraintError, ~r/execution_id/, fn ->
         TestRepo.insert!(%KxUuid.Execution{
           execution_id: "run-kx-dup",
           status: "failed",
@@ -490,9 +490,9 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
       :ok = migrate(:up, @literal_version, MigrateKxLiteral)
 
       assert tables_in_schema("kx_schema", "kx_lit_") ==
-               ["kx_lit_charts", "kx_lit_inputs", "kx_lit_positions", "kx_lit_runs"]
+               ["kx_lit_charts", "kx_lit_executions", "kx_lit_inputs", "kx_lit_positions"]
 
-      assert unique_index_columns("kx_lit_runs", "kx_schema") == [["run_id"]]
+      assert unique_index_columns("kx_lit_executions", "kx_schema") == [["execution_id"]]
 
       :ok = migrate(:down, @literal_version, MigrateKxLiteral)
 
@@ -508,14 +508,14 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     # @current_version start) -> red, and red for the bead's reason: the
     # second rollback re-ran V03.down, which here reaches the metadata index
     # first - `** (Postgrex.Error) ERROR 42704 (undefined_object) index
-    # "kx_cap_runs_metadata_gin_index" does not exist`. Verified red,
+    # "kx_cap_executions_metadata_gin_index" does not exist`. Verified red,
     # reverted.
     test "a V01-V02 migration and a V03 migration roll all the way back" do
       [capped_version, v03_version] = @capped_versions
 
       on_exit(fn ->
         SQL.query!(TestRepo, ~s(DROP TABLE IF EXISTS "kx_cap_inputs"), [])
-        SQL.query!(TestRepo, ~s(DROP TABLE IF EXISTS "kx_cap_runs"), [])
+        SQL.query!(TestRepo, ~s(DROP TABLE IF EXISTS "kx_cap_executions"), [])
         SQL.query!(TestRepo, ~s(DROP TABLE IF EXISTS "kx_cap_positions"), [])
         SQL.query!(TestRepo, ~s(DROP TABLE IF EXISTS "kx_cap_charts"), [])
 
@@ -528,9 +528,9 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
       :ok = migrate(:up, v03_version, MigrateKxCappedV03)
 
       assert tables_in_schema("public", "kx_cap_") ==
-               ["kx_cap_charts", "kx_cap_inputs", "kx_cap_positions", "kx_cap_runs"]
+               ["kx_cap_charts", "kx_cap_executions", "kx_cap_inputs", "kx_cap_positions"]
 
-      assert identity_columns("kx_cap_runs", ["outcome_blob"]) ==
+      assert identity_columns("kx_cap_executions", ["outcome_blob"]) ==
                [["outcome_blob", "bytea", "YES"]]
 
       # Newest first, which is the order `mix ecto.rollback --all` uses.
@@ -547,7 +547,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
 
       on_exit(fn ->
         SQL.query!(TestRepo, ~s(DROP TABLE IF EXISTS "kx_con_inputs"), [])
-        SQL.query!(TestRepo, ~s(DROP TABLE IF EXISTS "kx_con_runs"), [])
+        SQL.query!(TestRepo, ~s(DROP TABLE IF EXISTS "kx_con_executions"), [])
         SQL.query!(TestRepo, ~s(DROP TABLE IF EXISTS "kx_con_positions"), [])
         SQL.query!(TestRepo, ~s(DROP TABLE IF EXISTS "kx_con_charts"), [])
 
@@ -565,21 +565,21 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     # the oid assertion ("the index V03 built is still the one in place"),
     # the two indexes being the same object. Verified red, reverted.
     test "the index is dropped and rebuilt, valid and unchanged in shape", ctx do
-      before_oid = metadata_index_oid("kx_con_runs")
+      before_oid = metadata_index_oid("kx_con_executions")
 
-      assert metadata_indexes("kx_con_runs") == [["kx_con_runs_metadata_gin_index"]]
+      assert metadata_indexes("kx_con_executions") == [["kx_con_executions_metadata_gin_index"]]
 
       :ok = migrate(:up, ctx.concurrent_version, MigrateKxConcurrentV04)
 
-      after_oid = metadata_index_oid("kx_con_runs")
+      after_oid = metadata_index_oid("kx_con_executions")
 
       refute after_oid == before_oid,
              "V04 left the index V03 built in place rather than rebuilding it"
 
-      assert metadata_indexes("kx_con_runs") == [["kx_con_runs_metadata_gin_index"]]
-      assert metadata_index_definition("kx_con_runs") =~ "USING gin"
-      assert metadata_index_definition("kx_con_runs") =~ "jsonb_path_ops"
-      assert metadata_index_valid?("kx_con_runs")
+      assert metadata_indexes("kx_con_executions") == [["kx_con_executions_metadata_gin_index"]]
+      assert metadata_index_definition("kx_con_executions") =~ "USING gin"
+      assert metadata_index_definition("kx_con_executions") =~ "jsonb_path_ops"
+      assert metadata_index_valid?("kx_con_executions")
     end
 
     # sabotage: made V04.down/1 drop the index too -> red, and red across
@@ -589,12 +589,12 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     # on_exit down with it. Verified red, reverted.
     test "down/1 keeps the concurrently built index, and V03's down drops it", ctx do
       :ok = migrate(:up, ctx.concurrent_version, MigrateKxConcurrentV04)
-      rebuilt_oid = metadata_index_oid("kx_con_runs")
+      rebuilt_oid = metadata_index_oid("kx_con_executions")
 
       :ok = migrate(:down, ctx.concurrent_version, MigrateKxConcurrentV04)
 
-      assert metadata_index_oid("kx_con_runs") == rebuilt_oid
-      assert metadata_indexes("kx_con_runs") == [["kx_con_runs_metadata_gin_index"]]
+      assert metadata_index_oid("kx_con_executions") == rebuilt_oid
+      assert metadata_indexes("kx_con_executions") == [["kx_con_executions_metadata_gin_index"]]
 
       [v03_version | _rest] = @concurrent_versions
       :ok = migrate(:down, v03_version, MigrateKxConcurrentV03)
@@ -608,7 +608,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     # (active_sql_transaction) DROP INDEX CONCURRENTLY cannot run inside a
     # transaction block`. Verified red, reverted.
     test "inside a DDL transaction the rebuild is skipped, silently on an empty table", ctx do
-      before_oid = metadata_index_oid("kx_con_runs")
+      before_oid = metadata_index_oid("kx_con_executions")
 
       log =
         capture_log(fn ->
@@ -617,17 +617,17 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
 
       refute log =~ "V04 skipped the concurrent rebuild"
 
-      assert metadata_index_oid("kx_con_runs") == before_oid
-      assert metadata_indexes("kx_con_runs") == [["kx_con_runs_metadata_gin_index"]]
+      assert metadata_index_oid("kx_con_executions") == before_oid
+      assert metadata_indexes("kx_con_executions") == [["kx_con_executions_metadata_gin_index"]]
     end
 
     # sabotage: made V04's warn_skipped/1 warn unconditionally -> red in the
     # empty-table case above, which is the one a fresh database and every
     # test harness takes. Verified red, reverted.
-    test "the skip warns once the runs table already holds rows", ctx do
-      insert_run("kx_con_runs", "run-kx-con-warn")
+    test "the skip warns once the executions table already holds rows", ctx do
+      insert_run("kx_con_executions", "run-kx-con-warn")
 
-      before_oid = metadata_index_oid("kx_con_runs")
+      before_oid = metadata_index_oid("kx_con_executions")
 
       log =
         capture_log(fn ->
@@ -638,7 +638,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
       assert log =~ "@disable_ddl_transaction true"
       assert log =~ "@disable_migration_lock true"
 
-      assert metadata_index_oid("kx_con_runs") == before_oid
+      assert metadata_index_oid("kx_con_executions") == before_oid
     end
   end
 
@@ -646,7 +646,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     # sabotage: skipped parse!'s version validation -> red (KeyError, not ArgumentError)
     test "an unknown version raises before any DDL" do
       assert_raise ArgumentError, ~r/unknown migration version/, fn ->
-        Migrations.up(for: KxUxid, version: 6)
+        Migrations.up(for: KxUxid, version: 7)
       end
 
       assert_raise ArgumentError, ~r/unknown migration version/, fn ->
@@ -668,7 +668,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     # red, reverted.
     test "an unknown down from: raises before any DDL" do
       assert_raise ArgumentError, ~r/unknown migration from/, fn ->
-        Migrations.down(for: KxUxid, from: 6)
+        Migrations.down(for: KxUxid, from: 7)
       end
     end
 
@@ -726,7 +726,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     # 1, right 5), this case and its SQLite twin alone ("45 tests, 2
     # failures"). Verified red, reverted.
     test "expected_version/0 is the newest version the migration map holds" do
-      assert Migrations.expected_version() == 5
+      assert Migrations.expected_version() == 6
     end
   end
 
@@ -747,15 +747,15 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     rows
   end
 
-  defp insert_run(table, run_id) do
+  defp insert_run(table, execution_id) do
     SQL.query!(
       TestRepo,
       """
-      INSERT INTO "#{table}" (id, run_id, status, content_hash, identity_blob,
+      INSERT INTO "#{table}" (id, execution_id, status, content_hash, identity_blob,
                               inserted_at, updated_at)
       VALUES ($1, $2, 'running', 'sha256:kx-con', $3, now(), now())
       """,
-      [run_id, run_id, <<1>>]
+      [execution_id, execution_id, <<1>>]
     )
 
     :ok

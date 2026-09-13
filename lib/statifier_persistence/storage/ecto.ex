@@ -89,7 +89,7 @@ if Code.ensure_loaded?(Ecto) do
            position_schema: Module.concat(host, Position),
            execution_schema: Module.concat(host, Execution),
            input_schema: Module.concat(host, Input),
-           runs_table: Config.table(config, :runs),
+           executions_table: Config.table(config, :executions),
            inputs_table: Config.table(config, :inputs),
            input_log_cap: cap
          )}
@@ -227,9 +227,9 @@ if Code.ensure_loaded?(Ecto) do
         row
         |> Changeset.change()
         |> Changeset.unique_constraint(:execution_id,
-          # The index name is DDL, not API: V01 created it and V06 (sp-j2y)
-          # renames it with the table and the column.
-          name: "#{Keyword.fetch!(opts, :runs_table)}_run_id_index"
+          # The index name is DDL, not API: V01 creates it and V06 renames
+          # it, with the table and the column, on an upgraded install.
+          name: "#{Keyword.fetch!(opts, :executions_table)}_execution_id_index"
         )
 
       case repo(opts).insert(changeset) do
@@ -702,8 +702,8 @@ if Code.ensure_loaded?(Ecto) do
         |> struct(%{execution_id: execution_id, seq: seq, door: door, input_blob: input_blob})
         |> Changeset.change()
         |> Changeset.unique_constraint([:execution_id, :seq],
-          # DDL again: V05 created this name and V06 (sp-j2y) renames it.
-          name: "#{Keyword.fetch!(opts, :inputs_table)}_run_id_seq_index"
+          # DDL again: V05 creates this name and V06 renames it.
+          name: "#{Keyword.fetch!(opts, :inputs_table)}_execution_id_seq_index"
         )
 
       case repo(opts).insert(changeset) do

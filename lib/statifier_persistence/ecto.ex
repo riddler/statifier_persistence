@@ -14,7 +14,8 @@ if Code.ensure_loaded?(Ecto) do
     four Ecto schema modules - `MyApp.Persistence.Chart`,
     `MyApp.Persistence.Position`, `MyApp.Persistence.Execution`,
     `MyApp.Persistence.Input` - over the `statifier_charts` /
-    `statifier_positions` / `statifier_runs` / `statifier_inputs` tables
+    `statifier_positions` / `statifier_executions` / `statifier_inputs`
+    tables
     with UXID string primary keys (`chart_` / `pos_` / `exec_` / `input_`
     prefixes).
 
@@ -61,7 +62,7 @@ if Code.ensure_loaded?(Ecto) do
     @schema_modules [
       {Chart, :charts},
       {Position, :positions},
-      {Execution, :runs},
+      {Execution, :executions},
       {Input, :inputs}
     ]
 
@@ -87,7 +88,7 @@ if Code.ensure_loaded?(Ecto) do
         identity_blob: :binary,
         position_blob: :binary
       ],
-      runs: [
+      executions: [
         execution_id: :string,
         status: :string,
         content_hash: :string,
@@ -138,20 +139,10 @@ if Code.ensure_loaded?(Ecto) do
       fields =
         for {field, type} <- Map.fetch!(@fields, table) do
           args =
-            cond do
-              field in @blob_columns ->
-                Config.blob_field_args(config, field)
-
-              # ADR-0011 decision 2 renames the schema field; decision 3's V06
-              # renames the column it reads. sp-op4 lands the first and sp-j2y
-              # the second, so until V06 is applied the field is mapped onto
-              # the column it still has. sp-j2y removes this `source:` with the
-              # migration.
-              field == :execution_id ->
-                [field, type, [source: :run_id]]
-
-              true ->
-                [field, type]
+            if field in @blob_columns do
+              Config.blob_field_args(config, field)
+            else
+              [field, type]
             end
 
           quote do: field(unquote_splicing(args))

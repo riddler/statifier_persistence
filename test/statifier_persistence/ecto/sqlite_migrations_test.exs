@@ -6,7 +6,7 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
   0.7.0 could not be adopted by a SQLite host at all: V03's `GIN`
   `jsonb_path_ops` index made `ecto_sqlite3` raise, which rolled the whole
   migration back and took the `outcome_blob` column with it, and capping at
-  V02 was equally dead because the generated runs schema reads
+  V02 was equally dead because the generated executions schema reads
   `outcome_blob` unconditionally. These cases are the standing proof that
   V03 runs to completion on such an adapter, that the column arrives and
   the index does not, and that what the index served refuses rather than
@@ -110,7 +110,24 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
 
   @migration_version 20_260_905_000_201
 
+  # V06 alone, in both directions, over DDL the upgraded-install case
+  # below builds by hand in the shape V05 left it at 0.11.x.
+  defmodule MigrateSqliteV06 do
+    @moduledoc false
+    use Ecto.Migration
+
+    @opts [
+      repo: StatifierPersistence.SqliteTestRepo,
+      key: :uxid,
+      table_prefix: "sq_up_"
+    ]
+
+    def up, do: Migrations.up(@opts ++ [from: 6, version: 6])
+    def down, do: Migrations.down(@opts ++ [from: 6, version: 6])
+  end
+
   @concurrent_version 20_260_906_000_401
+  @v06_version 20_260_912_000_603
 
   @capped_versions [20_260_906_000_301, 20_260_906_000_302]
 
@@ -160,14 +177,14 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
     # execution ended "6 tests, 0 failures, 6 invalid" - the rolled-back
     # migration left no tables for any case in this module. Verified red,
     # reverted.
-    test "V01 through V05 apply, and the executions table carries every column" do
-      assert tables() == ["sq_charts", "sq_inputs", "sq_positions", "sq_runs"]
+    test "V01 through V06 apply, and the executions table carries every column" do
+      assert tables() == ["sq_charts", "sq_executions", "sq_inputs", "sq_positions"]
 
-      columns = columns("sq_runs")
+      columns = columns("sq_executions")
 
       assert "metadata" in columns
       assert "outcome_blob" in columns
-      assert "run_id" in columns
+      assert "execution_id" in columns
       assert "status" in columns
     end
 
@@ -176,7 +193,7 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
     # index is what makes setup_all raise. That the index cannot exist
     # here is exactly what it asserts. Verified red (invalid), reverted.
     test "no index on metadata is created" do
-      refute Enum.any?(indexes("sq_runs"), &String.contains?(&1, "metadata"))
+      refute Enum.any?(indexes("sq_executions"), &String.contains?(&1, "metadata"))
     end
 
     # sabotage: dropped V04.up/1's postgres?() guard, so the rebuild ran on
@@ -193,13 +210,13 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
 
       :ok = migrate_capped(:up, @concurrent_version, MigrateSqliteConcurrentV04)
 
-      refute Enum.any?(indexes("sq_runs"), &String.contains?(&1, "metadata"))
-      assert "outcome_blob" in columns("sq_runs")
+      refute Enum.any?(indexes("sq_executions"), &String.contains?(&1, "metadata"))
+      assert "outcome_blob" in columns("sq_executions")
 
       :ok = migrate_capped(:down, @concurrent_version, MigrateSqliteConcurrentV04)
 
-      refute Enum.any?(indexes("sq_runs"), &String.contains?(&1, "metadata"))
-      assert tables() == ["sq_charts", "sq_inputs", "sq_positions", "sq_runs"]
+      refute Enum.any?(indexes("sq_executions"), &String.contains?(&1, "metadata"))
+      assert tables() == ["sq_charts", "sq_executions", "sq_inputs", "sq_positions"]
     end
 
     # The number is backend-independent by construction - it is derived
@@ -211,13 +228,13 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
     # 1, right 5), this case and its Postgres twin alone ("45 tests, 2
     # failures"). Verified red, reverted.
     test "expected_version/0 answers the same version this backend migrated through" do
-      assert Migrations.expected_version() == 5
+      assert Migrations.expected_version() == 6
     end
 
     # sabotage: replaced V03.down/1's postgres?() guard with `true`, so
     # down/1 drops an index that was never created -> red, this case alone
     # ("6 tests, 1 failure") with
-    # `** (Exqlite.Error) no such index: sq_runs_metadata_gin_index`.
+    # `** (Exqlite.Error) no such index: sq_executions_metadata_gin_index`.
     # Verified red, reverted.
     test "down/1 rolls the whole DDL back and up/1 puts it back" do
       :ok = migrate(:down)
@@ -226,7 +243,65 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
 
       :ok = migrate(:up)
 
-      assert tables() == ["sq_charts", "sq_inputs", "sq_positions", "sq_runs"]
+      assert tables() == ["sq_charts", "sq_executions", "sq_inputs", "sq_positions"]
+    end
+  end
+
+  describe "V06 on an upgraded install" do
+    setup do
+      drop_upgraded()
+      create_pre_0_12_schema()
+
+      on_exit(&drop_upgraded/0)
+
+      :ok
+    end
+
+    # The other half of ADR-0011 decision 3's two install paths, off
+    # Postgres: the table, both columns and the two unique indexes move,
+    # the GIN index is not there to move, and the rows are the rows.
+    #
+    # sabotage: dropped V06's non-Postgres index branch, leaving the
+    # `ALTER INDEX` arm for every adapter -> red here with
+    # `** (Exqlite.Error) near "INDEX": syntax error`. Verified red,
+    # reverted from a copy.
+    test "renames the table, both columns and both unique indexes, keeping every row" do
+      before_rows = rows("sq_up_runs")
+      before_inputs = rows("sq_up_inputs")
+
+      :ok = migrate_capped(:up, @v06_version, MigrateSqliteV06)
+
+      assert upgraded_tables() == ["sq_up_executions", "sq_up_inputs"]
+      assert "execution_id" in columns("sq_up_executions")
+      refute "run_id" in columns("sq_up_executions")
+      assert "execution_id" in columns("sq_up_inputs")
+      refute "run_id" in columns("sq_up_inputs")
+
+      assert "sq_up_executions_execution_id_index" in indexes("sq_up_executions")
+      assert "sq_up_inputs_execution_id_seq_index" in indexes("sq_up_inputs")
+      refute Enum.any?(indexes("sq_up_executions"), &String.contains?(&1, "metadata"))
+
+      assert rows("sq_up_executions") == before_rows
+      assert rows("sq_up_inputs") == before_inputs
+
+      :ok = migrate_capped(:down, @v06_version, MigrateSqliteV06)
+
+      assert upgraded_tables() == ["sq_up_inputs", "sq_up_runs"]
+      assert "run_id" in columns("sq_up_runs")
+      assert "sq_up_runs_run_id_index" in indexes("sq_up_runs")
+      assert "sq_up_inputs_run_id_seq_index" in indexes("sq_up_inputs")
+      assert rows("sq_up_runs") == before_rows
+      assert rows("sq_up_inputs") == before_inputs
+    end
+
+    # sabotage: made V06's `up/1` rename unconditionally -> red here with
+    # `no such table: sq_up_runs`. Verified red, reverted from a copy.
+    test "a fresh install on this adapter has nothing for V06 to rename" do
+      # The suite-wide `sq_` tables above were built by V01-V06 in
+      # `setup_all`, on an empty database: the retired names never existed.
+      refute "sq_runs" in tables()
+      assert "execution_id" in columns("sq_executions")
+      assert "sq_executions_execution_id_index" in indexes("sq_executions")
     end
   end
 
@@ -241,7 +316,7 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
 
       on_exit(fn ->
         SQL.query!(SqliteTestRepo, "DROP TABLE IF EXISTS sq_cap_inputs", [])
-        SQL.query!(SqliteTestRepo, "DROP TABLE IF EXISTS sq_cap_runs", [])
+        SQL.query!(SqliteTestRepo, "DROP TABLE IF EXISTS sq_cap_executions", [])
         SQL.query!(SqliteTestRepo, "DROP TABLE IF EXISTS sq_cap_positions", [])
         SQL.query!(SqliteTestRepo, "DROP TABLE IF EXISTS sq_cap_charts", [])
 
@@ -258,9 +333,9 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
       :ok = migrate_capped(:up, v03_version, MigrateSqliteCappedV03)
 
       assert capped_tables() ==
-               ["sq_cap_charts", "sq_cap_inputs", "sq_cap_positions", "sq_cap_runs"]
+               ["sq_cap_charts", "sq_cap_executions", "sq_cap_inputs", "sq_cap_positions"]
 
-      assert "outcome_blob" in columns("sq_cap_runs")
+      assert "outcome_blob" in columns("sq_cap_executions")
 
       # Newest first, which is the order `mix ecto.rollback --all` uses.
       :ok = migrate_capped(:down, v03_version, MigrateSqliteCappedV03)
@@ -579,6 +654,97 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
 
   defp capped_tables do
     Enum.filter(tables(), &String.starts_with?(&1, "sq_cap_"))
+  end
+
+  defp upgraded_tables do
+    %{rows: rows} =
+      SQL.query!(
+        SqliteTestRepo,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'sq_up_%' " <>
+          "ORDER BY name",
+        []
+      )
+
+    List.flatten(rows)
+  end
+
+  defp rows(table) do
+    %{rows: rows} = SQL.query!(SqliteTestRepo, "SELECT * FROM #{table} ORDER BY id", [])
+    rows
+  end
+
+  defp drop_upgraded do
+    for suffix <- ~w(inputs runs executions) do
+      SQL.query!(SqliteTestRepo, "DROP TABLE IF EXISTS sq_up_#{suffix}", [])
+    end
+
+    SQL.query!(SqliteTestRepo, "DELETE FROM schema_migrations WHERE version = ?1", [
+      @v06_version
+    ])
+
+    :ok
+  end
+
+  # The shape V05 left behind at 0.11.x. The migrations that built it have
+  # been rewritten to the new noun, so the only way to hold the old shape
+  # is to declare it.
+  defp create_pre_0_12_schema do
+    SQL.query!(SqliteTestRepo, """
+    CREATE TABLE sq_up_runs (
+      id TEXT NOT NULL PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      identity_blob BLOB NOT NULL,
+      position_blob BLOB,
+      failure TEXT,
+      session_id TEXT,
+      metadata TEXT,
+      outcome_blob BLOB,
+      inserted_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+    """)
+
+    SQL.query!(
+      SqliteTestRepo,
+      "CREATE UNIQUE INDEX sq_up_runs_run_id_index ON sq_up_runs (run_id)",
+      []
+    )
+
+    SQL.query!(SqliteTestRepo, """
+    CREATE TABLE sq_up_inputs (
+      id TEXT NOT NULL PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      door TEXT NOT NULL,
+      input_blob BLOB,
+      inserted_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+    """)
+
+    SQL.query!(
+      SqliteTestRepo,
+      "CREATE UNIQUE INDEX sq_up_inputs_run_id_seq_index ON sq_up_inputs (run_id, seq)",
+      []
+    )
+
+    SQL.query!(SqliteTestRepo, """
+    INSERT INTO sq_up_runs
+      (id, run_id, status, content_hash, identity_blob, inserted_at, updated_at)
+    VALUES ('run_pre012_0', 'execution-pre-0-12-0', 'running', 'sha256:pre-0-12',
+            x'010203', '2026-09-12 00:00:00', '2026-09-12 00:00:00')
+    """)
+
+    SQL.query!(SqliteTestRepo, """
+    INSERT INTO sq_up_inputs
+      (id, run_id, seq, door, input_blob, inserted_at, updated_at)
+    VALUES ('input_pre012_0', 'execution-pre-0-12-0', 0, 'step', x'0909',
+            '2026-09-12 00:00:00', '2026-09-12 00:00:00')
+    """)
+
+    :ok
   end
 
   defp tables do

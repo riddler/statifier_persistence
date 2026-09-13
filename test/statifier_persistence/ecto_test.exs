@@ -15,7 +15,7 @@ defmodule StatifierPersistence.EctoTest do
     test "schemas read from statifier_* tables" do
       assert Default.Chart.__schema__(:source) == "statifier_charts"
       assert Default.Position.__schema__(:source) == "statifier_positions"
-      assert Default.Execution.__schema__(:source) == "statifier_runs"
+      assert Default.Execution.__schema__(:source) == "statifier_executions"
     end
 
     # sabotage: primary_key/2 MFA branch returns autogenerate: false -> red (no MFA in :autogenerate)
@@ -46,7 +46,7 @@ defmodule StatifierPersistence.EctoTest do
       assert Default.Chart.__schema__(:prefix) == nil
     end
 
-    # sabotage: @fields runs list drops :failure -> red (runs field list mismatch)
+    # sabotage: @fields executions list drops :failure -> red (executions field list mismatch)
     test "schemas carry the engine identity columns verbatim" do
       assert Default.Chart.__schema__(:fields) ==
                [:id, :content_hash, :identity_blob, :chart_blob, :inserted_at, :updated_at]
@@ -98,8 +98,8 @@ defmodule StatifierPersistence.EctoTest do
   end
 
   describe "fully-overridden host (uuid key, prefixes, per-table override)" do
-    # sabotage: Config.table/2 ignores the :tables override map -> red (runs source falls
-    # back to "wf_runs")
+    # sabotage: Config.table/2 ignores the :tables override map -> red (executions source falls
+    # back to "wf_executions")
     test "every table-name knob lands in __schema__(:source)" do
       assert Overridden.Chart.__schema__(:source) == "wf_charts"
       assert Overridden.Position.__schema__(:source) == "wf_positions"
@@ -200,6 +200,24 @@ defmodule StatifierPersistence.EctoTest do
       end
     end
 
+    # The retired table key specifically, pinned rather than left to the
+    # general case above: ADR-0011 as amended by A2 ships **no** `:runs`
+    # alias, not even for one release, and this is the case that turns red
+    # if one is added back.
+    #
+    # sabotage: added `:runs` to Config's @table_keys and mapped it onto
+    # `:executions` -> red (nothing raised). Verified red, reverted from a
+    # copy.
+    test "the retired table key :runs raises rather than aliasing :executions" do
+      assert_raise ArgumentError, ~r/unknown table key :runs/, fn ->
+        Code.compile_string("""
+        defmodule StatifierPersistence.EctoTest.RetiredTableKey do
+          use StatifierPersistence.Ecto, repo: Foo, tables: %{runs: "legacy_runs"}
+        end
+        """)
+      end
+    end
+
     # sabotage: KeyGenerator.resolve/1 catch-all returns the UXID default -> red (nothing raised)
     test "an unknown key spelling raises ArgumentError at compile time" do
       assert_raise ArgumentError, ~r/unknown key option :ulid/, fn ->
@@ -253,12 +271,12 @@ defmodule StatifierPersistence.EctoTest do
 
     # sabotage: validate_tables! map clause accepts non-string names -> red (nothing raised)
     test "rejects a non-string table override and a non-map tables option" do
-      assert_raise ArgumentError, ~r/override for :runs must be a string/, fn ->
-        Config.new(repo: TestRepo, tables: %{runs: :workflow_runs})
+      assert_raise ArgumentError, ~r/override for :executions must be a string/, fn ->
+        Config.new(repo: TestRepo, tables: %{executions: :workflow_executions})
       end
 
       assert_raise ArgumentError, ~r/:tables option must be a map/, fn ->
-        Config.new(repo: TestRepo, tables: [runs: "workflow_runs"])
+        Config.new(repo: TestRepo, tables: [executions: "workflow_executions"])
       end
     end
 
@@ -334,7 +352,7 @@ defmodule StatifierPersistence.EctoTest do
       # compiles, and literal remote calls would warn at test compile time.
       assert host = Enum.find(modules, &(&1 == MyApp.Persistence))
       execution_schema = Module.concat(host, Execution)
-      assert execution_schema.__schema__(:source) == "statifier_runs"
+      assert execution_schema.__schema__(:source) == "statifier_executions"
       assert host.__statifier_persistence__(:repo) == MyApp.Repo
     end
   end

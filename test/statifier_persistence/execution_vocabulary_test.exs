@@ -11,38 +11,24 @@ defmodule StatifierPersistence.ExecutionVocabularyTest do
 
   @lib_files Path.wildcard("lib/**/*.ex")
 
-  # ADR-0011 decision 3 - the `:runs` table key, the `run_id` columns, the
-  # index names and the historical migrations - is sp-j2y's half of the
-  # rename and lands in the same release (0.12.0) in its own PR. Until it
-  # does, these files still spell the retired noun at the SQL layer only.
-  # sp-j2y deletes this list.
-  @deferred_to_sp_j2y [
-                        "lib/statifier_persistence/ecto/config.ex",
-                        "lib/statifier_persistence/ecto/migrations.ex"
-                      ] ++ Path.wildcard("lib/statifier_persistence/ecto/migrations/*.ex")
+  # V06 is the rename itself (ADR-0011 decision 3): it is the one module
+  # whose whole job is to name both spellings, the one it finds on a
+  # pre-0.12.0 database and the one it leaves behind. Exempting the file
+  # rather than its lines is deliberate - every `run_id` in it is one half
+  # of a rename statement, and a line-level list would have to be rewritten
+  # whenever that SQL is reworded, for no additional pin.
+  @renaming_migration ["lib/statifier_persistence/ecto/migrations/v06.ex"]
 
   # Line-level survivors. Each is the literal text that makes the line legal.
   @survivor_lines [
     # ADR-0011 decision 4: the pre-0.12.0 donedata key, read for one release
     # and dropped in 0.13.0. A string literal, never an atom.
     {"lib/statifier_persistence/executions.ex", "statifier_persistence:run_status"},
-    # sp-j2y again, at line level: the adapter opt naming the table and the
-    # two index names V01 and V05 created.
-    {"lib/statifier_persistence/storage/ecto.ex", ":runs_table"},
-    {"lib/statifier_persistence/storage/ecto.ex", "Config.table(config, :runs)"},
-    {"lib/statifier_persistence/storage/ecto.ex", "_run_id_index"},
-    {"lib/statifier_persistence/storage/ecto.ex", "_run_id_seq_index"},
-    {"lib/statifier_persistence/storage/ecto.ex", "V06 (sp-j2y)"},
-    # sp-j2y at line level in the three files that carry only a handful of
-    # decision-3 lines, so that decision 2's own surfaces in them - the
-    # generated `Execution` module name and its `execution_id` field - stay
-    # pinned by the arms above.
-    {"lib/statifier_persistence/ecto.ex", "`statifier_runs`"},
-    {"lib/statifier_persistence/ecto.ex", "{Execution, :runs}"},
-    {"lib/statifier_persistence/ecto.ex", "runs: ["},
-    {"lib/statifier_persistence/ecto.ex", "source: :run_id"},
-    {"lib/statifier_persistence/ecto/key_generator.ex", "@type table ::"},
-    {"lib/statifier_persistence/ecto/key_generator/uxid.ex", "@prefixes %{"}
+    # The migration helper's own recipe for V06 has to name what V06
+    # renames, or a host reading it cannot tell which of its databases the
+    # version is for (ADR-0011 decision 3).
+    {"lib/statifier_persistence/ecto/migrations.ex", "renames the `runs` table to"},
+    {"lib/statifier_persistence/ecto/migrations.ex", "`executions`, both `run_id` columns"}
   ]
 
   # ADR-0011 decision 1 keeps `run` as an ordinary English verb, and names the
@@ -54,6 +40,14 @@ defmodule StatifierPersistence.ExecutionVocabularyTest do
 
   defp survivor_line?(path, line) do
     Enum.any?(@survivor_lines, fn {p, text} -> p == path and String.contains?(line, text) end)
+  end
+
+  # Two spellings of the same atom: `:runs` anywhere, and `runs:` in
+  # keyword syntax, which carries no leading colon and which the first
+  # pattern alone cannot see (sp-op4's pass-1 follow-on (a)).
+  defp atom_spelling?(line) do
+    Regex.match?(~r/:(?:runs?|run_[a-z0-9_]+|[a-z0-9_]+_runs?)(?![a-z0-9_])/, line) or
+      Regex.match?(~r/(?:^\s*|[\[{,]\s*)(?:runs?|run_[a-z0-9_]+|[a-z0-9_]+_runs?):(?!:)/, line)
   end
 
   defp retired_noun?(name) do
@@ -68,7 +62,7 @@ defmodule StatifierPersistence.ExecutionVocabularyTest do
     test "no module, function, type, spec or callback in lib/ is named for it" do
       offenders =
         for path <- @lib_files,
-            path not in @deferred_to_sp_j2y,
+            path not in @renaming_migration,
             {line, number} <- lines(path),
             name <- declared_names(line),
             name not in @survivor_names,
@@ -87,10 +81,10 @@ defmodule StatifierPersistence.ExecutionVocabularyTest do
     test "no atom literal in lib/ spells it" do
       offenders =
         for path <- @lib_files,
-            path not in @deferred_to_sp_j2y,
+            path not in @renaming_migration,
             {line, number} <- lines(path),
             not survivor_line?(path, line),
-            Regex.match?(~r/:(?:runs?|run_[a-z0-9_]+|[a-z0-9_]+_runs?)(?![a-z0-9_])/, line),
+            atom_spelling?(line),
             do: "#{path}:#{number}: #{String.trim(line)}"
 
       assert offenders == []
@@ -110,6 +104,25 @@ defmodule StatifierPersistence.ExecutionVocabularyTest do
       assert offenders == []
     end
 
+    # The matcher above is what the two atom spellings are pinned by, and it
+    # cannot be sabotaged through lib/ the way the other arms can: a real
+    # `runs:` key in lib/ stops the compiler before ExUnit starts (verified -
+    # putting the retired key back in `KeyGenerator.UXID`'s `@prefixes`
+    # raises `KeyError` while compiling the test support hosts). So the
+    # matcher is exercised directly instead, which is also what makes the
+    # keyword arm's own scope visible: keyword syntax carries no leading
+    # colon, and the English verb followed by a colon is not a key.
+    test "the atom matcher sees both spellings and leaves the verb alone" do
+      assert atom_spelling?("      {Execution, :runs},")
+      assert atom_spelling?("      runs: [")
+      assert atom_spelling?(~s(@prefixes %{charts: "chart", runs: "exec"}))
+      assert atom_spelling?("  @table_keys [:charts, :runs, :inputs]")
+
+      refute atom_spelling?("    here a non-Postgres adapter cannot run: a table and an index")
+      refute atom_spelling?("  # not that nothing has run: the handle is still there")
+      refute atom_spelling?("      executions: [")
+    end
+
     # The broadest arm: the `run_id` / `run_status` spellings anywhere in
     # lib/, which is what catches a key inside a type's own shape, an error
     # atom in a union, and a doc that still tells a host the old name.
@@ -123,7 +136,7 @@ defmodule StatifierPersistence.ExecutionVocabularyTest do
     test "no `run_id` or `run_status` spelling survives in lib/" do
       offenders =
         for path <- @lib_files,
-            path not in @deferred_to_sp_j2y,
+            path not in @renaming_migration,
             {line, number} <- lines(path),
             not survivor_line?(path, line),
             Regex.match?(~r/run_(?:id|status)(?![a-z0-9_])/, line),
