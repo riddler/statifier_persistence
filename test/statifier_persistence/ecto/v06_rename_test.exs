@@ -11,6 +11,11 @@ defmodule StatifierPersistence.Ecto.V06RenameTest do
   - the capped pattern this package's own docs recommend, which is the
   shape sp-tae was measured failing on.
 
+  And the upgraded install once more under a `prefix:` schema, which is
+  the only case here that exercises V06's schema-qualifying arms: every
+  other case runs with `prefix: nil`, where the qualification and the
+  column probe's schema both fall through to the connection's own.
+
   Live DDL outside the SQL sandbox, like `migrations_test.exs`: `setup_all`
   switches the repo to `:auto` for the module and restores `:manual` on
   exit, hence `async: false`.
@@ -67,6 +72,26 @@ defmodule StatifierPersistence.Ecto.V06RenameTest do
     def down, do: Migrations.down(@opts)
   end
 
+  # The same upgraded install, one Postgres schema over: `prefix:` names a
+  # schema, so every name V06 touches has to be qualified with it and the
+  # column probe has to ask that schema rather than `current_schema()`.
+  defmodule MigrateUpgradedPrefixed do
+    @moduledoc false
+    use Ecto.Migration
+
+    alias StatifierPersistence.Ecto.Migrations
+
+    @opts [
+      repo: StatifierPersistence.TestRepo,
+      key: :uxid,
+      table_prefix: "kx_v06s_",
+      prefix: "kx_v06s"
+    ]
+
+    def up, do: Migrations.up(@opts ++ [from: 6, version: 6])
+    def down, do: Migrations.down(@opts ++ [from: 6, version: 6])
+  end
+
   # The capped host pattern, spelled out: one host migration per package
   # version, each capped in both directions, which is what the moduledoc of
   # `StatifierPersistence.Ecto.Migrations` tells a host already running an
@@ -113,6 +138,12 @@ defmodule StatifierPersistence.Ecto.V06RenameTest do
 
   @capped_prefix "kx_v06c_"
   @upgraded_capped_prefix "kx_v06x_"
+
+  # The schema-prefixed upgraded install: a Postgres schema of its own,
+  # holding tables that still carry the table prefix as well.
+  @schema "kx_v06s"
+  @schema_prefix "kx_v06s_"
+  @schema_version 20_260_912_000_604
 
   # One host migration timestamp per package version, in order.
   @capped_versions Enum.map(1..6, &(20_260_913_000_600 + &1))
@@ -316,6 +347,72 @@ defmodule StatifierPersistence.Ecto.V06RenameTest do
     end
   end
 
+  describe "an upgraded install under a non-default Postgres schema" do
+    setup do
+      drop_schema()
+      SQL.query!(TestRepo, ~s(CREATE SCHEMA "#{@schema}"))
+      create_pre_0_12_schema(@schema_prefix, @schema)
+
+      on_exit(&drop_schema/0)
+
+      :ok
+    end
+
+    # Every other upgraded-install case runs with `prefix: nil`, so V06's
+    # schema-qualifying arms never run: `qualified/2` falls through to the
+    # bare name and `schema_expression/1` answers `current_schema()`. Here
+    # `prefix:` names a schema that is not on the search path, which is
+    # what makes both arms load-bearing - the rename has to name the
+    # schema, and the column probe has to ask about that schema rather
+    # than the one the connection happens to be in.
+    #
+    # sabotage 1: made `qualified/2`'s prefix arm drop the prefix
+    # (`defp qualified(%Config{prefix: _prefix}, name), do: quoted(name)`)
+    # -> red here on the table list: `table_exists?`'s unqualified
+    # `to_regclass` found nothing on the connection's search path, so V06
+    # took the fresh-install path and renamed nothing - the table came
+    # back as `kx_v06s_runs`. sabotage 2: made `schema_expression/1`'s
+    # prefix arm answer `current_schema()` -> red here on
+    # `assert "execution_id" in columns(...)`: `column_exists?/4` asked
+    # the wrong schema, found no `run_id`, and both column renames were
+    # skipped while the table and index renames went through. Both
+    # verified red and reverted from a copy taken before the edit; the
+    # other nine cases in this file stayed green under each.
+    test "V06 renames the table, both columns and all three indexes inside the schema" do
+      :ok = migrate(:up, @schema_version, MigrateUpgradedPrefixed)
+
+      assert tables(@schema_prefix, @schema) == [
+               @schema_prefix <> "charts",
+               @schema_prefix <> "executions",
+               @schema_prefix <> "inputs",
+               @schema_prefix <> "positions"
+             ]
+
+      refute relation_exists?(@schema_prefix <> "runs", @schema)
+
+      assert "execution_id" in columns(@schema_prefix <> "executions", @schema)
+      refute "run_id" in columns(@schema_prefix <> "executions", @schema)
+      assert "execution_id" in columns(@schema_prefix <> "inputs", @schema)
+      refute "run_id" in columns(@schema_prefix <> "inputs", @schema)
+
+      assert unique_index_names(@schema_prefix <> "executions", @schema) == [
+               @schema_prefix <> "executions_execution_id_index"
+             ]
+
+      assert unique_index_names(@schema_prefix <> "inputs", @schema) == [
+               @schema_prefix <> "inputs_execution_id_seq_index"
+             ]
+
+      assert (@schema_prefix <> "executions_metadata_gin_index") in index_names(
+               @schema_prefix <> "executions",
+               @schema
+             )
+
+      # Nothing leaked into the schema the connection is actually in.
+      assert tables(@schema_prefix) == []
+    end
+  end
+
   describe "the capped host pattern - one host migration per version" do
     setup do
       drop_capped()
@@ -440,9 +537,17 @@ defmodule StatifierPersistence.Ecto.V06RenameTest do
   # the only way to hold the old shape is to declare it.
   defp create_pre_0_12_schema, do: create_pre_0_12_schema(@upgraded_prefix)
 
-  defp create_pre_0_12_schema(prefix) do
+  # `schema` is the Postgres schema the DDL lands in, or `nil` for the one
+  # the connection is already in; the index NAMES stay unqualified either
+  # way, because an index is created in the schema of its table.
+  defp create_pre_0_12_schema(prefix, schema \\ nil) do
+    runs = qualified_name(schema, prefix <> "runs")
+    charts = qualified_name(schema, prefix <> "charts")
+    positions = qualified_name(schema, prefix <> "positions")
+    inputs = qualified_name(schema, prefix <> "inputs")
+
     SQL.query!(TestRepo, """
-    CREATE TABLE "#{prefix}runs" (
+    CREATE TABLE #{runs} (
       id text NOT NULL PRIMARY KEY,
       run_id text NOT NULL,
       status text NOT NULL,
@@ -460,16 +565,16 @@ defmodule StatifierPersistence.Ecto.V06RenameTest do
 
     SQL.query!(TestRepo, """
     CREATE UNIQUE INDEX "#{prefix}runs_run_id_index"
-      ON "#{prefix}runs" (run_id)
+      ON #{runs} (run_id)
     """)
 
     SQL.query!(TestRepo, """
     CREATE INDEX "#{prefix}runs_metadata_gin_index"
-      ON "#{prefix}runs" USING GIN (metadata jsonb_path_ops)
+      ON #{runs} USING GIN (metadata jsonb_path_ops)
     """)
 
     SQL.query!(TestRepo, """
-    CREATE TABLE "#{prefix}charts" (
+    CREATE TABLE #{charts} (
       id text NOT NULL PRIMARY KEY,
       content_hash text NOT NULL,
       identity_blob bytea NOT NULL,
@@ -481,11 +586,11 @@ defmodule StatifierPersistence.Ecto.V06RenameTest do
 
     SQL.query!(TestRepo, """
     CREATE UNIQUE INDEX "#{prefix}charts_content_hash_index"
-      ON "#{prefix}charts" (content_hash)
+      ON #{charts} (content_hash)
     """)
 
     SQL.query!(TestRepo, """
-    CREATE TABLE "#{prefix}positions" (
+    CREATE TABLE #{positions} (
       id text NOT NULL PRIMARY KEY,
       session_id text NOT NULL,
       content_hash text NOT NULL,
@@ -498,11 +603,11 @@ defmodule StatifierPersistence.Ecto.V06RenameTest do
 
     SQL.query!(TestRepo, """
     CREATE UNIQUE INDEX "#{prefix}positions_session_id_index"
-      ON "#{prefix}positions" (session_id)
+      ON #{positions} (session_id)
     """)
 
     SQL.query!(TestRepo, """
-    CREATE TABLE "#{prefix}inputs" (
+    CREATE TABLE #{inputs} (
       id text NOT NULL PRIMARY KEY,
       run_id text NOT NULL,
       seq bigint NOT NULL,
@@ -515,7 +620,7 @@ defmodule StatifierPersistence.Ecto.V06RenameTest do
 
     SQL.query!(TestRepo, """
     CREATE UNIQUE INDEX "#{prefix}inputs_run_id_seq_index"
-      ON "#{prefix}inputs" (run_id, seq)
+      ON #{inputs} (run_id, seq)
     """)
 
     :ok
@@ -560,73 +665,84 @@ defmodule StatifierPersistence.Ecto.V06RenameTest do
     :ok
   end
 
-  defp tables(prefix) do
+  defp tables(prefix, schema \\ "public") do
     %{rows: rows} =
       SQL.query!(
         TestRepo,
         """
         SELECT table_name FROM information_schema.tables
-        WHERE table_schema = 'public' AND table_name LIKE $1
+        WHERE table_schema = $2 AND table_name LIKE $1
         ORDER BY table_name
         """,
-        [prefix <> "%"]
+        [prefix <> "%", schema]
       )
 
     List.flatten(rows)
   end
 
-  defp columns(table) do
+  defp columns(table, schema \\ "public") do
     %{rows: rows} =
       SQL.query!(
         TestRepo,
         """
         SELECT column_name FROM information_schema.columns
-        WHERE table_schema = 'public' AND table_name = $1
+        WHERE table_schema = $2 AND table_name = $1
         ORDER BY column_name
         """,
-        [table]
+        [table, schema]
       )
 
     List.flatten(rows)
   end
 
-  defp index_names(table) do
+  defp index_names(table, schema \\ "public") do
     %{rows: rows} =
       SQL.query!(
         TestRepo,
         """
         SELECT indexname FROM pg_indexes
-        WHERE schemaname = 'public' AND tablename = $1
+        WHERE schemaname = $2 AND tablename = $1
         ORDER BY indexname
         """,
-        [table]
+        [table, schema]
       )
 
     List.flatten(rows)
   end
 
-  defp unique_index_names(table) do
+  defp unique_index_names(table, schema \\ "public") do
     %{rows: rows} =
       SQL.query!(
         TestRepo,
         """
         SELECT indexname FROM pg_indexes
-        WHERE schemaname = 'public' AND tablename = $1
+        WHERE schemaname = $2 AND tablename = $1
           AND indexdef LIKE 'CREATE UNIQUE INDEX%'
           AND indexname NOT LIKE '%\\_pkey'
         ORDER BY indexname
         """,
-        [table]
+        [table, schema]
       )
 
     List.flatten(rows)
   end
 
-  defp relation_exists?(name) do
+  defp relation_exists?(name, schema \\ nil) do
     %{rows: [[exists?]]} =
-      SQL.query!(TestRepo, "SELECT to_regclass($1) IS NOT NULL", [~s("#{name}")])
+      SQL.query!(TestRepo, "SELECT to_regclass($1) IS NOT NULL", [qualified_name(schema, name)])
 
     exists?
+  end
+
+  # A double-quoted identifier, schema-qualified when there is a schema.
+  defp qualified_name(nil, name), do: ~s("#{name}")
+  defp qualified_name(schema, name), do: ~s("#{schema}"."#{name}")
+
+  defp drop_schema do
+    SQL.query!(TestRepo, ~s(DROP SCHEMA IF EXISTS "#{@schema}" CASCADE))
+    SQL.query!(TestRepo, "DELETE FROM schema_migrations WHERE version = $1", [@schema_version])
+
+    :ok
   end
 
   defp execution_rows(table) do
