@@ -36,7 +36,7 @@ defmodule StatifierPersistence.Storage.SetupOrderingConformanceTest do
   # is the shape whose one guarantee - that no row has been written yet -
   # this module exists to hold.
   setup context do
-    # The template's own `setup` has already execution: it is defined at the
+    # The template's own `setup` has already run: it is defined at the
     # `use` above, and ExUnit runs callbacks in definition order.
     assert %Storage{} = context.store
 

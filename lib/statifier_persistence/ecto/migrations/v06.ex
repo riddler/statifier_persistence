@@ -97,8 +97,11 @@ if Code.ensure_loaded?(Ecto.Migration) do
     ## Rolling back
 
     `down/1` is a **no-op**, and that is a decision rather than an omission
-    (RQ-SF041-25, ruled 2026-09-13; ADR-0011 decision 3 carries the clause
-    as a dated Note).
+    (RQ-SF041-25, ruled 2026-09-13). ADR-0011 decision 3 describes the
+    earlier design, in which `down/1` renamed back and a rollback below V06
+    on an upgraded install was therefore unsupported; the ruling supersedes
+    both halves of that bullet, and the record's own dated Note is what
+    records it.
 
     Under the full cutover there is nothing for it to restore. V01-V05 are
     rewritten to the execution names, so on `0.12.0` code every database

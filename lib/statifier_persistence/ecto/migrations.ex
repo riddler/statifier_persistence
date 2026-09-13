@@ -135,12 +135,14 @@ if Code.ensure_loaded?(Ecto.Migration) do
     `from: 3` on the second `up` and `version: 3` on the first `down`, and
     one capped at V03 writes `from: 4` and `version: 4`. The two `down`
     calls mirror the two `up` calls in reverse, and the V06 one does
-    nothing at all - V02-V05 drop the executions table under the name it
-    carries on `0.12.0` code, which is the name V06 gave it, and the way
-    back down is that drop rather than a rename. What happens below the cap
-    is the host's own earlier migration's business, and running `0.11.x`
-    against a database that was ever upgraded is unsupported either way
-    (ADR-0011 decision 3).
+    nothing at all. V02-V05's arms name the executions table under the name
+    it carries on `0.12.0` code, which is the name V06 gave it - V05 drops
+    the input log, V03 the `metadata` index and `outcome_blob`, V02 the
+    `metadata` column - so a rename back would leave every one of them
+    naming an object that is no longer there. The table itself is dropped
+    by V01, below the cap, which is the host's own earlier migration's
+    business; running `0.11.x` against a database that was ever upgraded is
+    unsupported either way (ADR-0011 decision 3).
 
     An install already at V05 needs none of that: `up(from: 6)` is the whole
     upgrade.

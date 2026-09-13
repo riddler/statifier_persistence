@@ -17,7 +17,7 @@ defmodule StatifierPersistence.DriverFanoutEctoTest do
   one of them until it commits.
 
   What makes that safe is the direction, which `driver_fanout_test.exs`
-  pins and this case executions for real: every lock taken while another is held
+  pins and this case runs for real: every lock taken while another is held
   is on a strict descendant of it (`Execution.Linkage.child_execution_id/3` makes a
   child's id strictly extend its parent's), so the wait-for relation
   between connections embeds in the execution tree, and the execution tree is acyclic
@@ -102,7 +102,7 @@ defmodule StatifierPersistence.DriverFanoutEctoTest do
   # mis-ordered acquisition inside a single connection is invisible to
   # Postgres. The in-memory pin in `driver_fanout_test.exs` went red on
   # the same edit. That is the pair's division of labour and why both
-  # exist: the order is pinned there, and execution for real here.
+  # exist: the order is pinned there, and run for real here.
   # sabotage: in Driver.maybe_cancel/4, answer {:ok, states, false} from
   # the :first_error clause without running the cascade -> red here, the
   # live index 2 stayed :active over Postgres and the parent never left
