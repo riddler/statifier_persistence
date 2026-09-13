@@ -8,7 +8,7 @@ defmodule StatifierPersistence.Test.LockOrderRecorder do
 
   The fixture for sp-oq4's audit. A deadlock between two connections needs
   a cycle in the "holds X, waits for Y" relation, so the only thing that
-  has to be pinned is the direction every nested acquisition executions in. This
+  has to be pinned is the direction every nested acquisition runs in. This
   records exactly that and judges nothing: it sends
   `{:acquire, execution_id, held}` before the inner exclusion opens and
   `{:release, execution_id, held}` after it closes, where `held` is the list of

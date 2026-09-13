@@ -37,7 +37,7 @@ defmodule StatifierPersistence.Storage.SetupOrderingConformanceTest do
   # this module exists to hold.
   setup context do
     # The template's own `setup` has already execution: it is defined at the
-    # `use` above, and ExUnit executions callbacks in definition order.
+    # `use` above, and ExUnit runs callbacks in definition order.
     assert %Storage{} = context.store
 
     assert {:error, :execution_not_found} =

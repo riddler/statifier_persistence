@@ -65,7 +65,7 @@ defmodule StatifierPersistence.Demo.Host do
   Discoveries).
 
   Records a `{:chart_fetched, content_hash}` marker on the ledger's own
-  side-effect log every time it executions, so a test can assert that a
+  side-effect log every time it runs, so a test can assert that a
   post-restart boot really re-read the chart rather than reusing a carried
   struct.
 

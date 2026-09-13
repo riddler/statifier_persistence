@@ -77,7 +77,7 @@ defmodule StatifierPersistence.Executions do
   executor cannot loop this library.
 
   Concurrent deliveries to one execution are ordered by a pluggable per-execution
-  serialization strategy (ADR-0004 decision 5): every entry point executions its
+  serialization strategy (ADR-0004 decision 5): every entry point runs its
   fetch-to-persist tail inside the strategy's
   `c:StatifierPersistence.Serialization.with_execution/3`, selected per call with
   `serialization: {module, config}` and defaulting to
@@ -330,7 +330,7 @@ defmodule StatifierPersistence.Executions do
     # `metadata:` plus a Phase 3 `linkage:`), not just the host's, so the
     # merge happens first and `check_metadata/2` is handed the result as
     # its own `:metadata` pair - a durable child on a metadata-less adapter
-    # is refused before any effect executions, the same ordering ADR-0006
+    # is refused before any effect runs, the same ordering ADR-0006
     # decision 3 set for a host's own metadata.
     metadata = metadata(opts)
 
@@ -505,7 +505,7 @@ defmodule StatifierPersistence.Executions do
   change this function's: a parent that has already cancelled the
   invocation, or that cannot be resolved, leaves `{:ok, execution}` exactly as it
   is. What that window costs, and what closes it, is
-  `docs/adr/0008-durable-subchart-child-executions.md`'s note.
+  `docs/adr/0008-durable-subchart-child-runs.md`'s note.
 
   Without `driver:` nothing about this call changes, for a linked execution or an
   unlinked one: no linkage is read and no parent is answered.
@@ -642,7 +642,7 @@ defmodule StatifierPersistence.Executions do
   decision 6).
 
   That same fact is what makes the lock order safe, which is worth stating
-  because this walk is the one place a cycle would be conceivable. It executions
+  because this walk is the one place a cycle would be conceivable. It runs
   from inside the caller's own exclusion on every path that has one - the
   `{:cancel_invoke, _}` effect fires inside the exiting execution's, and
   `first_error`'s settlement fires it inside the PARENT's - and it only

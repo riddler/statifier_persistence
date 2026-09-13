@@ -81,7 +81,7 @@ defmodule StatifierPersistence.Storage.Adapter do
 
   @typedoc """
   A stored execution (ADR-0004 decision 1): its caller-supplied key, its status,
-  the content hash and identity envelope of the chart it executions, the opaque
+  the content hash and identity envelope of the chart it runs, the opaque
   `position_blob` holding its current position - nullable, because an execution
   that fails at creation has no quiescent position to store - a short
   `failure` reason for a `:failed` execution, `nil` otherwise, the opaque

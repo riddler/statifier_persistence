@@ -3,7 +3,7 @@ defmodule StatifierPersistence.Storage do
   The guarded entry point from a storage adapter to a
   `Statifier.MachineState.t()`.
 
-  Every load executions through `load_position/3` or `load_execution_position/3`, and
+  Every load runs through `load_position/3` or `load_execution_position/3`, and
   every load is checked against the exact chart revision that produced the
   stored position (ADR-0003 decision 2). No adapter callback ever holds
   both the stored identity and a caller-supplied `Statifier.Machine.t()` at
@@ -673,7 +673,7 @@ defmodule StatifierPersistence.Storage do
   writing anything: `:ok`, or `{:error, :metadata_unsupported}` for a
   non-empty map an adapter cannot store (ADR-0006 decision 3).
 
-  `insert_execution/5` executions this check itself, so a caller writing through the
+  `insert_execution/5` runs this check itself, so a caller writing through the
   facade alone never needs it. It is public for the caller that has work to
   do *before* the write and must not do it for a create that will be
   refused: `StatifierPersistence.Executions.create/4` runs it ahead of

@@ -131,7 +131,7 @@ defmodule StatifierPersistence.DriverFanoutLiveTest do
 
   # Child `index`'s own drive, in its own task and on its own connection:
   # the terminal status and the settlement that follows it, exactly as a
-  # queue's worker executions them.
+  # queue's worker runs them.
   defp finish_child(store, parent_execution_id, index) do
     child_execution_id = Linkage.child_execution_id(parent_execution_id, "call", index)
 
