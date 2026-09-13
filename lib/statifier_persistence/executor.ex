@@ -11,7 +11,7 @@ defmodule StatifierPersistence.Executor do
 
   @typedoc """
   What `c:execute/2` receives alongside each effect: the execution's
-  caller-supplied id and the content hash of the chart revision it executions -
+  caller-supplied id and the content hash of the chart revision it runs -
   enough to key idempotency storage and telemetry without another lookup.
   """
   @type context :: %{execution_id: String.t(), content_hash: String.t()}
