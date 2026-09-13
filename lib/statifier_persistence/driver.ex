@@ -1,7 +1,16 @@
 defmodule StatifierPersistence.Driver do
   @moduledoc """
-  Execution-to-quiescence over `StatifierPersistence.Executions`: the loop that answers
-  the chart's `<invoke>` calls and keeps stepping until it stops asking.
+  Run-to-quiescence over `StatifierPersistence.Executions`: the loop that
+  answers the chart's `<invoke>` calls and keeps stepping until it stops
+  asking.
+
+  "Run-to-quiescence" is deliberate, and restored here on 2026-09-13: the
+  durable-noun rename (ADR-0011) makes `execution` the name of the stored,
+  resumable thing this package owns, and that rename does not reach this
+  phrase. "Run" is the verb here - the run-to-completion idiom applied to one
+  drive, not the durable noun - so the term of art stands as
+  `docs/adr/0007-async-invocation-seam.md` already writes it ("the
+  run-to-quiescence loop").
 
   `StatifierPersistence.Executions` steps an execution *once*. That is the durable unit
   and it is deliberately small - load, step, hand the effects to an

@@ -13,9 +13,9 @@ defmodule StatifierPersistence.Storage.Adapter do
 
   A chart is keyed by its content hash
   (`Statifier.Machine.Identity.content_hash`, verbatim); a position is keyed
-  by the engine session id (st-ADR-0008's `sess_` UXID), also verbatim; a
-  execution is keyed by a caller-supplied opaque `execution_id`, also verbatim
-  (ADR-0004 decision 2). All are opaque strings to this layer: no callback
+  by the engine session id (st-ADR-0008's `sess_` UXID), also verbatim; an
+  execution is keyed by a caller-supplied opaque `execution_id`, also
+  verbatim (ADR-0004 decision 2). All are opaque strings to this layer: no callback
   here accepts or returns a surrogate key, a table name, or a prefix
   (ADR-0002 decision 1, ADR-0003 decision 3).
 

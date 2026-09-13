@@ -326,8 +326,8 @@ defmodule StatifierPersistence.DriverTest do
     end
 
     # Sabotage: narrowed `step_tail/6`'s terminal guard to `[:completed]` -
-    # the abandoned execution was loaded and stepped, and the answer reached a
-    # execution the host had already ended.
+    # the abandoned execution was loaded and stepped, and the answer reached
+    # an execution the host had already ended.
     test "discards a late answer to an execution the host abandoned", %{store: store} do
       driver = driver(store, @one_call_source, dispatch: fn _t, _p, _c -> :pending end)
 

@@ -564,7 +564,7 @@ defmodule StatifierPersistence.DriverSubchartTest do
     end
 
     # sabotage: replaced `Driver.resolve_and_answer_parent/3`'s whole
-    # `case` with a bare `{:ok, linkage} = parent_link(...)` match, so a
+    # `case` with a bare `{:ok, linkage} = parent_link(...)` match, so an
     # execution with no parent is a crash rather than a no-op - red, this case
     # and the SQLite one in `Ecto.SqliteMigrationsTest`, both with
     # `** (MatchError) no match of right hand side value: :no_parent`.
@@ -664,7 +664,7 @@ defmodule StatifierPersistence.DriverSubchartTest do
     # the hand-cancelled child's own children were never walked, the
     # grandchild stayed `:active`, and the `{:ok, 1}` assertion went red
     # (got `{:ok, 0}`).
-    test "a cascade interrupted after the first level completes the rest when re-execution", %{
+    test "a cascade interrupted after the first level completes the rest when re-run", %{
       store: store
     } do
       driver = driver(store, @parent_source, nesting_dispatch())

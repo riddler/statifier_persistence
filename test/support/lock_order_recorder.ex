@@ -17,7 +17,7 @@ defmodule StatifierPersistence.Test.LockOrderRecorder do
 
   A test reads the direction straight off `held`: an acquisition whose
   `held` are all strict ancestors of `execution_id` (`Execution.Linkage.child_execution_id/3`
-  makes a child's id strictly extend its parent's) can only ever wait on a
+  makes a child's id strictly extend its parent's) can only ever wait on an
   execution further down the same tree, and a relation that only ever runs
   parent-to-child over an acyclic tree has no cycle to find.
 
