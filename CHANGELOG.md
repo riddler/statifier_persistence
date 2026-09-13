@@ -10,6 +10,221 @@ fragment in [`changelog.d/`](changelog.d/README.md); the fragments are assembled
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
 
+## [0.12.0] 2026-09-13
+
+Breaking release: `run` is retired as the noun for the durable record, and
+the package speaks `execution` throughout - modules, functions, callbacks,
+types, error atoms, telemetry events and metadata, the durable table and its
+identity column (ADR-0011). No behaviour, arity or return shape changed; only
+names did, and no compatibility shim, deprecated delegate or alias module
+ships.
+
+**Breaking for storage adapters**: all seven
+`StatifierPersistence.Storage.Adapter` callbacks rename, and the table under
+Changed below lists every one of them - the compiler names each in turn.
+Hosts also rename the `run_id:` context key, this package's `:run_*` error
+atoms, the `:tables` key (`:runs` is now rejected), and any raw query naming
+`statifier_runs`; telemetry handlers must move to the `:execution` prefix,
+which does not dual-emit. Existing databases are migrated **in place** by the
+new **V06**, which copies no data; drain in-flight durable subchart children
+before upgrading.
+
+### Changed
+
+- **Breaking for storage adapters.** `run` is retired as the noun for the
+  durable record; it is `execution` everywhere (ADR-0011). Nothing about the
+  behaviour, the arities, the return shapes or the identity guard changed -
+  only names. This entry is the complete list of what moved. Rename the seven
+  `StatifierPersistence.Storage.Adapter` callbacks below in your adapter; the
+  compiler names every one of them, and no compatibility shim, deprecated
+  delegate or alias module ships.
+
+  | Callback before | After |
+  |---|---|
+  | `insert_run/2` | `insert_execution/2` |
+  | `fetch_run/2` | `fetch_execution/2` |
+  | `update_run/2` | `update_execution/2` |
+  | `lock_run/3` | `lock_execution/3` |
+  | `list_runs_by_metadata/2` | `list_executions_by_metadata/2` |
+  | `supports_run_outcome?/1` | `supports_execution_outcome?/1` |
+  | `list_run_states_by_metadata/2` | `list_execution_states_by_metadata/2` |
+
+  `append_input/3` and `list_inputs/2` keep their names; their `run_id()`
+  parameter is now `execution_id()`.
+
+- **Breaking for a host-supplied serialization strategy.** The second
+  behaviour a host may implement renames its one callback:
+  `StatifierPersistence.Serialization.with_run/3` is now `with_execution/3`,
+  and the shipped `Serialization.AdapterLock.with_run/3` is now
+  `AdapterLock.with_execution/3`. A host that left the strategy at its default
+  implements nothing and is unaffected. The two module names are unchanged -
+  they name a strategy, not the durable record.
+
+- **Breaking, silently, for a host effect executor and a `:dispatch`
+  function.** The `run_id:` key of `StatifierPersistence.Executor.context/0`
+  and of `StatifierPersistence.Driver.dispatch_context/0` is now
+  `execution_id:`. An implementation that pattern-matches `%{run_id: id}`
+  raises at the first effect; one that reads the key by name gets `nil`.
+  Rename the key in both.
+
+- **Breaking for a host that pattern-matches this package's error atoms.**
+  `:run_exists`, `:run_not_found`, `:run_outcome_unsupported`,
+  `:run_states_unsupported`, `:run_position_missing` are now
+  `:execution_exists`, `:execution_not_found`,
+  `:execution_outcome_unsupported`, `:execution_states_unsupported`,
+  `:execution_position_missing`. A `case` with no catch-all raises; one with a
+  catch-all quietly reclassifies a known refusal.
+
+- **Breaking for anything subscribed to this package's telemetry.** The event
+  family is now `[:statifier_persistence, :execution, :step, :start | :stop]`,
+  `[:statifier_persistence, :execution, :lock]` and
+  `[:statifier_persistence, :execution, :created | :terminated | :discarded]`.
+  There is no dual emit: a handler attached to the old `:run` names goes
+  silent with no error, so grep your handlers for the old prefix as part of
+  the upgrade. `opentelemetry_statifier` 0.6.0 moves in lockstep.
+
+- Telemetry metadata keys `run_id`, `parent_run_id` and `child_run_id` are now
+  `execution_id`, `parent_execution_id` and `child_execution_id` on every
+  event that carries them, including the events whose own names did not
+  change (`[:statifier_persistence, :adapter, :call]`, `:identity, :refused`,
+  `:effect, :failed`, `:drive, :turns_exhausted` and the six
+  `[:statifier_persistence, :child, ...]` events).
+
+- Two documented telemetry metadata *values* rename with them: `stage: :run`
+  becomes `stage: :execution` on `[:statifier_persistence, :identity,
+  :refused]`, and `reason: :terminal_run` becomes `reason:
+  :terminal_execution` on `[:statifier_persistence, :execution, :discarded]`.
+
+- The six documented `StatifierPersistence.Telemetry` emitters rename with
+  their events: `run_step_start/3`, `run_step_stop/2`, `run_lock/2`,
+  `run_created/1`, `run_terminated/1` and `run_discarded/1` are now
+  `execution_step_start/3`, `execution_step_stop/2`, `execution_lock/2`,
+  `execution_created/1`, `execution_terminated/1` and
+  `execution_discarded/1`. The other ten emitters keep their names.
+
+- Modules: `StatifierPersistence.Run` is now `StatifierPersistence.Execution`
+  (struct field `:run_id` is now `:execution_id`), `StatifierPersistence.Runs`
+  is now `StatifierPersistence.Executions`, and
+  `StatifierPersistence.Run.Linkage` is now
+  `StatifierPersistence.Execution.Linkage`, whose `child_run_id/3` is now
+  `child_execution_id/3`. The lifecycle doors keep their own names and
+  arities: `Executions.create/4`, `step/5`, `fail/4`, `cancel/3`,
+  `cascade_cancel/3` and `inputs/2`.
+
+- `StatifierPersistence.Storage` renames nine functions, arities unchanged:
+  `insert_run/5`, `update_run/5`, `update_run_status/4`, `fetch_run/2`,
+  `run_outcome_supported?/1`, `run_states_supported?/1`,
+  `list_run_states_by_metadata/2`, `list_runs_by_metadata/2` and
+  `load_run_position/3` become `insert_execution/5`, `update_execution/5`,
+  `update_execution_status/4`, `fetch_execution/2`,
+  `execution_outcome_supported?/1`, `execution_states_supported?/1`,
+  `list_execution_states_by_metadata/2`, `list_executions_by_metadata/2` and
+  `load_execution_position/3`.
+
+- Types: `Storage.Adapter.run_id/0`, `run_status/0`, `run_record/0` and
+  `run_state/0` are now `execution_id/0`, `execution_status/0`,
+  `execution_record/0` and `execution_state/0`, and the `run_id:` key inside
+  `execution_record/0`, `execution_state/0`, `input_record/0` and
+  `Storage.input/0` is now `execution_id:`. `Runs.run_id/0` is now
+  `Executions.execution_id/0`, and `Storage.run_write_opt/0` is now
+  `Storage.execution_write_opt/0`.
+
+- The reserved child-linkage metadata key written into a child's `metadata`
+  map is now `"parent_execution_id"`, and `Execution.Linkage`'s struct field
+  is `:parent_execution_id`. A child written by 0.11.x carries the old key;
+  re-key it or let those executions finish under 0.11.x.
+
+- `use StatifierPersistence.Ecto` now generates `MyApp.Persistence.Execution`
+  instead of `MyApp.Persistence.Run`, and the executions and inputs schemas
+  expose the field as `execution_id` instead of `run_id`. A host naming the
+  module or the field in its own queries renames both.
+
+- New surrogate ids for that table carry the `exec_` prefix instead of
+  `run_`. Existing rows keep the ids they have - nothing rewrites them - so
+  both spellings coexist permanently on an upgraded install. Nothing in this
+  package parses a prefix and no host should; one that does must accept both.
+
+- The reserved `<donedata>` key a chart writes to fail itself is now
+  `statifier_persistence:execution_status`.
+
+- **Breaking for hosts.** The durable table is now `statifier_executions`,
+  and its identity column - in that table and in `statifier_inputs` - is now
+  `execution_id` (ADR-0011 decision 3). A new migration, **V06**, makes the
+  move on an existing database: it renames the table, both columns, both
+  unique indexes and the `metadata` GIN index **in place**, copying no data,
+  and it is a no-op on a database created at 0.12.0 or later. Run
+  `StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, from: 6)`
+  from an ordinary host migration; a fresh install gets the new names from
+  V01 and needs nothing extra. That one-line upgrade is for an install
+  already at V05: one capped below V04, which still owes V02, V03 or V04,
+  runs `up(for: MyApp.Persistence, from: 6, version: 6)` **first** and
+  then `up(for: MyApp.Persistence, from: <its cap + 1>, version: 5)` -
+  `from: 2` for a host capped at V01, `from: 3` at V02, `from: 4` at V03 -
+  because V02-V04 alter the executions table, which on such a database
+  carries that name only once V06 has renamed it; the migration's `down`
+  mirrors the two calls in reverse,
+  `down(for: MyApp.Persistence, from: 5, version: <its cap + 1>)` and then
+  `down(for: MyApp.Persistence, from: 6, version: 6)`. Rename the table in
+  any raw query, view,
+  materialized view, hand-written Ecto schema or dashboard of your own that
+  names it - it is `statifier_executions` on both paths. "In place" is exact
+  for the table and the columns on every backend; off Postgres, which has no
+  `ALTER INDEX ... RENAME TO`, the two unique indexes are dropped and
+  declared again under their new names instead, which still copies no data.
+
+- **Breaking for a host that overrides table names.** The `:tables` key for
+  this table is now `:executions`; `:runs` is rejected with
+  `ArgumentError`, and no alias ships for a release. Rename the key in your
+  `use StatifierPersistence.Ecto` options. A `:tables` override's *value* is
+  untouched: V06 renames the columns and indexes under whatever name you
+  gave, and the table keeps that name.
+
+- **Rolling back drops the tables under their new names.** V01-V05 are
+  rewritten to the new noun and drop the tables under those names, so
+  `StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence)`
+  still removes everything this package owns, on a fresh install and on an
+  upgraded one alike. What it is not is a downgrade: to run 0.11.x again,
+  restore a backup or migrate up with 0.11.x's own migrations.
+
+- **An in-flight durable subchart child does not survive the upgrade.** A
+  child created under 0.11.x carries its parent link in `metadata` under the
+  pre-0.12.0 key, and V06 renames no stored value - it is a catalog
+  operation and copies no data. `Execution.Linkage.from_metadata/1`
+  therefore answers `:no_linkage` for such a child, and its completion no
+  longer settles its parent's fan-out. **Drain your in-flight children
+  before upgrading**: let every durable subchart child reach a terminal
+  status under 0.11.x, then upgrade. Children created at 0.12.0 or later are
+  unaffected.
+
+- The migration helper now knows six versions:
+  `StatifierPersistence.Ecto.Migrations.expected_version/0` answers `6`.
+
+- The surrogate-key table map renames with the table key:
+  `t:StatifierPersistence.Ecto.KeyGenerator.table/0` is now
+  `:charts | :positions | :executions | :inputs`, and the shipped UXID
+  generator's prefix for that table is `"exec"` (it was already `"exec"` in
+  0.11.x under the old key). A host with its own `Ecto.KeyGenerator`
+  implementation renames the atom it matches on.
+
+- V06's `down/1` is a no-op, so a rollback never renames the durable table
+  back to its pre-0.12.0 name. V01-V05 drop the tables under the execution
+  names on every install this package can reach at 0.12.0, and returning to
+  the retired names would only be meaningful under a downgrade to
+  pre-0.12.0 code, which is unsupported - restore from a backup instead.
+  This is what makes `mix ecto.rollback --all` work for a host that writes
+  one migration per package version: a conditional rename would run in its
+  own rollback step and the steps behind it would then name objects that
+  are no longer there.
+
+### Deprecated
+
+- The pre-0.12.0 `<donedata>` key,
+  `statifier_persistence:run_status`, is still **read** in this release and is
+  **dropped in 0.13.0**: where both are present the new key wins, and reading
+  the old one logs one deprecation line at `:debug` naming the new key. Update
+  your charts' `<param name="...">` before 0.13.0. It is the only
+  transitional reader this rename ships.
+
 ## [0.11.0] 2026-09-08
 
 Feature release: a durably stepped run can now report itself as it goes.
