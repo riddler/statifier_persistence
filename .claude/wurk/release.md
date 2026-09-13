@@ -40,9 +40,13 @@ fragments are assembled into a new version section grouped by heading and
 ordered `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`; the
 README's install-snippet pin moves to the new release line, it being "the one
 user-facing version string outside `mix.exs`" (operator ruling, 2026-09-01);
-and the fragments are deleted in the same commit that cuts the release. That
-README's clause "and tag it" is the one place the two documents part, and only
-because they address different readers - see the last section here.
+and the fragments are deleted in the same commit that cuts the release. What
+that README does not say is the *form* the moved pin takes - the exact-minor
+`~> X.Y.0` - and it does not need to: the form is this file's to name, and it
+is named under "The README install pin" below. A prep reads the form there,
+not from the fragment README and not from a previous release commit.
+That README's clause "and tag it" is the one place the two documents part, and
+only because they address different readers - see the last section here.
 
 ## Why the recipe names no changelog
 
@@ -132,10 +136,46 @@ commit body, where every prep in this repo has put it.
 ## The README install pin
 
 `release.readme_pin` is `true`. `README.md`'s `def deps` snippet carries
-`{:statifier_persistence, "~> X.Y"}` - the major/minor form with the patch
-component dropped that the skill's step 2 bumps. Every prep since has moved
-it in the same commit as the bump; the 0.5.0 prep `957c122` is the historical
-evidence for that, having moved the pin from `~> 0.4` to `~> 0.5` there.
+`{:statifier_persistence, "~> X.Y.0"}` - the exact-minor form, with the patch
+component written as a literal `0` rather than dropped. The skill's step 2 is
+what bumps it, so the pin needs no step of its own here; what this section
+adds is the **form**, which the skill leaves to the project ("the exact form
+of the project's install pin" is the first thing its Project extension section
+names an extension for). Every prep since has moved the pin in the same commit
+as the bump; the 0.5.0 prep `957c122` is the historical evidence for that,
+having moved it from `~> 0.4` to `~> 0.5` there.
+
+Two consequences a prep should not have to derive:
+
+- **The form is `~> X.Y.0`, not `~> X.Y`.** The pre-1.0 banner at the top of
+  `README.md` says pinning to an exact minor, `~> X.Y.0`, is the recommended
+  way to consume this package until 1.0, and a snippet a host copies out of
+  the same file should not recommend one thing and demonstrate another. A prep
+  writes the `.0` form; it does not "repair" the snippet back to the
+  patch-dropped shape the skill's own step 2 assumes. The two forms admit the
+  same patch releases, so only the string written changes.
+- **The patch component is always the literal `0`**, never the release's own
+  patch number. A `X.Y.1` prep leaves the pin reading `~> X.Y.0`, which
+  already admits it; only a major or minor release moves the pin.
+
+The skill's own wording for this step - the constraint bumps to the new
+major/minor, dropping the patch component, "in whatever form previous releases
+used" - is answered here rather than by reading a previous release commit. The
+form changed outside a release, in the commit that moved the snippet to it
+(2026-09-13), so release commits older than that one show the earlier `~> X.Y`
+form and are not evidence for this question.
+
+The pin's current value is not written down here, for the same reason no
+version is written down anywhere else in this file. Read it and check it
+against the version file instead:
+
+```bash
+grep 'statifier_persistence, "~>' README.md   # the pin, in the ~> X.Y.0 form
+grep '@version "' mix.exs                     # the version it should track
+```
+
+They should agree on major and minor, and the pin's patch component should
+read `0`.
 
 `changelog.d/README.md`'s "At release" paragraph names this move as part of the
 same step, on an operator ruling of 2026-09-01, so a prep that bumps `mix.exs`
