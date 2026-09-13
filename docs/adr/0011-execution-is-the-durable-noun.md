@@ -1,6 +1,9 @@
 # ADR-0011: `execution` is the durable noun: the modules, the types, the adapter callbacks, the tables, the V06 rename, the two donedata keys, and the telemetry prefix
 
-Status: proposed (2026-09-12, sp-n55; campaign SF041, RQ-SF041-7/-8/-9 ruled by
+Status: accepted (2026-09-13, sp-5nv, PR #101, after PR #95 (sp-op4, the code),
+PR #97 (sp-j2y, V06 and the `Config` key) and PR #99 (sp-tae, V06's down)
+landed on `main`; merged at proposed 2026-09-12, sp-n55, PR #94; campaign
+SF041, RQ-SF041-7/-8/-9 ruled by
 the operator the same day; epic sp-hnp. sp-op4 and sp-j2y build it, sp-478 and
 sp-pcw carry the pointer Notes, and sp-5nv flips this record once the code and
 the migration are on `main`)
@@ -837,3 +840,170 @@ by the compiler, is cheaper than a synonym the family carries forever.
   same treatment, which this record declined; or the family choosing a different
   noun for the *session*-scoped things this package does not own, which would be
   `statifier-ex`'s call and not an amendment here.
+
+---
+
+## Note (2026-09-13, sp-5nv, PR #101): the flip, the drain consequence, V06's no-op down, and one arity correction
+
+This Note records the flip of the Status line above from `proposed` to
+`accepted` and carries three rulings the code beads surfaced after this record
+merged. It amends by addition: nothing above is reworded or removed, and the
+sentences the flip falsifies are named here rather than edited.
+
+### What the flip verified
+
+Every claim this record makes about the shipped code was re-verified against
+`statifier_persistence` `main` at **`e33cd7a`** (the 0.12.0 release commit),
+read 2026-09-13, by anchor rather than by line number. The premise-surface
+cites above stay labelled `@70d86bd`: they describe what spoke `run` *before*
+the rename and are historical by construction, so they are not re-pointed.
+What was checked at `e33cd7a`, and holds:
+
+- **Decision 2's modules, types, callbacks, facade, emitters, error atoms and
+  generated names.** `StatifierPersistence.Execution`, `.Executions` and
+  `.Execution.Linkage` (`lib/statifier_persistence/execution.ex:1`,
+  `executions.ex:1`, `execution/linkage.ex:1`); the four adapter types
+  (`storage/adapter.ex:54`, `:62`, `:100`, `:122`); the seven renamed
+  callbacks (`adapter.ex:295`, `:309`, `:344`, `:384`, `:422`, `:442`,
+  `:466`) with `append_input/3` and `list_inputs/2` keeping their names over
+  an `execution_id()` parameter (`adapter.ex:513`, `:526`); the nine renamed
+  `Storage` functions (`storage.ex:304`, `:354`, `:401`, `:420`, `:486`,
+  `:506`, `:529`, `:551`, `:711`); `%Execution{execution_id: ...}`
+  (`execution.ex:13`); `:parent_execution_id` and the reserved metadata
+  string `"parent_execution_id"` (`execution/linkage.ex:75`, `:181`);
+  `child_execution_id/3` (`execution/linkage.ex:285`); the six renamed
+  telemetry emitters (`telemetry.ex:219`, `:236`, `:262`, `:322`, `:343`,
+  `:360`) over the `[:statifier_persistence, :execution, ...]` event names
+  (`telemetry.ex:160-167`); `with_execution/3` on both the behaviour and
+  `AdapterLock` (`serialization.ex:29`, `serialization/adapter_lock.ex:22`);
+  the public types outside the adapter (`executions.ex:119`,
+  `storage.ex:114`, `executor.ex:17`, `ecto/key_generator.ex:28`) and
+  `Driver.dispatch_context/0`'s `execution_id:` key (`driver.ex:206`); the
+  seven renamed error atoms (`storage.ex:71`, `:74`, `:75`;
+  `storage/adapter.ex:202`, `:203`, `:205`, `:206`); the generated schema
+  module and its two `execution_id` fields (`ecto.ex:65`, `:92`, `:102`);
+  and the `@prefixes` map's `executions: "exec"` (`ecto/key_generator/uxid.ex:18`).
+  All read at `e33cd7a`.
+- **Decision 2's two metadata values.** `stage: :execution`
+  (`storage.ex:313`, `:363`, `:715`, `executions.ex:1112`; documented
+  `docs/telemetry.md:258`) and `reason: :terminal_execution`
+  (`executions.ex:444`, `:563`, `:604`; documented `telemetry.ex:102` and
+  `docs/telemetry.md:291`), read at `e33cd7a`.
+- **Decision 2's pinned test.** It exists as
+  `test/statifier_persistence/execution_vocabulary_test.exs` at `e33cd7a`,
+  and its survivor list is the one this record names: the old donedata
+  *string* (`@survivor_lines`, `:23-26`) and the English verb
+  (`@survivor_names`, `:37`). No atom-literal survivor, as decision 2
+  requires.
+- **Decision 3's configuration and tables.** `@table_keys [:charts,
+  :positions, :executions, :inputs]` (`ecto/config.ex:46`), no `:runs`
+  alias - `validate_tables!/1` raises on an unknown key
+  (`ecto/config.ex:125-138`) and `Config.table/2`'s guard is the second
+  line of defence (`ecto/config.ex:90`); V01-V05 rewritten to the execution
+  noun (`v01.ex:64`, `:68`, `:80`, `:88`; `v02.ex:32`, `:42`; `v03.ex:87`,
+  `:112`; `v04.ex:157`, `:161`, `:166`; `v05.ex:51`, `:60`); V06 a
+  conditional in-place rename through `execute/1`'s function form
+  (`v06.ex:143-144`, resolving the old name at `v06.ex:163`), taking key
+  `6` in `@migrations` (`ecto/migrations.ex:164-171`) from which
+  `@current_version` (`:176`) and `expected_version/0` (`:264`) derive.
+  All read at `e33cd7a`.
+- **Decision 4's two keys.** `@execution_status_key` (`executions.ex:1686`)
+  and `@legacy_execution_status_key` (`:1694`), the new key winning in
+  `failure_classed_final?/1` (`:1698-1708`) and the old one logging one
+  deprecation line (`warn_legacy_execution_status_key/1`, `:1718`), read at
+  `e33cd7a`. The release that carries them is `0.12.0` (`mix.exs:4`,
+  `@version "0.12.0"`, `@e33cd7a`), which is the release this record
+  predicted while `mix.exs` still said `0.11.0`.
+- **Decision 5's release order.** `statifier_oban` `0.10.0` shipped ahead on
+  2026-09-12 (`statifier_oban` CHANGELOG `[0.10.0] 2026-09-12`, `@e3422bb`),
+  as the Consequences section records.
+
+### The sentences the flip falsifies
+
+Three sentences above name this record's own status and are met here rather
+than reworded (zero removed lines other than the Status text):
+
+1. the Status line's own closing clause, "and sp-5nv flips this record once
+   the code and the migration are on `main`" - done, by this Note's PR;
+2. the Consequences bullet "This record merges at **proposed** and flips to
+   accepted by **sp-5nv**, after sp-op4 (the code) and sp-j2y (the migration
+   and the `Config` key) are on `main`. A flip verifies every claim above
+   against the code of that day, not against this text." - the verification
+   it asks for is the list above;
+3. the Consequences bullet beginning "**ADR-0002 decision 5 is the one live
+   decision this record overturns**", whose "after sp-5nv flips this record"
+   is now in the past: ADR-0002 decision 5's "the vocabulary is *runs*" no
+   longer holds from this flip onward, while the rest of that decision is
+   untouched. ADR-0002 carries no dated Note saying so at `e33cd7a`, and the
+   phrase "runs vocabulary" still stands in the index summary at
+   `docs/adr/README.md:6` - both remain open against that record, not this
+   one.
+
+### 1. Upgrade consequence: drain in-flight children first (RQ-SF041-22)
+
+Ruled by the operator 2026-09-13, verbatim: "Record the consequence - host
+should drain in-flight children first."
+
+V06 renames tables, columns and indexes and **re-keys no stored value**. A
+child execution started under `0.11.x` carries `"parent_run_id"` inside its
+opaque `metadata` map (the reserved key decision 2 renames to
+`"parent_execution_id"`), and nothing rewrites that map on the way up -
+decision 3 forbids any migration that reads or writes rows. After the
+upgrade, `0.12.0` looks for `"parent_execution_id"`, does not find it, and
+the child answers `:no_linkage`: its parent link is invisible to the new
+code even though the row is intact.
+
+The consequence for a host is therefore an ordering rule, not a code change:
+**drain in-flight children before upgrading to `0.12.0`.** An execution with
+no live child at the moment of the upgrade is unaffected, because the
+reserved key only ever appears on a child's metadata. Tracked as **sp-f99**.
+
+### 2. Decision 3's down path: V06's down is a no-op (RQ-SF041-25)
+
+Ruled by the operator 2026-09-13, verbatim: "V06 down no-op". This
+supersedes the earlier ruling of the same day that had V06's down rename
+back, and it is what shipped in **PR #99** (`2630aed`; `v06.ex:155`, `def
+down(%Config{} = _config), do: :ok`, read at `e33cd7a`).
+
+Decision 3's down sentence - "**`down/0` renames back when the executions
+table exists**, and does nothing when it does not" - gains this clause:
+
+> V06's down is a no-op - under the full cutover the V05 state on 0.12 code
+> is already the execution names, so there is nothing to restore; rolling
+> back to 0 works for fresh and upgraded installs with any host migration
+> pattern; an install that must return to the pre-0.12 names restores from
+> backup (rollback to pre-0.12 code is unsupported).
+
+Two further sentences above are read through that clause and are not
+reworded: decision 3's "**Rolling back below V06 on an upgraded install is
+unsupported**" bullet, and the Consequences bullet of the same words. Their
+premise was that V06's down restores `statifier_runs` while V01-V05's
+`down/1` arms speak the execution noun. With the down a no-op that premise
+is gone: every `down/1` arm speaks one noun, so a rollback to 0 completes on
+either kind of install. What survives of those sentences is their
+conclusion, narrowed: **a rollback to pre-`0.12.0` code** is unsupported,
+because the pre-`0.12.0` migrations name tables this database no longer has.
+A rollback within `0.12.0` code is ordinary.
+
+One ordering rule comes with the no-op, on the way **up** only, and it is
+recorded where a host will meet it
+(`ecto/migrations.ex` moduledoc, `:105-130`, `@e33cd7a`): an install capped
+below version 4 runs V06 first and the versions it skipped afterwards,
+because V02-V04 alter a table that carries the execution name only once V06
+has renamed it.
+
+### 3. One arity correction
+
+This record writes V06's rollback as **`down/0`** in three places (decision
+3's down bullet, decision 3's "Rolling back below V06" bullet, and the
+Consequences bullet of the same name). Every migration in the tree pairs
+`up/1` with `down/1`, and V06 as built is no exception (`v06.ex:143` and
+`:155`, `@e33cd7a`). Read `down/1` wherever this record says `down/0`; the
+arity is the only thing wrong, and the sentences are left as written.
+
+The other two cite tidies routed to this Note were checked and need no
+correction: `docs/telemetry.md`'s `persist_tail/7` is the right arity
+(`executions.ex:1106`, seven parameters, `@e33cd7a`), and this record's
+attribution of the discoverability argument to ADR-0002 decision 4
+(`docs/adr/0002-configurable-keys-and-table-names.md:88-95`, `@e33cd7a`) was
+already corrected before the record merged.
