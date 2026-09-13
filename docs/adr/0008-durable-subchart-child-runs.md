@@ -1041,23 +1041,24 @@ This record's decisions are unchanged by the rename - only the word is - and
 the file name keeps `child-runs` because a file name is a cite target.
 
 **2. Clause 3 of the `after_step:` amendment already carries the narrow
-promise the SF039 wrap queued, scoped to the run it reports.** The SF039 wrap queued an item on the reading
-that clause 3 promises the callback fires outside *any* run lock, asking for the
-narrower wording on the grounds that decision 3's child is created inside its
-parent's serialization section, so the child's callback fires while the parent's
-exclusion is still held. That is a correct reading of the mechanism and it is
-already the record's text - so the queued item is answered here rather than
-corrected above. Clause 3's own sentence is scoped to one run: "It fires after
-that step's persist, in the order the steps happened, and outside the exclusion
-of the run it reports" (:871-872, read at `05993b0`). The paragraph beneath it
-states both halves of the queued concern explicitly - the child case ("the
-callback fires for the child's own steps - correctly, with the child's run id -
-while the parent's exclusion is still held", :889-890) and the refusal of the
-broad reading with the narrow promise in its place ("a host must not read clause
-3 as a promise that no run lock is held anywhere when its callback runs. What it
-promises is narrower and is the part a host can act on: the callback for a given
-run never runs inside that run's own exclusion", :891-894). The sp-nhl Note
-above restates that same sentence where it records that the claim holds by
+promise the SF039 wrap queued, scoped to the run it reports.** The SF039 wrap
+queued an item on the reading that clause 3 promises the callback fires
+outside *any* run lock, asking for the narrower wording on the grounds that
+decision 3's child is created inside its parent's serialization section, so
+the child's callback fires while the parent's exclusion is still held. That is
+a correct reading of the mechanism and it is already the record's text - so
+the queued item is answered here rather than corrected above. Clause 3's own
+sentence is scoped to one run: "It fires after that step's persist, in the
+order the steps happened, and outside the exclusion of the run it reports"
+(:871-872, read at `05993b0`). The paragraph beneath it states both halves of
+the queued concern explicitly - the child case ("the callback fires for the
+child's own steps - correctly, with the child's run id - while the parent's
+exclusion is still held", :889-890) and the refusal of the broad reading with
+the narrow promise in its place ("a host must not read clause 3 as a promise
+that no run lock is held anywhere when its callback runs. What it promises is
+narrower and is the part a host can act on: the callback for a given run never
+runs inside that run's own exclusion", :891-894). The sp-nhl Note above
+restates that same sentence where it records that the claim holds by
 construction and that no test asserts it (:1001-1003).
 
 Nothing in clause 3 changes, then, and no wording is replaced. What is worth
