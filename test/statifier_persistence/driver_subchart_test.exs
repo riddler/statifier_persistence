@@ -443,7 +443,7 @@ defmodule StatifierPersistence.DriverSubchartTest do
   # through `Executions.fail/4`, answers its parent when it is handed a driver -
   # the seam ADR-0008's note of 2026-09-06 records. The Ecto and SQLite
   # variants of the first case live in `DriverSubchartEctoTest` and
-  # `Ecto.SqliteMigrationsTest`; everything here executions over `InMemory`.
+  # `Ecto.SqliteMigrationsTest`; everything here runs over `InMemory`.
   describe "an outside fail on a linked child" do
     # sabotage: in `Executions.answer_parent_of_failed/4`, replaced the `driver`
     # clause's `Driver.resolve_and_answer_parent/3` call with a bare
@@ -543,7 +543,7 @@ defmodule StatifierPersistence.DriverSubchartTest do
 
     # sabotage: replaced the `nil ->` clause of
     # `Executions.answer_parent_of_failed/4` - the whole of what a call without
-    # `driver:` executions - with `{:error, :no_driver}`, and this case's
+    # `driver:` runs - with `{:error, :no_driver}`, and this case's
     # `assert {:ok, child_execution}` went red. Verified red, reverted.
     test "without driver:, no linkage is read and the parent is untouched", %{store: store} do
       {:ok, parent_machine} = Statifier.compile(@parent_source)
@@ -722,7 +722,7 @@ defmodule StatifierPersistence.DriverSubchartTest do
     # No sabotage note: this asserts ADR-0007 decision 3's pre-existing
     # discard mechanism (`late_answer/3`, `driver.ex`), not new Phase 5
     # code - the core empties `active_invocations` on exit regardless of
-    # whether the cascade itself executions, so the discard holds either way.
+    # whether the cascade itself runs, so the discard holds either way.
     # Recorded here because the plan states it as this phase's acceptance
     # criterion.
     # sabotage: flipped late_answer/3's liveness check (driver.ex) so a

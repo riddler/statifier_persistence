@@ -78,7 +78,7 @@ defmodule StatifierPersistence.DriverSubchartEctoTest do
     %{store: store}
   end
 
-  # Manual verification (sp-nt8 Phase 5): execution this against Postgres, not
+  # Manual verification (sp-nt8 Phase 5): run this against Postgres, not
   # only the in-memory Agent, and confirm no lock timeout and no
   # `deadlock detected` - a plain pass is the confirmation, the same way
   # the demo's own Ecto variant confirms its default `AdapterLock`

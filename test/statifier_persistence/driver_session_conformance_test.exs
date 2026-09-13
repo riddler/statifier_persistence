@@ -4,7 +4,7 @@ defmodule StatifierPersistence.DriverSessionConformanceTest do
   rests on: a chart answered durably sees exactly the event it would have
   seen answered through a live `Statifier.Session`.
 
-  Both halves execution the same document with the same session id and the same
+  Both halves run the same document with the same session id and the same
   answer. The comparison is `_event` - spec 5.10's system variable, the
   chart's own view of what arrived - rather than the `%Statifier.Event{}`
   struct, because `_event` is the surface a document can actually branch

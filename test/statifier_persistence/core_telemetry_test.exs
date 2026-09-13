@@ -326,7 +326,7 @@ defmodule StatifierPersistence.CoreTelemetryTest do
       assert {measurements, metadata} = await(@halt)
       assert metadata.driver == :persistence
       assert metadata.reason == :done
-      # Empty, and correctly so: reaching a top-level final executions
+      # Empty, and correctly so: reaching a top-level final runs
       # `exit_interpreter`, so the halted position has no configuration left
       # - the same shape a session-driven halt reports.
       assert metadata.configuration == MapSet.new()

@@ -356,7 +356,7 @@ defmodule StatifierPersistence.Demo.Host do
      position (the plan's Key Discoveries).
   2. **Invocations.** For each `{_key, invoke_id}` the durable position's
      `active_invocations` still names *and* the ledger still shows `:open`,
-     `handler.start/2` is re-execution and its instructions performed - the
+     `handler.start/2` is re-run and its instructions performed - the
      engine is the liveness authority (which ids are still active), the
      ledger is the payload source (the `type`/`params` that id started
      with); an id either side has dropped is left alone. Re-running

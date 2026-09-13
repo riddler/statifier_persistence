@@ -3,7 +3,7 @@ defmodule StatifierPersistence.Test.LockOrderRecorder do
   A `StatifierPersistence.Serialization` strategy that reports, for every
   exclusion it opens, which exclusions the calling process was *already*
   holding when it asked for this one - the real
-  `StatifierPersistence.Serialization.AdapterLock` exclusion executions unchanged
+  `StatifierPersistence.Serialization.AdapterLock` exclusion runs unchanged
   inside it.
 
   The fixture for sp-oq4's audit. A deadlock between two connections needs
@@ -18,7 +18,7 @@ defmodule StatifierPersistence.Test.LockOrderRecorder do
   A test reads the direction straight off `held`: an acquisition whose
   `held` are all strict ancestors of `execution_id` (`Execution.Linkage.child_execution_id/3`
   makes a child's id strictly extend its parent's) can only ever wait on a
-  execution further down the same tree, and a relation that only ever executions
+  execution further down the same tree, and a relation that only ever runs
   parent-to-child over an acyclic tree has no cycle to find.
 
   The held list lives in the process dictionary because that is what a

@@ -595,13 +595,13 @@ defmodule StatifierPersistence.DriverFanoutTest do
     # `Linkage.child_execution_id/3` makes a child's execution id strictly extend its
     # parent's, so "descendant" is a prefix test and the execution tree is
     # acyclic by construction (ADR-0008 decision 6) - a wait-for relation
-    # that only ever executions parent-to-child down an acyclic tree has no
+    # that only ever runs parent-to-child down an acyclic tree has no
     # cycle in it, on Postgres advisory locks or anywhere else.
     #
     # The upward acquisition - a child answering its parent - is the case
     # that would close a cycle, and it is taken with NOTHING held: the
     # child's own drive commits and releases its own exclusion before
-    # `maybe_answer_parent/3` executions, and `settle_child/4` answers the
+    # `maybe_answer_parent/3` runs, and `settle_child/4` answers the
     # parent's door after `decide/4`'s exclusion has closed, not inside
     # it. Assertion (3) is what pins that.
     #

@@ -12,7 +12,7 @@ defmodule StatifierPersistence.Storage.SetupOrderingConformanceTest do
   adapter is still empty of the input-log fixture execution when it is called.
 
   The callback is registered for the whole module, so every case the
-  template generates for `StatifierPersistence.Test.InputLogAdapter` executions
+  template generates for `StatifierPersistence.Test.InputLogAdapter` runs
   through it: the assertion is the contract over all of them, not over
   one.
 

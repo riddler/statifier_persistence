@@ -137,7 +137,7 @@ defmodule StatifierPersistence.Demo.RestartDemoTest do
   # state - the same `chart_a`/`chart_b` device
   # `StatifierPersistence.Testing.Charts` uses (charts.ex:8-15) to change
   # `Statifier.Machine.Identity.of_source/2`'s content hash without
-  # changing anything about how the chart executions.
+  # changing anything about how the chart runs.
   @wrong_revision_source Scenario.source()
                          |> String.replace(
                            ~r{</scxml>\s*\z},

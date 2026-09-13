@@ -1,5 +1,5 @@
 defmodule StatifierPersistence.Storage.EctoLiveLockTest do
-  # Live lock tests execution outside the SQL sandbox, like the live migration
+  # Live lock tests run outside the SQL sandbox, like the live migration
   # tests: the sandbox funnels every caller through one shared
   # connection, which serializes transactions by ownership alone and
   # would mask a broken lock. Here each task takes its own pooled

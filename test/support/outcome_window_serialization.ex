@@ -3,7 +3,7 @@ defmodule StatifierPersistence.Test.OutcomeWindowSerialization do
   A `StatifierPersistence.Serialization` strategy that reports whether a
   watched execution's own answer (`outcome_blob`) was already stored when an
   exclusion opened, and whether it was stored by the time it closed - the
-  real `StatifierPersistence.Serialization.AdapterLock` exclusion executions
+  real `StatifierPersistence.Serialization.AdapterLock` exclusion runs
   unchanged in between.
 
   The fixture for sp-kl3's ordering half: a fan-out child's answer has to

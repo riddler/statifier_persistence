@@ -184,7 +184,7 @@ if Code.ensure_loaded?(Ecto) do
     The refusal is the V01 unique index on `execution_id` speaking: the insert
     carries a `unique_constraint/3` on that index's name, so two
     concurrent inserts of one `execution_id` cannot both return `:ok` and no
-    separate existence check ever executions.
+    separate existence check ever runs.
 
     `metadata` is stored in the V02 `jsonb` column, `NULL` for the empty
     map. `jsonb` holds only JSON-representable values, which makes `term`
