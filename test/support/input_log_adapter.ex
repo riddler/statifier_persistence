@@ -112,8 +112,8 @@ defmodule StatifierPersistence.Test.InputLogAdapter do
   end
 
   @doc """
-  Lists `execution_id`'s whole log in ascending `seq`, or `:execution_not_found` for a
-  execution this adapter never stored.
+  Lists `execution_id`'s whole log in ascending `seq`, or
+  `:execution_not_found` for an execution this adapter never stored.
   """
   @impl true
   @spec list_inputs(Adapter.opts(), Adapter.execution_id()) ::

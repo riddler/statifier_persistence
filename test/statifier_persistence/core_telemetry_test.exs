@@ -153,7 +153,7 @@ defmodule StatifierPersistence.CoreTelemetryTest do
   end
 
   describe "the macrostep span (st-ADR-0067 decision 5)" do
-    # Sabotage: passed :event as report_initialized/4's trigger - red; a
+    # Sabotage: passed :event as report_initialized/4's trigger - red; an
     # execution's one initialization looked like an external delivery.
     test "brackets Interpreter.initialize/2 at create, as an :initialize pair",
          %{store: store} do
