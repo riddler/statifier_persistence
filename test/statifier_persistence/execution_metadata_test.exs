@@ -5,7 +5,7 @@ defmodule StatifierPersistence.ExecutionMetadataTest do
   rule.
 
   The adapter-level round trip and refusal are the conformance suite's
-  (`StorageConformance`, execution here over `InMemory` and over
+  (`StorageConformance`, run here over `InMemory` and over
   `NoLockAdapter`, which declares no support). What this module adds is
   what the suite cannot say generically: that `Executions.create/4` threads the
   option through, that a refused create executes no effect, and that a
