@@ -365,3 +365,42 @@ The prose that names columns rather than counting them is
 `StatifierPersistence.Ecto`'s moduledoc and the `:blob_type` section of
 `README.md`, both of which `sp-80g` brought to the five-column set when it
 shipped the input log.
+
+## Note (2026-09-13, sp-478): `run` in this record is the noun now called `execution`
+
+Pure addition: nothing above is edited, and the metadata contract this record
+decides is read at the dates its sections were decided.
+
+**Read `run` as `execution` from 0.12.0.** Every `run` in this file - the
+durable noun, the module and function names, the ids and the column names it
+cites - names the record this package now calls an `execution`, with one
+exception named below. `StatifierPersistence.Execution` and
+`StatifierPersistence.Executions` are the modules
+(`lib/statifier_persistence/execution.ex:1`,
+`lib/statifier_persistence/executions.ex:1`), the error atom is
+`:execution_not_found` (`lib/statifier_persistence/executions.ex:710`), and
+the telemetry family is `[:statifier_persistence, :execution, ...]` carrying
+`execution_id` metadata (`lib/statifier_persistence/telemetry.ex:60-62`) -
+each read at `71537dc`. The table, column and index half is V06
+(`lib/statifier_persistence/ecto/migrations/v06.ex:2`, read at `71537dc`),
+and the whole rename ships in 0.12.0. **ADR-0011 governs the noun**
+(`docs/adr/0011-execution-is-the-durable-noun.md`).
+
+**The exception is the donedata key.** The reserved key spelled
+`statifier_persistence:run_status` in this record keeps that spelling as a
+key that is still *read*: 0.12.0 reads both it and
+`statifier_persistence:execution_status`, the new key winning where both are
+present and the old one logging one deprecation line, and 0.13.0 reads only
+the new one (ADR-0011 decision 4; `@execution_status_key`
+`lib/statifier_persistence/executions.ex:1686` and
+`@legacy_execution_status_key` `:1694`, read at `71537dc`). So a `run` that
+names that key is the one `run` in this file that is not simply read as
+`execution` for one release.
+
+This record's decisions are unchanged by the rename - only the word is - and
+the file name keeps `run` because a file name is a cite target.
+
+The `metadata` map this record adds hangs off the execution record and is
+stored in the executions table's `metadata` column; the two listings are
+`list_executions_by_metadata/2` and `list_execution_states_by_metadata/2` at
+`71537dc`. Decision 2's identities-only rule is untouched by the rename.

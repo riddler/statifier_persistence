@@ -561,3 +561,44 @@ amendment added are `[:statifier_persistence, :child, :recorded]` and
 
 No decision moves. Nothing in decision 8's freeze changes: this Note
 corrects prose that trailed a correction already taken.
+
+## Note (2026-09-13, sp-478): `run` in this record is the noun now called `execution`
+
+Pure addition: nothing above is edited, and the event contract this record
+decides is read at the dates its sections were decided.
+
+**Read `run` as `execution` from 0.12.0.** Every `run` in this file - the
+durable noun, the module and function names, the ids and the column names it
+cites - names the record this package now calls an `execution`, with one
+exception named below. `StatifierPersistence.Execution` and
+`StatifierPersistence.Executions` are the modules
+(`lib/statifier_persistence/execution.ex:1`,
+`lib/statifier_persistence/executions.ex:1`), the error atom is
+`:execution_not_found` (`lib/statifier_persistence/executions.ex:710`), and
+the telemetry family is `[:statifier_persistence, :execution, ...]` carrying
+`execution_id` metadata (`lib/statifier_persistence/telemetry.ex:60-62`) -
+each read at `71537dc`. The table, column and index half is V06
+(`lib/statifier_persistence/ecto/migrations/v06.ex:2`, read at `71537dc`),
+and the whole rename ships in 0.12.0. **ADR-0011 governs the noun**
+(`docs/adr/0011-execution-is-the-durable-noun.md`).
+
+**The exception is the donedata key.** The reserved key spelled
+`statifier_persistence:run_status` in this record keeps that spelling as a
+key that is still *read*: 0.12.0 reads both it and
+`statifier_persistence:execution_status`, the new key winning where both are
+present and the old one logging one deprecation line, and 0.13.0 reads only
+the new one (ADR-0011 decision 4; `@execution_status_key`
+`lib/statifier_persistence/executions.ex:1686` and
+`@legacy_execution_status_key` `:1694`, read at `71537dc`). So a `run` that
+names that key is the one `run` in this file that is not simply read as
+`execution` for one release.
+
+This record's decisions are unchanged by the rename - only the word is - and
+the file name keeps `run` because a file name is a cite target.
+
+The event names this record freezes move with the noun and with no dual emit
+(ADR-0011 decision 5): `[:statifier_persistence, :run, ...]` reads
+`[:statifier_persistence, :execution, ...]` and the `run_id` metadata key
+reads `execution_id`, both at `lib/statifier_persistence/telemetry.ex:60-62`,
+read at `71537dc`. Decision 8's freeze is unchanged: the count and the
+structure of the table are what it fixes, not the spelling of the noun.

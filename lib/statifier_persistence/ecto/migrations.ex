@@ -106,6 +106,32 @@ if Code.ensure_loaded?(Ecto.Migration) do
     the tables are then dropped under their new names, and runs it when 6
     is the last step.
 
+    One ordering rule comes with it. An install that still owes V02, V03 or
+    V04 - one capped below version 4 - runs V06 on its own first and the
+    versions it skipped afterwards, because those three alter the executions
+    table, which on a database built before `0.12.0` carries that name only
+    once V06 has renamed it:
+
+        defmodule MyApp.Repo.Migrations.RenameStatifierPersistenceExecutions do
+          use Ecto.Migration
+
+          def up do
+            StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, from: 6, version: 6)
+            StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, from: 2, version: 5)
+          end
+
+          def down,
+            do:
+              StatifierPersistence.Ecto.Migrations.down(
+                for: MyApp.Persistence,
+                from: 6,
+                version: 2
+              )
+        end
+
+    An install already at V05 needs none of that: `up(from: 6)` is the whole
+    upgrade.
+
     `expected_version/0` answers what that newest version is. A host that
     delegates its migrations here never needs it; a host whose schema is
     hand-written DDL has to check for itself that its tables are current,

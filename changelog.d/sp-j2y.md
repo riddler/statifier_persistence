@@ -8,9 +8,17 @@
   and it is a no-op on a database created at 0.12.0 or later. Run
   `StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, from: 6)`
   from an ordinary host migration; a fresh install gets the new names from
-  V01 and needs nothing extra. Rename the table in any raw query, view,
+  V01 and needs nothing extra. That one-line upgrade is for an install
+  already at V05: one that still owes V02, V03 or V04 runs
+  `up(for: MyApp.Persistence, from: 6, version: 6)` **first** and then
+  `up(for: MyApp.Persistence, from: 2, version: 5)`, because V02-V04 alter
+  the executions table, which on such a database carries that name only
+  once V06 has renamed it. Rename the table in any raw query, view,
   materialized view, hand-written Ecto schema or dashboard of your own that
-  names it - it is `statifier_executions` on both paths.
+  names it - it is `statifier_executions` on both paths. "In place" is exact
+  for the table and the columns on every backend; off Postgres, which has no
+  `ALTER INDEX ... RENAME TO`, the two unique indexes are dropped and
+  declared again under their new names instead, which still copies no data.
 
 - **Breaking for a host that overrides table names.** The `:tables` key for
   this table is now `:executions`; `:runs` is rejected with
@@ -43,7 +51,7 @@
   `StatifierPersistence.Ecto.Migrations.expected_version/0` answers `6`.
 
 - The surrogate-key table map renames with the table key:
-  `StatifierPersistence.Ecto.KeyGenerator.table/0` is now
+  `t:StatifierPersistence.Ecto.KeyGenerator.table/0` is now
   `:charts | :positions | :executions | :inputs`, and the shipped UXID
   generator's prefix for that table is `"exec"` (it was already `"exec"` in
   0.11.x under the old key). A host with its own `Ecto.KeyGenerator`

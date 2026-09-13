@@ -31,16 +31,16 @@ def deps do
 end
 ```
 
-## A worked run
+## A worked execution
 
 A card-processing transaction: authorize it, capture it before its
-capture window closes, settle it. The whole run is four calls, and no
+capture window closes, settle it. The whole execution is four calls, and no
 process holds the chart between them.
 
 ```elixir
 alias Statifier.{Chart, Event, Machine, MachineState}
 alias Statifier.Invoke.Types, as: InvokeTypes
-alias StatifierPersistence.{Runs, Storage}
+alias StatifierPersistence.{Executions, Storage}
 
 source = """
 <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="authorizing">
@@ -79,8 +79,8 @@ does the least a real host could do with an outbound authorization:
 ```elixir
 executor = fn
   {:invoke, %Statifier.Effect.Invoke{type: "myapp:authorize"} = invoke}, ctx ->
-    # your own gateway call, keyed for idempotency by run and invocation
-    MyApp.Payments.authorize(ctx.run_id, invoke.invoke_id)
+    # your own gateway call, keyed for idempotency by execution and invocation
+    MyApp.Payments.authorize(ctx.execution_id, invoke.invoke_id)
     :ok
 
   _effect, _ctx ->
@@ -91,21 +91,21 @@ opts = [executor: executor, invoke_types: InvokeTypes.new(types: ["myapp:authori
 ```
 
 `create/4` initializes the chart, hands the resulting effects to the
-executor, and persists the quiescent position under a run id you choose
+executor, and persists the quiescent position under an execution id you choose
 - here the transaction's own key:
 
 ```elixir
-{:ok, run, state} = Runs.create(store, "txn_01H8", machine, opts)
-#=> run.status == :active, active leaf state "authorizing"
+{:ok, execution, state} = Executions.create(store, "txn_01H8", machine, opts)
+#=> execution.status == :active, active leaf state "authorizing"
 ```
 
 Each later event is one `step/5`: liveness check, guarded load, step,
 effects out through the seam, persist. Between calls there is no live
-process and no in-memory position - only the run record.
+process and no in-memory position - only the execution record.
 
 ```elixir
-{:ok, run, state} =
-  Runs.step(
+{:ok, execution, state} =
+  Executions.step(
     store,
     "txn_01H8",
     machine,
@@ -113,17 +113,17 @@ process and no in-memory position - only the run record.
     opts
   )
 
-#=> run.status == :active, active leaf state "awaiting_capture"
+#=> execution.status == :active, active leaf state "awaiting_capture"
 ```
 
 ### Across a restart
 
 Nothing above kept state in the beam, so a deploy in the middle of the
-run changes nothing about how it continues. Given only the run id, fetch
-the record, fetch the chart bytes it names, and recompile:
+execution changes nothing about how it continues. Given only the execution
+id, fetch the record, fetch the chart bytes it names, and recompile:
 
 ```elixir
-{:ok, record} = Storage.fetch_run(store, "txn_01H8")
+{:ok, record} = Storage.fetch_execution(store, "txn_01H8")
 {:ok, %{chart_blob: blob}} = Storage.fetch_chart(store, record.content_hash)
 {:ok, rebooted} = Chart.from_binary(blob)
 ```
@@ -132,26 +132,28 @@ the record, fetch the chart bytes it names, and recompile:
 from before the restart, and it is what makes the stored position
 readable again: Statifier interns state ids to indices at compile time,
 so a position is only meaningful against the exact chart revision that
-produced it. The identity guard enforces that on every load. Step a run
+produced it. The identity guard enforces that on every load. Step an execution
 with a machine compiled from a *changed* chart and it refuses with
 `{:error, {:identity_mismatch, stored, supplied}}` rather than silently
 resuming the wrong configuration.
 
 ```elixir
-{:ok, run, state} =
-  Runs.step(store, "txn_01H8", rebooted, Event.external("capture.requested"), opts)
+{:ok, execution, state} =
+  Executions.step(store, "txn_01H8", rebooted, Event.external("capture.requested"), opts)
 
-#=> run.status == :active, active leaf state "settling"
+#=> execution.status == :active, active leaf state "settling"
 
-{:ok, run, state} = Runs.step(store, "txn_01H8", rebooted, Event.external("ack"), opts)
-#=> run.status == :completed, no active leaf states
+{:ok, execution, state} =
+  Executions.step(store, "txn_01H8", rebooted, Event.external("ack"), opts)
+
+#=> execution.status == :completed, no active leaf states
 ```
 
 `:completed` is reached only by the chart reaching a final state - the
 lifecycle consumes the interpreter's `:done` itself and never hands it
-to your executor. `Runs.fail/4` is the one host-driven terminal
-transition, and a step delivered to a terminal run comes back
-`{:discarded, run}` rather than raising.
+to your executor. `Executions.fail/4` is the one host-driven terminal
+transition, and a step delivered to a terminal execution comes back
+`{:discarded, execution}` rather than raising.
 
 To read the configuration back as state ids, as the snippets' comments
 show it:
@@ -167,18 +169,18 @@ state
 
 | Module | Role |
 |---|---|
-| `StatifierPersistence.Storage` | The identity-guarded facade: charts, positions, run records. Every load is guarded; there is no unguarded path |
+| `StatifierPersistence.Storage` | The identity-guarded facade: charts, positions, execution records. Every load is guarded; there is no unguarded path |
 | `StatifierPersistence.Storage.Adapter` | The behaviour a backing store implements. `Storage.InMemory` is the reference one, `Storage.Ecto` the Postgres one (on [another backend](docs/non-postgres-backends.md), minus the lock and the listings) |
-| `StatifierPersistence.Runs` | The lifecycle: `create/4`, `step/5`, `fail/4`, in ADR-0004's fixed order |
-| `StatifierPersistence.Driver` | Run-to-quiescence over `Runs`: performs the chart's `<invoke>` calls and steps each answer back in |
+| `StatifierPersistence.Executions` | The lifecycle: `create/4`, `step/5`, `fail/4`, in ADR-0004's fixed order |
+| `StatifierPersistence.Driver` | Drive-to-quiescence over `Executions`: performs the chart's `<invoke>` calls and steps each answer back in |
 | `StatifierPersistence.Executor` | The seam every effect crosses on its way to your host |
-| `StatifierPersistence.Serialization` | The per-run ordering strategy the fetch-to-persist tail runs inside; defaults to the adapter's own `lock_run/3` |
+| `StatifierPersistence.Serialization` | The per-execution ordering strategy the fetch-to-persist tail runs inside; defaults to the adapter's own `lock_execution/3` |
 | `StatifierPersistence.Testing.StorageConformance` | The conformance suite - point it at your own adapter to hold it to the same bar |
 
 Two things the loop deliberately does not do. Effect delivery is
 at-least-once: a crash between step and persist re-drives the same event
 and re-emits the same effects with identical deterministic keys, and the
-loop never dedupes - idempotency on that key is yours. And a resumed run
+loop never dedupes - idempotency on that key is yours. And a resumed execution
 restores position, not liveness: pending timers and in-flight
 invocations are re-established by the host, from its own durable rows.
 [Surviving a restart](docs/restart-demo.md) walks a demo embedder
@@ -186,7 +188,8 @@ through both.
 
 ## Driving a chart that calls out
 
-`Runs` steps a run once. A chart that invokes a service is not finished
+`Executions` steps an execution once. A chart that invokes a service is not
+finished
 when that step returns - it is waiting for an answer it cannot fetch
 for itself, and every host that has embedded this package has written
 the same loop on top. `StatifierPersistence.Driver` is that loop:
@@ -197,11 +200,13 @@ driver =
     dispatch: fn type, params, _context -> MyApp.perform(type, params) end,
     effects: fn effect, _context -> MyApp.Timers.consume(effect) end,
     invoke_types: Statifier.Invoke.Types.new(types: ["myapp:authorize"]),
-    serialization: {MyApp.RunLock, MyApp.RunLock}
+    serialization: {MyApp.ExecutionLock, MyApp.ExecutionLock}
   )
 
-{:ok, run, state} = StatifierPersistence.Driver.create(driver, run_id)
-{:ok, run, state} = StatifierPersistence.Driver.send_event(driver, run_id, Statifier.Event.external("go"))
+{:ok, execution, state} = StatifierPersistence.Driver.create(driver, execution_id)
+
+{:ok, execution, state} =
+  StatifierPersistence.Driver.send_event(driver, execution_id, Statifier.Event.external("go"))
 ```
 
 One call is one durable step, every effect through your `effects:`
@@ -231,7 +236,7 @@ creates cannot hold the parent's exclusion, so the children are started
 afterwards - one call per child, from whatever job picks it up:
 
 ```elixir
-StatifierPersistence.Driver.start_child_at(driver, parent_run_id, effect, index, count,
+StatifierPersistence.Driver.start_child_at(driver, parent_execution_id, effect, index, count,
   policy: :all
 )
 ```
@@ -239,12 +244,12 @@ StatifierPersistence.Driver.start_child_at(driver, parent_run_id, effect, index,
 `effect` is the resolved `Statifier.Effect.Invoke` (or the whole
 `{:start_child, resolved, {:invoke, invoke}}` instruction), `index` is the
 child's 0-based position, and `count` is N. The call is idempotent on the
-child's derived run id, so a re-delivered start adopts the child it
+child's derived execution id, so a re-delivered start adopts the child it
 already created instead of making a second one. Scheduling those calls is
 a job runner's business, not this package's.
 
-Each child then runs as an ordinary run. When one reaches a terminal
-status its answer is stored on its own run record, and a settlement
+Each child then runs as an ordinary execution. When one reaches a terminal
+status its answer is stored on its own execution record, and a settlement
 section under the **parent's** exclusion asks - through an indexed status
 projection, never a listing of whole records - whether all N have. Only
 the settlement that finds them all terminal assembles the dense,
@@ -261,31 +266,37 @@ index-ordered list and answers the parent's ordinary door, once:
 `policy: :first_error` cancels the rest as soon as one child fails: the
 started siblings through the cascading cancel, and the ones whose start
 job has not run yet through the `child_canceller:` seam, which is handed
-the parent run id, the invocation id, and the indices with no run. Both
+the parent execution id, the invocation id, and the indices with no
+execution. Both
 kinds read `"cancelled"` at their index in the same list.
 
 A child fails on its own word, with no host in the loop, by settling in a
 **failure-classed final** - a top-level `<final>` whose `<donedata>`
-carries the reserved key `statifier_persistence:run_status` set to
+carries the reserved key `statifier_persistence:execution_status` set to
 `"failed"`:
 
 ```xml
 <final id="declined">
   <donedata>
-    <param name="statifier_persistence:run_status" expr="'failed'"/>
+    <param name="statifier_persistence:execution_status" expr="'failed'"/>
     <param name="reason" expr="decline_reason"/>
   </donedata>
 </final>
 ```
 
-That step is an ordinary successful one; the run record takes `:failed`
+That step is an ordinary successful one; the execution record takes `:failed`
 with the `failure` string `"failed_final"`, and the whole `<donedata>` -
 tag included, alongside whatever else the final carries - reaches the
 parent's list verbatim. Macrostep-budget exhaustion is the other route to
 `:failed`, and the `failure` string is what tells the two apart. An
 unhandled `error.*` event is not a route: a chart that cannot continue
 stays `:active` until its author routes the error to a final.
-See `StatifierPersistence.Runs` for the full rule.
+See `StatifierPersistence.Executions` for the full rule.
+
+Before 0.12.0 that key was spelled `statifier_persistence:run_status`. Both
+spellings are read for one release: in 0.12.0 the new key wins where both are
+present and the old one logs a deprecation line, and 0.13.0 reads only
+`statifier_persistence:execution_status` (ADR-0011 decision 4).
 
 An adapter that cannot store a child's answer, or cannot answer the
 status projection, is refused at open - a child whose invocation could
@@ -296,7 +307,7 @@ V03 migration.
 
 Early, under active development, and the API is not frozen before 1.0.
 The storage-adapter behaviour with its identity guard, the in-memory
-reference adapter, the run lifecycle and executor seam, per-run
+reference adapter, the execution lifecycle and executor seam, per-execution
 serialization, and the Ecto layer (configurable keys/tables, versioned
 migrations, and the Postgres adapter below) all exist and are
 conformance-tested.
@@ -320,7 +331,7 @@ database. If you already ran that migration when this package shipped
 only V01, pick the later versions up with a second ordinary migration
 rather than re-running the first:
 
-    defmodule MyApp.Repo.Migrations.AddStatifierPersistenceRunMetadata do
+    defmodule MyApp.Repo.Migrations.AddStatifierPersistenceExecutionMetadata do
       use Ecto.Migration
       def up, do: StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, from: 2)
       def down, do: StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence, version: 2)
@@ -344,7 +355,8 @@ then build the guarded store the rest of the package works through:
 The adapter passes the same conformance suite the in-memory reference
 does (`StatifierPersistence.Testing.StorageConformance` - point it at
 your own adapter to hold it to the identical bar), stores engine
-identities verbatim, and implements the optional per-run `lock_run/3`
+identities verbatim, and implements the optional per-execution
+`lock_execution/3`
 as a transaction-scoped advisory-plus-row lock (ADR-0004 as amended).
 In your test suite, pass `sandbox: true` so each test runs in its own
 `Ecto.Adapters.SQL.Sandbox` checkout via the adapter's `isolate/1`.
@@ -353,9 +365,9 @@ In your test suite, pass `sandbox: true` so each test runs in its own
 
 The adapter is written against Postgres and this package's gate runs
 against a real Postgres server, but only three of its callbacks are
-actually Postgres SQL: `lock_run/3` (advisory lock plus `FOR UPDATE`) and
-the two metadata listings (`jsonb` containment). Everything else - charts,
-positions, run records, the identity guard, the executor seam, resume,
+actually Postgres SQL: `lock_execution/3` (advisory lock plus `FOR UPDATE`)
+and the two metadata listings (`jsonb` containment). Everything else - charts,
+positions, execution records, the identity guard, the executor seam, resume,
 and the versioned migrations, V03's Postgres-only index included - runs
 on any Ecto backend. So does the input log of V05: a table, four columns
 and a unique index, with no `jsonb` predicate, no advisory lock and no
@@ -365,10 +377,10 @@ backends.
 A host on SQLite or another backend therefore **declines the lock
 callback** rather than getting a portable imitation of it: pass your own
 `serialization: {module, config}` strategy, backed by an exclusion the
-host already owns (a job queue keyed per run id, a single consumer) or by
-a pass-through when the deployment is single-writer by construction. What
+host already owns (a job queue keyed per execution id, a single consumer) or
+by a pass-through when the deployment is single-writer by construction. What
 you must not do is leave the default in place, which reaches the
-Postgres-only `lock_run/3` and raises mid-run.
+Postgres-only `lock_execution/3` and raises mid-execution.
 
 The four conformance cases those three callbacks generate carry
 `@tag :postgres`, so such a host runs the shipped suite green and honest:
@@ -377,18 +389,33 @@ The four conformance cases those three callbacks generate carry
 
 [Running on a backend that is not Postgres](docs/non-postgres-backends.md)
 is the full guide: what is Postgres-only and why, how to write the
-strategy, what declining costs (durable subcharts and the run listings
+strategy, what declining costs (durable subcharts and the execution listings
 refuse rather than break), and how to verify your own setup.
 
 ### Upgrading to V03 before deploying 0.7.0
 
 0.7.0 needs V03 of the package DDL, and the order matters: **run the
 migration first, then deploy the new code.** `outcome_blob` is an
-unconditional field on the generated runs schema, so 0.7.0 against a V02
-database fails on every query that touches the runs table, not only on
-the fan-out write that introduced the column. The reverse order is safe:
+unconditional field on the generated execution schema, so 0.7.0 against a
+V02 database fails on every query that touches the executions table, not
+only on the fan-out write that introduced the column. The reverse order is
+safe:
 V03 on a database still served by 0.6.x adds a column nobody writes and
 an index nobody's query needs yet.
+
+From 0.12.0 an install that still owes V02, V03 or V04 - one capped below
+version 4 - runs **V06 first, on its own**, and the versions it skipped
+afterwards:
+
+    def up do
+      StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, from: 6, version: 6)
+      StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, from: 2, version: 5)
+    end
+
+V02, V03 and V04 alter the executions table, which on a database built
+before 0.12.0 carries that name only once V06 has renamed it (ADR-0011
+decision 3). An install already at V05 needs none of this: `from: 6` is the
+whole upgrade.
 
 A host already on V02 picks V03 up with an ordinary migration of its own:
 
@@ -419,9 +446,9 @@ unaffected either way.
 
 V03 does two things, and only one of them is cheap.
 
-**The `outcome_blob` column** is a nullable `:binary` added to the runs
-table. Postgres adds a nullable column with no default as a catalog-only
-change, so this part is fast whatever the table's size. It takes the
+**The `outcome_blob` column** is a nullable `:binary` added to the
+executions table. Postgres adds a nullable column with no default as a
+catalog-only change, so this part is fast whatever the table's size. It takes the
 configured `:blob_type` with the other three blob columns, so a
 `:blob_type` whose underlying database type is not binary needs the same
 hand-written `ALTER` this README's encryption section already describes
@@ -429,24 +456,24 @@ for those three - now for four columns, not three.
 
 **The `metadata` GIN index** is the part to plan for. V03's `up/1`
 issues a plain `CREATE INDEX`, **not** `CREATE INDEX CONCURRENTLY`: it
-takes a `SHARE` lock on the runs table for the whole build, which blocks
-every `INSERT`, `UPDATE` and `DELETE` against that table until the index
-is finished. Reads are unaffected. On a small or idle runs table this is
-imperceptible. On a large one it is an outage of every write the runs
-table takes - which, for a host stepping runs durably, means every step
-of every run.
+takes a `SHARE` lock on the executions table for the whole build, which
+blocks every `INSERT`, `UPDATE` and `DELETE` against that table until the
+index is finished. Reads are unaffected. On a small or idle executions table
+this is imperceptible. On a large one it is an outage of every write that
+table takes - which, for a host stepping executions durably, means every
+step of every execution.
 
 How long that is depends on the row count, the width of the `metadata`
 maps, and the server, so measure rather than guess. (`sp-461` is a
 separate measurement issue and not a number for this build: it measures
 the settlement read cost against a GIN-indexed `metadata` column at
 increasing fan-out widths.)
-The concurrent build is what a host with a large runs table wants, and
+The concurrent build is what a host with a large executions table wants, and
 0.8.0 ships it as V04 - see below.
 
 The index is not optional in effect: without it, every fan-out child
 completion asks whether its N siblings are terminal with a `jsonb`
-containment query, and each one is a sequential scan of the whole runs
+containment query, and each one is a sequential scan of the whole executions
 table.
 
 **On an Ecto adapter that is not Postgres, the index is skipped.** `GIN`
@@ -460,20 +487,21 @@ went with it. Fixed in 0.7.1.)
 
 What is skipped with the index is what the index served. Both metadata
 queries this package issues -
-`StatifierPersistence.Storage.Ecto.list_runs_by_metadata/2` and the
-status projection `list_run_states_by_metadata/2` - are `jsonb`
+`StatifierPersistence.Storage.Ecto.list_executions_by_metadata/2` and the
+status projection `list_execution_states_by_metadata/2` - are `jsonb`
 containment SQL, which a non-Postgres backend does not parse. So on such
 an adapter the Ecto adapter declares no metadata support: a `metadata:`
 map at create is refused with `{:error, :metadata_unsupported}`, the two
 listings refuse with `{:error, :child_listing_unsupported}` and
-`{:error, :run_states_unsupported}` - and the two raw adapter callbacks
+`{:error, :execution_states_unsupported}` - and the two raw adapter callbacks
 behind them answer `{:error, :metadata_unsupported}` rather than issuing
 SQL the backend cannot parse, for a host that reaches them directly - and
 a durable subchart or a fan-out
 over that store is **refused at open** rather than started and left with
-children nothing can settle. Storing, loading, stepping and resuming runs
-are unaffected. Per-run locking is a separate Postgres-only surface -
-`lock_run/3` is `pg_advisory_xact_lock` plus `SELECT ... FOR UPDATE` -
+children nothing can settle. Storing, loading, stepping and resuming
+executions are unaffected. Per-execution locking is a separate Postgres-only
+surface - `lock_execution/3` is `pg_advisory_xact_lock` plus
+`SELECT ... FOR UPDATE` -
 and is tracked in `sp-5lm`.
 
 ### Building the metadata index concurrently: V04
@@ -505,8 +533,8 @@ index in place and does nothing else. That is deliberate rather than a
 failure mode: the index it would have built is the one already there,
 under the same name, and raising would break the one-call recipe every
 fresh database and test harness uses, where a plain build on an empty
-runs table costs nothing. It logs a warning when the runs table already
-holds rows, which is the case where the plain build did block writes and
+executions table costs nothing. It logs a warning when the executions table
+already holds rows, which is the case where the plain build did block writes and
 the two attributes are what you were missing.
 
 `down/1` for V04 does nothing at all: what it leaves behind is V03's
@@ -515,16 +543,17 @@ has no rollback, so if the rebuild is interrupted, re-run the migration -
 the drop is `drop_if_exists`, so it clears a missing or an invalid
 leftover either way.
 
-**A host with a large runs table that has not yet reached V03** is the
+**A host with a large executions table that has not yet reached V03** is the
 one case V04 does not solve by itself, because V03 still builds the index
 plainly on the way past. Such a host adds the `outcome_blob` column by
-hand, skipping V03's helper call entirely:
+hand, skipping V03's helper call entirely - after V06 has given the table
+its current name:
 
     defmodule MyApp.Repo.Migrations.AddStatifierPersistenceOutcomeBlob do
       use Ecto.Migration
 
       def up do
-        alter table("runs") do
+        alter table("executions") do
           add(:outcome_blob, :binary, null: true)
         end
       end
@@ -541,20 +570,20 @@ run fails on the index that is already there.
 directions, under the same adapter check V03 uses: there is no index to
 rebuild, because V03 created none. Such a host needs neither attribute.
 
-### Listing runs by host scope
+### Listing executions by host scope
 
-A run record carries engine identities and opaque blobs. Nothing on it
-answers the question a multi-tenant host asks first - "list the runs for
-scope X" - so ADR-0006 adds one optional, opaque `metadata` map to a run,
-stored beside it and handed back unchanged.
+An execution record carries engine identities and opaque blobs. Nothing on
+it answers the question a multi-tenant host asks first - "list the
+executions for scope X" - so ADR-0006 adds one optional, opaque `metadata`
+map to an execution, stored beside it and handed back unchanged.
 
 Take a card-processing host running a `myapp:authorize` / `myapp:capture`
-chart, one run per payment attempt, and a support screen that lists every
-run for one processor account. Tag the run at create with the account ids
-the host already keys its own tables by:
+chart, one execution per payment attempt, and a support screen that lists
+every execution for one processor account. Tag the execution at create with
+the account ids the host already keys its own tables by:
 
-    {:ok, run, _machine_state} =
-      StatifierPersistence.Runs.create(store, payment_id, machine,
+    {:ok, execution, _machine_state} =
+      StatifierPersistence.Executions.create(store, payment_id, machine,
         executor: MyApp.Executor,
         metadata: %{
           "tenant_id" => "acct_01H8X",
@@ -564,8 +593,8 @@ the host already keys its own tables by:
 
 and read them back with an equality match on every pair:
 
-    {:ok, runs} =
-      StatifierPersistence.Storage.Ecto.list_runs_by_metadata(store.opts, %{
+    {:ok, executions} =
+      StatifierPersistence.Storage.Ecto.list_executions_by_metadata(store.opts, %{
         "processor_account_id" => "pacct_4471"
       })
 
@@ -603,7 +632,7 @@ storing something that is not what you handed it. The map is write-once:
 it is set at create and a later step or abandonment carries it forward
 untouched.
 
-A run is the only thing this package scopes for you, and only through that
+An execution is the only thing this package scopes for you, and only through that
 map. A chart is not: `StatifierPersistence.Storage.save_chart/3` keys a
 chart on its content hash alone, so two tenants storing byte-identical
 charts share one chart row. Tenant-qualify your own per-chart rows in your
@@ -611,20 +640,20 @@ own tables - folding a namespace into the hash would change what a chart's
 identity is, which is statifier-ex's contract and not an option this
 package offers.
 
-### Recording a run's inputs, so it can be replayed
+### Recording an execution's inputs, so it can be replayed
 
-A durably stepped run stores a chart, a position and a run record, and
-none of them is an input. The position is the run's *current*
-configuration, overwritten on every step, so by construction the history
-an offline replay needs is destroyed by the mechanism that makes the run
-durable.
+A durably stepped execution stores a chart, a position and an execution
+record, and none of them is an input. The position is the execution's
+*current* configuration, overwritten on every step, so by construction the
+history an offline replay needs is destroyed by the mechanism that makes the
+execution durable.
 
-ADR-0010 adds an optional per-run input log to close that gap. It is
+ADR-0010 adds an optional per-execution input log to close that gap. It is
 opt-in by export, exactly as the `metadata` map is: an adapter that
 exports `supports_input_log?/1` and answers `true` keeps one, and an
 adapter that does not stores no inputs and behaves exactly as it did
-before. **Nothing refuses a run over it** - a diagnostic facility must
-not break the run it is diagnosing - so ask before you rely on it:
+before. **Nothing refuses an execution over it** - a diagnostic facility must
+not break the execution it is diagnosing - so ask before you rely on it:
 
     StatifierPersistence.Storage.input_log_supported?(store)
 
@@ -633,18 +662,18 @@ entry is the `%Statifier.Event{}` the interpreter was handed, verbatim,
 stamped with the public door it entered by and a dense zero-based
 ordinal:
 
-    {:ok, entries} = StatifierPersistence.Runs.inputs(store, "run_1")
+    {:ok, entries} = StatifierPersistence.Executions.inputs(store, "exec_1")
 
     Enum.map(entries, &{&1.seq, &1.door, &1.event.name})
     #=> [{0, "step", "advance"}, {1, "answer_parent", "done.invoke.call"}]
 
-One log belongs to one run. A durable subchart's child is an ordinary
-run, so it has its own log; the parent's holds the answer it saw at the
-`answer_parent` door, and not the child's inputs. Only inputs an
-interpreter actually saw are recorded - a delivery to a terminal run, or
-to an invocation the chart has since cancelled, is discarded and appends
-nothing, because a replay that applied it would produce a different run
-than the one that happened.
+One log belongs to one execution. A durable subchart's child is an ordinary
+execution, so it has its own log; the parent's holds the answer it saw at
+the `answer_parent` door, and not the child's inputs. Only inputs an
+interpreter actually saw are recorded - a delivery to a terminal execution,
+or to an invocation the chart has since cancelled, is discarded and appends
+nothing, because a replay that applied it would produce a different
+execution than the one that happened.
 
 **Turning the log on is a data-retention decision, not a debugging
 switch.** Chart, position and identity blobs are engine-shaped; an
@@ -652,7 +681,7 @@ event's `data` is your own values, and this is the first thing this
 package stores that can hold personal or cardholder data. So `input_blob`
 is a blob in the `:blob_type` sense below, and it is *not* the `metadata`
 map, which stays in the clear by design. Bound how much accumulates with
-a per-run cap declared where every other adapter setting is:
+a per-execution cap declared where every other adapter setting is:
 
     {:ok, store} =
       StatifierPersistence.Storage.new(
@@ -664,10 +693,10 @@ a per-run cap declared where every other adapter setting is:
 The default is `:infinity`; a bounded default would be this package
 silently truncating your log. Past the cap the log **closes itself**: the
 last slot is written as a marker entry whose `event` is `nil`, every
-later append is refused, and the step itself succeeds and the run carries
-on. The marker is the point - a truncated log that looked complete would
-satisfy every check a replay makes while replaying a run that never
-happened.
+later append is refused, and the step itself succeeds and the execution
+carries on. The marker is the point - a truncated log that looked complete
+would satisfy every check a replay makes while replaying an execution that
+never happened.
 
 The replay itself is `statifier_ui`'s
 (`StatifierUI.Trace.Replay.from_events/4`); ADR-0010 decision 8 names the
@@ -692,7 +721,7 @@ no wrapping adapter:
 `:blob_type` accepts a bare module implementing `Ecto.Type`, or a
 `{module, opts}` tuple for an `Ecto.ParameterizedType`. It reaches only
 those payload columns: keys and lookup columns (`content_hash`,
-`session_id`, `run_id`, `status`, `failure`, and the input log's `seq`
+`session_id`, `execution_id`, `status`, `failure`, and the input log's `seq`
 and `door`) always stay plain, because the identity guard, the unique
 indexes and the log's ordering depend on reading them back verbatim.
 
@@ -748,8 +777,8 @@ elsewhere.
 
 `docs/restart-demo.md` walks through the demo embedder that drives this
 package's whole surface across a simulated restart with no Session
-process: persist mid-run with a pending durable timer and an in-flight
-async invocation, drop everything volatile, cold-boot from the run id
+process: persist mid-execution with a pending durable timer and an in-flight
+async invocation, drop everything volatile, cold-boot from the execution id
 alone, and finish with zero duplicate side effects and a replay that
 reproduces the path. The executable version lives in
 `test/statifier_persistence/demo/restart_demo_test.exs` (and its
@@ -780,12 +809,13 @@ In scope:
 - A storage-adapter behaviour: save/load of MachineState snapshots (or
   Recordings), guarded by the Machine identity so a position can never be
   loaded against the wrong chart revision.
-- Run lifecycle as a library: create/step/complete/fail, with a serialization
-  guarantee per run so concurrent event deliveries to one run are ordered.
+- Execution lifecycle as a library: create/step/complete/fail, with a
+  serialization guarantee per execution so concurrent event deliveries to one
+  execution are ordered.
 - The load -> handle_event -> execute effects -> persist loop, with effect
   execution delegated to the host.
 - An Ecto adapter shipping schemas and migrations for chart definitions,
-  versions, and runs; the host supplies the Repo and any tenancy columns.
+  versions, and executions; the host supplies the Repo and any tenancy columns.
 
 Out of scope: domain actions, authoring UI, and job scheduling -
 [statifier_oban](https://github.com/riddler/statifier_oban) owns timers and
