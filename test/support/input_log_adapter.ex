@@ -11,7 +11,7 @@ defmodule StatifierPersistence.Test.InputLogAdapter do
   adapter that exports none of the three callbacks to prove the "an
   adapter without them skips the cases" half of the contract - `InMemory`
   is that adapter. This one is its opposite number, so the input-log cases
-  execution without a database beside the Ecto adapter that runs them with one.
+  run without a database beside the Ecto adapter that runs them with one.
 
   The cap comes from `init/1`'s `input_log_cap:` option, exactly as it
   does on `StatifierPersistence.Storage.Ecto` (ADR-0010 decision 6):

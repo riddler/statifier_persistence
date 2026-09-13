@@ -2,7 +2,7 @@ defmodule StatifierPersistence.Demo.Scenario do
   @moduledoc """
   The demo chart and the scenario body that drives it
   (`docs/plans/260822-sp-4an.4-restart-demo-host.md`), parameterized on a
-  `{adapter, opts}` storage pair so the same body executions unchanged against
+  `{adapter, opts}` storage pair so the same body runs unchanged against
   `StatifierPersistence.Storage.InMemory` (Phase 1-3) and
   `StatifierPersistence.Storage.Ecto` (Phase 4).
 
@@ -92,7 +92,7 @@ defmodule StatifierPersistence.Demo.Scenario do
   three non-terminal steps, in order.
 
   `{adapter, opts}` is handed straight to `Storage.new/2`, unchanged - this
-  function names no storage module itself, which is what lets Phase 4 execution
+  function names no storage module itself, which is what lets Phase 4 run
   it again against `Storage.Ecto` with no edit here.
   """
   @spec straight_through({module(), keyword()}) :: %{

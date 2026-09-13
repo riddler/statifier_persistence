@@ -93,7 +93,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
 
       mix test --exclude postgres
 
-  Nothing else in the suite is tagged: every remaining case executions, and a
+  Nothing else in the suite is tagged: every remaining case runs, and a
   green execution with four excluded is the honest report of what that backend
   supports. It is honest only alongside actually declining what the tag
   excludes - `serialization:` pointed at the host's own strategy rather
