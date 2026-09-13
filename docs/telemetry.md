@@ -235,7 +235,7 @@ process.
 | Event | Emitted from | Measurements | Metadata |
 |---|---|---|---|
 | `[:statifier_persistence, :adapter, :call]` | every `Storage` facade function, around the adapter call | `duration`, `system_time` | `adapter`, `callback`, `outcome`, `reason`, `execution_id`, `session_id`, `content_hash` |
-| `[:statifier_persistence, :identity, :refused]` | `Storage.precheck_identity/2`, every writer's identity arm, and `persist_tail/7` | `system_time` | `execution_id`, `session_id`, `stage`, `reason`, `stored_content_hash`, `supplied_content_hash` |
+| `[:statifier_persistence, :identity, :refused]` | `Storage`'s own `precheck_identity/4`, every writer's identity arm, and `persist_tail/7` | `system_time` | `execution_id`, `session_id`, `stage`, `reason`, `stored_content_hash`, `supplied_content_hash` |
 
 `callback` is the `Storage.Adapter` callback name - `:init`, `:save_chart`,
 `:fetch_chart`, `:save_position`, `:fetch_position`, `:insert_execution`,
