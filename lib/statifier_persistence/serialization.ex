@@ -16,7 +16,7 @@ defmodule StatifierPersistence.Serialization do
   """
 
   @doc """
-  Executions `fun` under this strategy's per-execution exclusion for `execution_id`,
+  Runs `fun` under this strategy's per-execution exclusion for `execution_id`,
   returning `{:ok, fun.()}` or the strategy's own refusal.
 
   The guarantee a strategy must provide: for one `execution_id`, two `with_execution/3`

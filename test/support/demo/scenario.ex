@@ -225,7 +225,7 @@ defmodule StatifierPersistence.Demo.Scenario do
         tape: Host.tape(host_at_kill)
     }
 
-    # Captured before `recover/1` executions, on the same fresh runtime pid
+    # Captured before `recover/1` runs, on the same fresh runtime pid
     # `host_after_recover` below goes on to arm - proving `boot/4` alone
     # restores nothing volatile.
     armed_after_boot = Runtime.armed(host_after_boot.runtime)

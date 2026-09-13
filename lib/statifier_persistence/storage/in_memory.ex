@@ -293,7 +293,7 @@ defmodule StatifierPersistence.Storage.InMemory do
   end
 
   @doc """
-  Executions `fun` under this adapter's per-execution mutual exclusion for `execution_id`
+  Runs `fun` under this adapter's per-execution mutual exclusion for `execution_id`
   (the optional `c:StatifierPersistence.Storage.Adapter.lock_execution/3`).
 
   Acquisition is an insert-if-absent on the Agent's lock table, one atomic

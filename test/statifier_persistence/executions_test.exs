@@ -1137,7 +1137,7 @@ defmodule StatifierPersistence.ExecutionsTest do
   end
 
   describe "per-execution serialization (ADR-0004 decision 5)" do
-    # sabotage: InMemory.lock_execution/3 executions fun without the exclusion
+    # sabotage: InMemory.lock_execution/3 runs fun without the exclusion
     # ({:ok, fun.()} with no acquire) -> red (both steps load s0 and the
     # persisted state is a one-event s1/s2, which no serial order produces)
     test "two concurrent steps on one execution serialize to some order of the two events",

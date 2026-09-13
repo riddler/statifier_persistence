@@ -548,7 +548,7 @@ if Code.ensure_loaded?(Ecto) do
     end
 
     @doc """
-    Executions `fun` under per-execution mutual exclusion for `execution_id` (the optional
+    Runs `fun` under per-execution mutual exclusion for `execution_id` (the optional
     `c:StatifierPersistence.Storage.Adapter.lock_execution/3`, ADR-0004
     decision 5 as amended 2026-08-22).
 

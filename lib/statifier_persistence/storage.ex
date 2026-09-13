@@ -211,7 +211,7 @@ defmodule StatifierPersistence.Storage do
   `Statifier.MachineState.t()` walking `machine`, refusing a chart-revision
   mismatch instead of silently resuming the wrong configuration.
 
-  Executions in this order, and the order is the contract:
+  Runs in this order, and the order is the contract:
 
   1. `fetch_position/2` on the adapter. `:position_not_found` and
      `{:adapter, term()}` pass straight through.
@@ -692,7 +692,7 @@ defmodule StatifierPersistence.Storage do
   `Statifier.MachineState.t()` walking `machine`, refusing a chart-revision
   mismatch instead of silently resuming the wrong configuration.
 
-  Executions in `load_position/3`'s order, with one extra arm: the same cheap
+  Runs in `load_position/3`'s order, with one extra arm: the same cheap
   identity pre-check against the stored `identity_blob`, then
   `{:error, :execution_position_missing}` for an execution whose `position_blob` is
   `nil` (an execution that failed at creation stores none - ADR-0004 decision 1),

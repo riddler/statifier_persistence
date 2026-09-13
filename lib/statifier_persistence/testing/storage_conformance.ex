@@ -807,7 +807,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
 
       if Code.ensure_loaded?(conformance_adapter) and
            function_exported?(conformance_adapter, :lock_execution, 3) do
-        # sabotage: in the adapter under test's lock_execution/3, execution fun without
+        # sabotage: in the adapter under test's lock_execution/3, run fun without
         # the exclusion ({:ok, fun.()} with no acquire) -> red, the two
         # sleeping bodies below interleave and the enter/enter prefix
         # breaks the paired pattern. Verified red (together with

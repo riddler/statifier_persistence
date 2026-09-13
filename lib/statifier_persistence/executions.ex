@@ -777,7 +777,7 @@ defmodule StatifierPersistence.Executions do
     end
   end
 
-  # Executions `fun` - one entry point's whole fetch-to-persist tail - inside the
+  # Runs `fun` - one entry point's whole fetch-to-persist tail - inside the
   # selected serialization strategy's `with_execution/3` (ADR-0004 decision 5),
   # unwrapping the strategy's `{:ok, result}` envelope back to the tail's
   # own result. A strategy refusal (`{:error, {:serialization, _}}` from
