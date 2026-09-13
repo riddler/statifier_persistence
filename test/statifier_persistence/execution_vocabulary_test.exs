@@ -17,10 +17,7 @@ defmodule StatifierPersistence.ExecutionVocabularyTest do
   # does, these files still spell the retired noun at the SQL layer only.
   # sp-j2y deletes this list.
   @deferred_to_sp_j2y [
-                        "lib/statifier_persistence/ecto.ex",
                         "lib/statifier_persistence/ecto/config.ex",
-                        "lib/statifier_persistence/ecto/key_generator.ex",
-                        "lib/statifier_persistence/ecto/key_generator/uxid.ex",
                         "lib/statifier_persistence/ecto/migrations.ex"
                       ] ++ Path.wildcard("lib/statifier_persistence/ecto/migrations/*.ex")
 
@@ -35,7 +32,17 @@ defmodule StatifierPersistence.ExecutionVocabularyTest do
     {"lib/statifier_persistence/storage/ecto.ex", "Config.table(config, :runs)"},
     {"lib/statifier_persistence/storage/ecto.ex", "_run_id_index"},
     {"lib/statifier_persistence/storage/ecto.ex", "_run_id_seq_index"},
-    {"lib/statifier_persistence/storage/ecto.ex", "V06 (sp-j2y)"}
+    {"lib/statifier_persistence/storage/ecto.ex", "V06 (sp-j2y)"},
+    # sp-j2y at line level in the three files that carry only a handful of
+    # decision-3 lines, so that decision 2's own surfaces in them - the
+    # generated `Execution` module name and its `execution_id` field - stay
+    # pinned by the arms above.
+    {"lib/statifier_persistence/ecto.ex", "`statifier_runs`"},
+    {"lib/statifier_persistence/ecto.ex", "{Execution, :runs}"},
+    {"lib/statifier_persistence/ecto.ex", "runs: ["},
+    {"lib/statifier_persistence/ecto.ex", "source: :run_id"},
+    {"lib/statifier_persistence/ecto/key_generator.ex", "@type table ::"},
+    {"lib/statifier_persistence/ecto/key_generator/uxid.ex", "@prefixes %{"}
   ]
 
   # ADR-0011 decision 1 keeps `run` as an ordinary English verb, and names the
@@ -73,14 +80,17 @@ defmodule StatifierPersistence.ExecutionVocabularyTest do
     end
 
     # sabotage: changed one `refuse_unidentified/2` call in storage.ex back
-    # to the `:run` stage -> red, naming that line. Verified red, reverted.
+    # to the `:run` stage -> red, naming that line. A second mutation, added
+    # when the pass-1 review found the first alternation too narrow: one
+    # member of `Adapter.error/0` back to `:run_not_found` -> red, naming
+    # `adapter.ex:203`. Both verified red, reverted from a copy.
     test "no atom literal in lib/ spells it" do
       offenders =
         for path <- @lib_files,
             path not in @deferred_to_sp_j2y,
             {line, number} <- lines(path),
             not survivor_line?(path, line),
-            Regex.match?(~r/:(?:run|runs|[a-z0-9_]+_runs?)(?![a-z0-9_])/, line),
+            Regex.match?(~r/:(?:runs?|run_[a-z0-9_]+|[a-z0-9_]+_runs?)(?![a-z0-9_])/, line),
             do: "#{path}:#{number}: #{String.trim(line)}"
 
       assert offenders == []
@@ -105,14 +115,18 @@ defmodule StatifierPersistence.ExecutionVocabularyTest do
     # atom in a union, and a doc that still tells a host the old name.
     #
     # sabotage: renamed Executor.context/0's :execution_id key back to
-    # :run_id -> red, naming executor.ex. Verified red, reverted.
+    # :run_id -> red, naming executor.ex. A second mutation, added when the
+    # pass-1 review found the leading word boundary could not match inside a
+    # longer key: one `parent_execution_id` in telemetry.ex back to
+    # `parent_run_id` -> red, naming that line. Both verified red, reverted
+    # from a copy.
     test "no `run_id` or `run_status` spelling survives in lib/" do
       offenders =
         for path <- @lib_files,
             path not in @deferred_to_sp_j2y,
             {line, number} <- lines(path),
             not survivor_line?(path, line),
-            Regex.match?(~r/\brun_(?:id|status)\b/, line),
+            Regex.match?(~r/run_(?:id|status)(?![a-z0-9_])/, line),
             do: "#{path}:#{number}: #{String.trim(line)}"
 
       assert offenders == []

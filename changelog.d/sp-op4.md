@@ -114,7 +114,11 @@
   package parses a prefix and no host should; one that does must accept both.
 
 - The reserved `<donedata>` key a chart writes to fail itself is now
-  `statifier_persistence:execution_status`. The old key,
+  `statifier_persistence:execution_status`.
+
+### Deprecated
+
+- The pre-0.12.0 `<donedata>` key,
   `statifier_persistence:run_status`, is still **read** in this release and is
   **dropped in 0.13.0**: where both are present the new key wins, and reading
   the old one logs one deprecation line at `:debug` naming the new key. Update
