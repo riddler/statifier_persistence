@@ -1079,3 +1079,22 @@ new one (ADR-0011 decision 4; `@execution_status_key`
 `@legacy_execution_status_key` `:1694`, read at `71537dc`). The failure-classed
 final this record's amendment decides is otherwise unchanged: same mechanism,
 same closed value set, only the key name moves.
+
+## Note (2026-09-13, sp-bij): the 2026-09-12 Note's closing gloss, said without the word "process"
+
+Pure addition, one sentence on the 2026-09-12 Note's item 2; that item's
+own words are left as written.
+
+Item 2 closes "the guarantee is per-execution, not per-process"
+(read at `8211e03`). The second half of that contrast is not the record's.
+Clause 3 of the `after_step:` amendment, the paragraph beneath it, and the
+sp-nhl Note all draw the contrast between the exclusion of the execution
+the callback reports and *any* execution lock held anywhere - "a host must
+not read clause 3 as a promise that no run lock is held anywhere when its
+callback runs", the sentence item 2 itself quotes. Processes appear in
+none of them.
+
+Read the closing gloss, then, as: the guarantee is per-execution - **not a
+promise about every lock**. The sentence item 2 ends on is the accurate
+form and is unchanged: a callback handed execution E never runs inside E's
+own exclusion, and may run inside E's parent's.

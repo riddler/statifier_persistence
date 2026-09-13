@@ -132,3 +132,33 @@ session driving it when one exists, and both vocabularies stay honest.
   express, or the engine's identity contracts moving upstream
   (st-ADR-0052 amendments re-open decision 1's storage columns, not its
   rule).
+
+## Note (2026-09-13, sp-bij): decision 5's vocabulary clause falls to ADR-0011; its "session" meaning and the nullable `session_id` stand
+
+Pure addition: nothing above is edited, and this record is read at the
+date its sections were decided.
+
+**Decision 5's vocabulary clause is superseded.** Decision 5 says "**The
+vocabulary is *runs*, not sessions**" (`:110`, read at `8211e03`).
+ADR-0011 decides that `execution` is the durable noun and carries the
+rename through the modules, the types, the adapter callbacks and the
+tables (`docs/adr/0011-execution-is-the-durable-noun.md`, accepted; the
+table half is V06, `lib/statifier_persistence/ecto/migrations/v06.ex`,
+read at `8211e03`). Read every `run`, `runs` and `run_id` in this
+record - the `statifier_runs` table of decision 1, the `run_` row prefix
+of decision 4, the lifecycle nouns of decision 5 - as `execution`,
+`executions` and `execution_id`. The file name and the decision numbers
+are cite targets and do not move.
+
+**What decision 5 decided besides the word stands.** "Session" still
+keeps the meaning statifier-ex gives it - the live GenServer runtime this
+package exists to make optional - and the durable row still carries the
+engine `session_id` as a **nullable** column, so a durable execution can
+reference the live session driving it when one exists. The column is
+still declared that way, with decision 5 named as the reason
+(`add(:session_id, :text, null: true)` under the comment "Nullable by
+design (ADR-0002 decision 5)",
+`lib/statifier_persistence/ecto/migrations/v01.ex:74-76`, read at
+`8211e03`). Only the noun moved. The two-vocabulary point decision 5
+exists to make is what let ADR-0011 move it without reopening anything
+else here.

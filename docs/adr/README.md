@@ -3,7 +3,7 @@
 | # | Decision | Status |
 |---|---|---|
 | [0001](0001-record-architecture-decisions.md) | Record architecture decisions | accepted |
-| [0002](0002-configurable-keys-and-table-names.md) | Storage keys and table names are host-configurable at compile time (UXID default, `statifier_` prefix, runs vocabulary); engine identities are not | accepted |
+| [0002](0002-configurable-keys-and-table-names.md) | Storage keys and table names are host-configurable at compile time (UXID default, `statifier_` prefix, the durable-row vocabulary ADR-0011 later supersedes); engine identities are not | accepted |
 | [0003](0003-storage-adapter-behaviour-and-the-identity-guard.md) | The storage adapter stores opaque blobs keyed by engine identities; the identity guard lives above every adapter and cannot be skipped | accepted |
 | [0004](0004-run-lifecycle-executor-seam-and-serialization.md) | The run record owns its position, the loop's order is the contract, effects cross a host-executor seam (failures re-enter as `error.communication`), and per-run serialization is a pluggable strategy | accepted |
 | [0005](0005-ecto-in-package-and-postgres-test-harness.md) | The Ecto layer ships in this package behind optional `ecto_sql`; the test harness is a real Postgres server with the SQL sandbox, no skip tag | accepted |
