@@ -15,7 +15,7 @@ defmodule StatifierPersistence.Ecto.KeyGenerator.UXID do
   @behaviour StatifierPersistence.Ecto.KeyGenerator
 
   # UXID's default delimiter is "_", so a "chart" prefix yields "chart_...".
-  @prefixes %{charts: "chart", positions: "pos", runs: "exec", inputs: "input"}
+  @prefixes %{charts: "chart", positions: "pos", executions: "exec", inputs: "input"}
 
   @impl true
   def ecto_type(_opts), do: :string

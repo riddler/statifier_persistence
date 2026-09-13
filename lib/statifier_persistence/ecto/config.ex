@@ -18,7 +18,7 @@ defmodule StatifierPersistence.Ecto.Config do
     * `:table_prefix` - prefix for the generated table names, default
       `"statifier_"`
     * `:tables` - per-table override map with keys `:charts`,
-      `:positions`, `:runs`, `:inputs`; an override replaces the whole
+      `:positions`, `:executions`, `:inputs`; an override replaces the whole
       name, prefix included
     * `:prefix` - the Postgres schema (Ecto's `@schema_prefix`), default
       `nil`
@@ -30,7 +30,7 @@ defmodule StatifierPersistence.Ecto.Config do
       `{module, opts}` tuple for an `Ecto.ParameterizedType` for
       `field(name, Mod, opts)` - the shape Ecto itself uses to declare a
       parameterized field. Keys and lookup columns (`content_hash`,
-      `session_id`, `run_id`, `status`, `failure`, `seq`, `door`) are
+      `session_id`, `execution_id`, `status`, `failure`, `seq`, `door`) are
       never affected; only the payload blob columns reach this option. Resolved and
       stored on the struct as `:binary` (bare) or `{module, opts}`
       (normalized, so a bare custom module becomes `{module, []}`) -
@@ -43,7 +43,7 @@ defmodule StatifierPersistence.Ecto.Config do
   alias StatifierPersistence.Ecto.KeyGenerator
 
   @known_options [:repo, :key, :table_prefix, :tables, :prefix, :blob_type]
-  @table_keys [:charts, :positions, :runs, :inputs]
+  @table_keys [:charts, :positions, :executions, :inputs]
 
   @enforce_keys [:repo, :key, :table_prefix, :tables, :prefix, :blob_type]
   defstruct [:repo, :key, :table_prefix, :tables, :prefix, :blob_type]

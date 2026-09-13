@@ -1,21 +1,22 @@
 if Code.ensure_loaded?(Ecto.Migration) do
   defmodule StatifierPersistence.Ecto.Migrations.V03 do
     @moduledoc """
-    V03 of the package DDL: the runs table's nullable `outcome_blob`
+    V03 of the package DDL: the executions table's nullable `outcome_blob`
     column, and a GIN index on `metadata`.
 
     ## `outcome_blob`
 
-    A run's own answer, kept where a reader that has never seen the run
-    live can find it. A durable subchart child's completion used to exist
+    An execution's own answer, kept where a reader that has never seen
+    the execution live can find it. A durable subchart child's completion used to exist
     only on the step that produced it - a stored record carries no
     donedata - which is fine while a completion is answered immediately
     and not fine once N of them have to be collected and assembled in
     index order. The column is written once, at the child's completion,
-    by `StatifierPersistence.Storage.update_run_status/4`.
+    by `StatifierPersistence.Storage.update_execution_status/4`.
 
-    Nullable, because almost no run has one: an ordinary run answers
-    nobody, and a run that fails at creation never completes.
+    Nullable, because almost no execution has one: an ordinary execution
+    answers nobody, and an execution that fails at creation never
+    completes.
 
     It is a **blob** column, not a `jsonb` one, and the difference is a
     disclosure decision rather than a typing convenience. `metadata` is
@@ -33,7 +34,7 @@ if Code.ensure_loaded?(Ecto.Migration) do
     arithmetic. Every child completion asks "are all N of my siblings
     terminal?", which is the same `jsonb` containment query the cascade
     already issues, so one fan-out of N children issues N of them; without
-    an index each is a sequential scan of the host's whole runs table.
+    an index each is a sequential scan of the host's whole executions table.
     That is not a cost a host can be left to discover in production, so
     this package now ships the index the query it issues needs.
 
@@ -59,13 +60,13 @@ if Code.ensure_loaded?(Ecto.Migration) do
 
     The column is created on every adapter, because it is a nullable
     binary column and every adapter has one. That is what keeps
-    `StatifierPersistence.Storage.Ecto.supports_run_outcome?/1` true
+    `StatifierPersistence.Storage.Ecto.supports_execution_outcome?/1` true
     everywhere.
 
     Skipping the index is not the same as the index not mattering. What
     the index serves - the `jsonb` containment queries
-    `StatifierPersistence.Storage.Ecto.list_runs_by_metadata/2` and
-    `list_run_states_by_metadata/2` issue - is Postgres-only SQL in its
+    `StatifierPersistence.Storage.Ecto.list_executions_by_metadata/2` and
+    `list_execution_states_by_metadata/2` issue - is Postgres-only SQL in its
     own right, so an adapter that cannot take the index cannot run the
     queries either and says so: that adapter's metadata support is
     declared false, and a durable subchart or fan-out over such a store is
@@ -78,22 +79,22 @@ if Code.ensure_loaded?(Ecto.Migration) do
     alias StatifierPersistence.Ecto.Config
 
     @doc """
-    Adds the runs table's nullable `outcome_blob` column and the
+    Adds the executions table's nullable `outcome_blob` column and the
     `metadata` GIN index per `config`.
     """
     @spec up(Config.t()) :: :ok
     def up(%Config{} = config) do
-      runs = Config.table(config, :runs)
+      executions = Config.table(config, :executions)
 
-      alter table(runs, prefix: config.prefix) do
+      alter table(executions, prefix: config.prefix) do
         add(:outcome_blob, :binary, null: true)
       end
 
       if postgres?() do
         create(
-          index(runs, ["metadata jsonb_path_ops"],
+          index(executions, ["metadata jsonb_path_ops"],
             using: "GIN",
-            name: index_name(runs),
+            name: index_name(executions),
             prefix: config.prefix
           )
         )
@@ -102,16 +103,19 @@ if Code.ensure_loaded?(Ecto.Migration) do
       :ok
     end
 
-    @doc "Drops the `metadata` GIN index and the runs table's `outcome_blob` column."
+    @doc """
+    Drops the `metadata` GIN index and the executions table's
+    `outcome_blob` column.
+    """
     @spec down(Config.t()) :: :ok
     def down(%Config{} = config) do
-      runs = Config.table(config, :runs)
+      executions = Config.table(config, :executions)
 
       if postgres?() do
-        drop(index(runs, ["metadata"], name: index_name(runs), prefix: config.prefix))
+        drop(index(executions, ["metadata"], name: index_name(executions), prefix: config.prefix))
       end
 
-      alter table(runs, prefix: config.prefix) do
+      alter table(executions, prefix: config.prefix) do
         remove(:outcome_blob)
       end
 
@@ -123,7 +127,7 @@ if Code.ensure_loaded?(Ecto.Migration) do
     # index `up/1` created, and an expression-derived name is not
     # something a reader of this module can check by eye.
     @spec index_name(String.t()) :: atom()
-    defp index_name(runs), do: :"#{runs}_metadata_gin_index"
+    defp index_name(executions), do: :"#{executions}_metadata_gin_index"
 
     # `Ecto.Migration.repo/0` answers the repo the runner is migrating,
     # and every `Ecto.Repo` exports `__adapter__/0`. An exact match on

@@ -24,7 +24,11 @@ defmodule StatifierPersistence.EctoHosts do
       repo: StatifierPersistence.TestRepo,
       key: :uuid,
       table_prefix: "wf_",
-      tables: %{runs: "workflow_runs"},
+      # Deliberately still the name this host chose before 0.12.0: ADR-0011
+      # decision 3 renames the package's default table, not a name a host
+      # gave itself, and V06 renames the columns and indexes under whatever
+      # name it finds. This fixture is what proves that branch.
+      tables: %{executions: "workflow_runs"},
       prefix: "workflows"
   end
 

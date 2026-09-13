@@ -1,14 +1,14 @@
 if Code.ensure_loaded?(Ecto.Migration) do
   defmodule StatifierPersistence.Ecto.Migrations.V01 do
     @moduledoc """
-    V01 of the package DDL: the `charts`, `positions`, and `runs` tables
+    V01 of the package DDL: the `charts`, `positions`, and `executions` tables
     per ADR-0002 (as amended) and the storage contract's field set
     (ADR-0003 decision 3).
 
     Table names, the surrogate primary key's column type, and the Postgres
     schema all come from the resolved `StatifierPersistence.Ecto.Config` -
     the same struct the generated schemas are built from. The engine
-    identity columns (`content_hash`, `session_id`, `run_id`) are `text`
+    identity columns (`content_hash`, `session_id`, `execution_id`) are `text`
     with their unique indexes regardless of the configured key scheme:
     the identity guard never touches a surrogate key.
 
@@ -61,11 +61,11 @@ if Code.ensure_loaded?(Ecto.Migration) do
 
       create(unique_index(positions, [:session_id], prefix: config.prefix))
 
-      runs = Config.table(config, :runs)
+      executions = Config.table(config, :executions)
 
-      create table(runs, primary_key: false, prefix: config.prefix) do
+      create table(executions, primary_key: false, prefix: config.prefix) do
         add(:id, pk_type, primary_key: true)
-        add(:run_id, :text, null: false)
+        add(:execution_id, :text, null: false)
         add(:status, :text, null: false)
         add(:content_hash, :text, null: false)
         add(:identity_blob, :binary, null: false)
@@ -77,7 +77,7 @@ if Code.ensure_loaded?(Ecto.Migration) do
         timestamps(type: :utc_datetime_usec)
       end
 
-      create(unique_index(runs, [:run_id], prefix: config.prefix))
+      create(unique_index(executions, [:execution_id], prefix: config.prefix))
 
       :ok
     end
@@ -85,7 +85,7 @@ if Code.ensure_loaded?(Ecto.Migration) do
     @doc "Drops the V01 tables in reverse creation order."
     @spec down(Config.t()) :: :ok
     def down(%Config{} = config) do
-      for name <- [:runs, :positions, :charts] do
+      for name <- [:executions, :positions, :charts] do
         drop(table(Config.table(config, name), prefix: config.prefix))
       end
 

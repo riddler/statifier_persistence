@@ -2,9 +2,9 @@ if Code.ensure_loaded?(Ecto.Migration) do
   defmodule StatifierPersistence.Ecto.Migrations.V02 do
     @moduledoc """
     V02 of the package DDL: the nullable `metadata` `jsonb` column on the
-    runs table (ADR-0006 decision 3, decision 4's migration shape).
+    executions table (ADR-0006 decision 3, decision 4's migration shape).
 
-    Nullable, because a run created with no metadata stores none, and
+    Nullable, because an execution created with no metadata stores none, and
     ADR-0006 decision 3 makes the empty map the never-refused default -
     a `NOT NULL` column would turn "no metadata" into a write this package
     would have to invent a value for.
@@ -13,7 +13,7 @@ if Code.ensure_loaded?(Ecto.Migration) do
     which expression or GIN index it wants, is the host's call and not
     something this package can guess (ADR-0006 decision 4). A host that
     queries the column at any volume adds its own index in its own
-    migration; `StatifierPersistence.Storage.Ecto.list_runs_by_metadata/2`
+    migration; `StatifierPersistence.Storage.Ecto.list_executions_by_metadata/2`
     issues a `jsonb` containment query a GIN index on the column serves
     directly.
 
@@ -26,20 +26,20 @@ if Code.ensure_loaded?(Ecto.Migration) do
 
     alias StatifierPersistence.Ecto.Config
 
-    @doc "Adds the runs table's nullable `metadata` jsonb column per `config`."
+    @doc "Adds the executions table's nullable `metadata` jsonb column per `config`."
     @spec up(Config.t()) :: :ok
     def up(%Config{} = config) do
-      alter table(Config.table(config, :runs), prefix: config.prefix) do
+      alter table(Config.table(config, :executions), prefix: config.prefix) do
         add(:metadata, :map, null: true)
       end
 
       :ok
     end
 
-    @doc "Drops the runs table's `metadata` column."
+    @doc "Drops the executions table's `metadata` column."
     @spec down(Config.t()) :: :ok
     def down(%Config{} = config) do
-      alter table(Config.table(config, :runs), prefix: config.prefix) do
+      alter table(Config.table(config, :executions), prefix: config.prefix) do
         remove(:metadata)
       end
 

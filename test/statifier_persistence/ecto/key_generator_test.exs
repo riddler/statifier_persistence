@@ -106,7 +106,7 @@ defmodule StatifierPersistence.Ecto.KeyGeneratorTest do
 
     # sabotage: @prefixes positions entry changed to "position" -> red (expects "pos_")
     test "keys carry the per-table prefix" do
-      for {table, prefix} <- [charts: "chart_", positions: "pos_", runs: "exec_"] do
+      for {table, prefix} <- [charts: "chart_", positions: "pos_", executions: "exec_"] do
         {mod, fun, args} = KeyGenerator.UXID.autogenerate(table, [])
         key = apply(mod, fun, args)
         assert String.starts_with?(key, prefix)
@@ -115,7 +115,7 @@ defmodule StatifierPersistence.Ecto.KeyGeneratorTest do
 
     # sabotage: autogenerate/2 forces from: "fixed" (deterministic UXIDs) -> red (first == second)
     test "keys are k-sortable in generation order" do
-      {mod, fun, args} = KeyGenerator.UXID.autogenerate(:runs, [])
+      {mod, fun, args} = KeyGenerator.UXID.autogenerate(:executions, [])
       first = apply(mod, fun, args)
       # UXID timestamps have millisecond resolution; cross a boundary.
       Process.sleep(2)
@@ -162,7 +162,7 @@ defmodule StatifierPersistence.Ecto.KeyGeneratorTest do
 
     # sabotage: Bigserial.autogenerate/2 returns an MFA -> red (expects nil)
     test "declares database-assigned keys for every table" do
-      for table <- [:charts, :positions, :runs] do
+      for table <- [:charts, :positions, :executions] do
         assert nil == KeyGenerator.Bigserial.autogenerate(table, [])
       end
     end

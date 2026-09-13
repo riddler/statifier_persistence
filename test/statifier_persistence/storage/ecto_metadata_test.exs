@@ -33,7 +33,7 @@ defmodule StatifierPersistence.Storage.EctoMetadataTest do
     %{store: store, machine_state: machine_state}
   end
 
-  defp runs_table, do: Config.table(Default.__statifier_persistence__(:config), :runs)
+  defp executions_table, do: Config.table(Default.__statifier_persistence__(:config), :executions)
 
   defp insert(store, machine_state, execution_id, metadata) do
     Storage.insert_execution(store, execution_id, machine_state, :active, metadata: metadata)
@@ -49,7 +49,7 @@ defmodule StatifierPersistence.Storage.EctoMetadataTest do
     assert :ok = insert(store, machine_state, "execution-ecto-md-empty", %{})
 
     %{rows: [[raw]]} =
-      TestRepo.query!("SELECT metadata FROM #{runs_table()} WHERE run_id = $1", [
+      TestRepo.query!("SELECT metadata FROM #{executions_table()} WHERE execution_id = $1", [
         "execution-ecto-md-empty"
       ])
 
@@ -70,7 +70,7 @@ defmodule StatifierPersistence.Storage.EctoMetadataTest do
     assert :ok = insert(store, machine_state, "execution-ecto-md-full", metadata)
 
     %{rows: [[raw]]} =
-      TestRepo.query!("SELECT metadata FROM #{runs_table()} WHERE run_id = $1", [
+      TestRepo.query!("SELECT metadata FROM #{executions_table()} WHERE execution_id = $1", [
         "execution-ecto-md-full"
       ])
 
