@@ -141,9 +141,9 @@ component written as a literal `0` rather than dropped. The skill's step 2 is
 what bumps it, so the pin needs no step of its own here; what this section
 adds is the **form**, which the skill leaves to the project ("the exact form
 of the project's install pin" is the first thing its Project extension section
-names an extension for). Every prep since has moved the pin in the same commit
-as the bump; the 0.5.0 prep `957c122` is the historical evidence for that,
-having moved it from `~> 0.4` to `~> 0.5` there.
+names an extension for). Every prep since the 0.5.0 prep has moved the pin in
+the same commit as the bump; the 0.5.0 prep `957c122` is the historical
+evidence for that, having moved it from `~> 0.4` to `~> 0.5` there.
 
 Two consequences a prep should not have to derive:
 
