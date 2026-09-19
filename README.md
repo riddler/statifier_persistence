@@ -320,6 +320,49 @@ serialization, and the Ecto layer (configurable keys/tables, versioned
 migrations, and the Postgres adapter below) all exist and are
 conformance-tested.
 
+## Documents, revisions, charts and executions
+
+This package stores charts and executions. Documents and revisions are the
+host's, and it has no table for either. The four words are written down here
+so that the two sides line up, because nothing on these pages otherwise says
+how a host gets from "the workflow an author edits" to "the chart an
+execution runs".
+
+Each word has exactly one job:
+
+- A **document** is the stable thing a host names - the workflow an author
+  opens and edits - under an id the host owns.
+- A **revision** is one saved state of a document.
+- A **chart** is what a revision compiles to, identified by its content
+  hash. It is the only one of the four this package stores.
+- An **execution** runs exactly one chart for its whole life.
+
+The join between the host's side and this package's side is a publish row
+the **host** keeps:
+
+    (document_id, revision, content_hash, published_at, status)
+
+Three rules govern it:
+
+- There is exactly one active publish per document.
+- A new execution always starts on the document's active publish, and
+  nothing that starts an execution names a content hash directly: the host
+  reads the hash off the active publish.
+- A republish mints a new chart and never touches a live execution. An
+  execution drains on the chart it started on.
+
+So the card-processing host above starts each new transaction through its
+own publish row rather than through a hash it carries around:
+
+```elixir
+# MyApp.Catalog is the host's publish table, not this package's
+%{content_hash: hash} = MyApp.Catalog.active_publish!("card-authorization")
+
+{:ok, %{chart_blob: blob}} = Storage.fetch_chart(store, hash)
+{:ok, machine} = Chart.from_binary(blob)
+{:ok, execution, _state} = Executions.create(store, "txn_01J2", machine, opts)
+```
+
 ## The Ecto adapter
 
 Configure a persistence module on your own repo once, and migrate:
