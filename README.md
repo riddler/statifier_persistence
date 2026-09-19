@@ -728,7 +728,9 @@ that maps an incoming key to an execution id, say - can open one
 transaction on its own repo and call `Executions.create/4` and
 `Executions.step/5` inside it, from the same process. The two doors
 then write through the caller's transaction rather than one of their
-own:
+own. The `store` in the example is built over the caller's own repo:
+its persistence module's `repo:` is `MyApp.Repo`, as in "The Ecto
+adapter" above.
 
     MyApp.Repo.transaction(fn ->
       {:ok, _execution, _state} =
@@ -754,7 +756,8 @@ against real Postgres:
   part of this contract: a child's drive answers its parent after its
   own exclusion is released (`Executions.cascade_cancel/3`'s doc says
   why that order matters), and inside a caller's transaction nothing is
-  released before the commit.
+  released before the commit. (Read from the code, not pinned by that
+  test.)
 - **Effects fire before the commit.** Both doors hand their effects to
   the executor before they write the execution record, and neither waits
   for the caller's transaction. A rollback does not un-fire an effect: whatever the
@@ -768,7 +771,8 @@ against real Postgres:
   until the door returns. Another connection stepping the same execution
   waits for the caller's commit. A caller that touches two executions in
   one transaction holds both exclusions to the end, and the order it
-  takes them in is the caller's to keep consistent.
+  takes them in is the caller's to keep consistent. (Read from the
+  code, not pinned by that test.)
 - **An `:execution_exists` refusal aborts the caller's transaction.**
   `create/4` returns `{:error, :execution_exists}` for an id that
   already exists, but the refusal is a failed `INSERT` on the unique
@@ -778,6 +782,72 @@ against real Postgres:
   transaction: retry the lookup in a new one. The refused create has
   also already fired its initialize effects, exactly as it does outside
   a caller's transaction.
+
+### Delivering while a step is in flight
+
+A host that delivers events from more than one process - a webhook
+controller with no partitioner in front of it, say - will sooner or later
+call `Executions.step/5` for an execution while another `step/5` for the
+same execution is still running. There is no separate door for that case,
+because `step/5` already serializes it: every step runs its whole
+fetch-to-persist tail inside the execution's serialization strategy, and
+the default strategy is the adapter's own `lock_execution/3`. What a
+second `step/5` does while the first holds that lock, per adapter:
+
+| Storage | The second `step/5` while the first holds the lock |
+|---|---|
+| The Ecto adapter (Postgres) | Waits on the transaction-scoped advisory lock, then steps |
+| `StatifierPersistence.Storage.InMemory` | Waits, retrying the lock every 5ms, then steps |
+| An adapter that exports no `lock_execution/3` | Refused with `{:error, {:serialization, :not_supported}}` whether or not another step is in flight; nothing is fetched or written |
+| Any adapter under a host's own `serialization:` strategy | Whatever that strategy does; this package waits on nothing of its own |
+
+The first two rows are pinned by the test named below. The third is
+pinned for `create/4` by `test/statifier_persistence/executions_test.exs`
+and reaches `step/5` through the same default strategy; the fourth is
+read from the code.
+
+Pinned by `test/statifier_persistence/held_lease_test.exs`, on the Ecto
+adapter against real Postgres and on the in-memory adapter's lock:
+
+- **The second call waits, then steps.** It does not return while the
+  first holds the lock, and it appends nothing to the input log until
+  then. Once the first has persisted, the second reads the execution
+  record and the position the first one wrote and steps from there, so
+  both return `{:ok, execution, machine_state}` and the input log holds
+  the first call's event before the second's.
+- **A step the first one made terminal is discarded.** If the first
+  step ends the execution, the second returns `{:discarded, execution}`
+  once it gets the lock, and the log does not carry its event - the same
+  answer any delivery to a terminal execution gets.
+
+Read from the code, not pinned by that test:
+
+- **No call is refused or discarded for being busy.** From `step/5`,
+  `{:discarded, _}` means a terminal execution record, an event builder
+  that declined, or a stored position that turned out to be terminal,
+  never "the lock was held"; a held lock only ever makes a call wait.
+- **Neither shipped adapter bounds the wait.** The in-memory adapter
+  retries until the lock frees. The Ecto adapter passes no timeout of its
+  own to the lock query, so what ends a long wait there is the repo's
+  query timeout or a timeout the server enforces. A waiting call on the
+  Ecto adapter holds a pooled connection for the whole wait, because its
+  transaction is open before the lock query runs, so many deliveries
+  waiting on one execution can use up the pool.
+- **Order is the lock's.** A call that arrives while another holds the
+  lock steps after it. Among several calls all waiting at once, the
+  order they step in is the order the lock grants them - Postgres's lock
+  queue on the Ecto adapter, whichever retry lands first on the in-memory
+  one - and this package promises no more than that.
+- **Inside a caller's transaction the lock is the caller's.** A `step/5`
+  called inside a transaction the caller opened holds the lock until the
+  caller commits or rolls back (the section above pins that for
+  `create/4`, which takes the lock the same way), so a
+  delivery from another process waits for the caller's commit, not for
+  `step/5` to return.
+- **The wait is visible.** `[:statifier_persistence, :execution, :lock]`
+  reports the wait for the lock as its `duration`
+  ([Telemetry](docs/telemetry.md)), which is where contention on one
+  execution shows up.
 
 ### Encrypting the blob columns
 
