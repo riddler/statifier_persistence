@@ -45,13 +45,11 @@ defmodule StatifierPersistence.Ecto.CallerTransactionTest do
   setup_all do
     Sandbox.mode(TestRepo, :auto)
 
+    # Rows a killed earlier run left behind go first, then this run's own.
+    delete_prefixed()
+
     on_exit(fn ->
-      TestRepo.delete_all(from(i in Default.Input, where: like(i.execution_id, "caller-tx-%")))
-
-      TestRepo.delete_all(
-        from(e in Default.Execution, where: like(e.execution_id, "caller-tx-%"))
-      )
-
+      delete_prefixed()
       Sandbox.mode(TestRepo, :manual)
     end)
 
@@ -204,5 +202,10 @@ defmodule StatifierPersistence.Ecto.CallerTransactionTest do
   defp inputs(store, execution_id) do
     {:ok, entries} = Executions.inputs(store, execution_id)
     Enum.map(entries, &{&1.seq, &1.door, &1.event.name})
+  end
+
+  defp delete_prefixed do
+    TestRepo.delete_all(from(i in Default.Input, where: like(i.execution_id, "caller-tx-%")))
+    TestRepo.delete_all(from(e in Default.Execution, where: like(e.execution_id, "caller-tx-%")))
   end
 end
