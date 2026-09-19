@@ -1,4 +1,4 @@
-# ADR-0012: Retention and retirement: what pins a chart, zero pins is retirable, `retire_chart` refuses with the counts or tombstones the row and nulls the blobs, a retired hash is its own error, and no clock
+# ADR-0012: Retention and retirement: what pins a chart, zero pins is retirable, `Executions.retire_chart/4` refuses with the counts or tombstones the row and nulls the blobs, a retired hash is its own error, and no clock
 
 Status: proposed (2026-09-19, sp-ryi, campaign RF063; the code beads of this
 campaign build against it at proposed and cite its Decision items. sp-9oa
@@ -174,7 +174,7 @@ host-facing entry is `StatifierPersistence.Executions.retire_chart/4`,
 taking the store, the content hash, the list of pin-source modules and
 options carrying the retiring actor; the facade beneath it is
 `StatifierPersistence.Storage.retire_chart/3`, taking the store, the content
-hash and options. The split is the one decision 3 makes, in the same words:
+hash and options. The split follows decision 3's layering:
 `Executions` is the host-facing entry and owns what reaches outside this
 package - it calls each pin source and holds decision 4's refusal for a
 source that raises - while `Storage` is the facade over this package's own
@@ -252,24 +252,29 @@ inventing bytes, and that refusal is part of what V07's bead builds.
 
 **The pin set and the drained query's map deliberately differ.** The drained
 query answers "what is running on this chart" and keeps the five keys
-decision 3 names. The retire refusal answers "what would I break", and that
-is the larger set: it adds the position rows decision 1 counts and every
-registered source's counts. So the drained query is not a retirability test
-on its own and nothing should read it as one - a host asks it to see a
-chart's traffic, and asks `Executions.retire_chart/4` whether the chart can
-go. The position count stays out of the callback's map so the adapter
-surface does not grow a second query for it; the retirement takes that count
-inside its own transaction instead.
+decision 3 names. The retire refusal answers "what would I break", and it
+reports more than those five keys: it adds the position count decision 5
+takes inside the transaction and every registered source's counts. What it
+*blocks* on is narrower than either, and is decision 1's blocking set
+unchanged - a non-zero `active`, a non-zero `children`, a non-zero position
+count, or a non-zero count from any source. The three terminal arms are
+reported and never block, here as in decisions 1 and 5. So the drained
+query is not a retirability test on its own and nothing should read it as
+one - a host asks it to see a chart's traffic, and asks
+`Executions.retire_chart/4` whether the chart can go. The position count
+stays out of the callback's map so the adapter surface does not grow a
+second query for it; the retirement takes that count inside its own
+transaction instead.
 
 **The adapter behaviour grows one callback and one predicate.**
 `count_executions_by_content_hash/2` and `supports_content_hash_query?/1`
 join `@optional_callbacks`. Every adapter written before this record stays
 conformant without a line of change: it exports neither, the facade finds
-neither, and only `retire_chart/3` refuses on the absence. The conformance
-suite gains cases for the counts in each arm, for the child clause of
-decision 1 (a terminal child under an `:active` parent counts; the same child
-under a terminal parent does not), and for an adapter that declines the
-capability.
+neither, and only `Storage.retire_chart/3` refuses on the absence. The
+conformance suite gains cases for the counts in each arm, for the child
+clause of decision 1 (a terminal child under an `:active` parent counts; the
+same child under a terminal parent does not), and for an adapter that
+declines the capability.
 
 **A new behaviour module ships.** `StatifierPersistence.PinSource`, with one
 callback and no implementation in this package, plus a test double in the
