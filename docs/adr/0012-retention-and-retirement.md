@@ -8,10 +8,10 @@ behaviour, and `retire_chart` follows both)
 ## Context
 
 This package stores a chart once per content hash and has never taken one
-back out. Charts accumulate for the life of the store: every revision a host
+back out. Charts accumulate for the life of the store: every chart a host
 has ever saved stays, including the ones whose last execution finished months
 ago. A host that authors charts from a UI reaches the point where it wants to
-stop carrying the bytes of a revision nothing can resume, and today it has no
+stop carrying the bytes of a chart nothing can resume, and today it has no
 supported way to ask for that, and no way to ask the safer prior question -
 *is anything still using this?*
 
@@ -44,6 +44,16 @@ number, because line numbers move and anchors do not.
   arm is `:chart_not_found`
   (`lib/statifier_persistence/storage/adapter.ex:200`, in this layer's own
   refusal arms, @a1a83a2).
+- **`positions` is a third table on the same hash.** `v01` creates it beside
+  `charts` and `executions`, with `add(:content_hash, :text, null: false)`
+  and `add(:position_blob, :binary, null: false)` of its own, keyed by
+  `create(unique_index(positions, [:session_id], prefix: config.prefix))`
+  (`ecto/migrations/v01.ex:53`..`:62`, @a1a83a2). It is written by
+  `Storage.save_position/3` (`storage.ex:189`, @a1a83a2) and read by
+  `Storage.load_position/3` (`storage.ex:252`, @a1a83a2). Its key is the
+  session, not the execution, so it is disjoint from `executions`: a hash
+  can carry position rows and no execution row at all, and nothing in the
+  executions tables reveals them.
 - **No removal verb exists on this package's surface.** Read at @a1a83a2,
   `lib/` carries no delete, retire, tombstone or purge door of any kind; the
   only removals in the tree are two migration `remove/1` calls inside a
@@ -90,13 +100,26 @@ number, because line numbers move and anchors do not.
 
 ## Decision
 
-**1. Three things pin a chart, and a child's pin counts while its parent is
+**1. Four things pin a chart, and a child's pin counts while its parent is
 `:active`.** A content hash is pinned when any of the following is true:
 an execution row on that hash is in the `:active` arm; a durable child's
 linkage pin names that hash and the execution named by that child's
 `parent_execution_id` is in the `:active` arm, *whatever arm the child itself
-is in*; or a registered pin source reports a non-zero count for it
-(decision 4). The child clause is deliberately not conditioned on the child's
+is in*; a position row is stored on that hash; or a registered pin source
+reports a non-zero count for it (decision 4). Those four are the blocking
+set, and nothing else is in it: a non-zero count in any of the four refuses
+a retirement, and an execution in a terminal arm pins nothing at all. A
+terminal row never goes away, so counting one as a pin would make a chart
+permanently unretirable the first time anything on it finished, which is the
+opposite of what retirement is for; the terminal counts are reported in a
+refusal (decision 5) because they tell the caller what the chart's history
+was, and they never cause one. The position clause is here because a
+position row is a saved session waiting to be resumed through
+`load_position/3`, which needs the chart's bytes to resume against;
+positions are keyed by session and disjoint from `executions`, so a hash
+with no execution row at all can still hold live positions, and retiring it
+would strand exactly the sessions this record's Context calls the dangerous
+half. The child clause is deliberately not conditioned on the child's
 own arm, because a child that has already finished is still reachable: under
 ADR-0008 a completion is placed at the child's index by whatever node picks
 it up, and the pin is the value that guard compares. While the parent can
@@ -145,14 +168,26 @@ zero: the retirement stops with the failing module named, because "the source
 could not answer" and "the source answered zero" are different facts and
 collapsing them would retire a pinned chart.
 
-**5. Zero pins means retirable, and a non-zero count refuses with every count
-by name.** `StatifierPersistence.Storage.retire_chart/3` takes the store, the
-content hash and options carrying the pin-source modules and the retiring
-actor. It takes the drained query's counts and each source's counts, and when
-any of them is non-zero it refuses with all of them - this package's own
-under its own name and each source's under that source's module name - so the
-caller learns everything holding the chart in one answer rather than one
-refusal per retry.
+**5. Zero pins means retirable; a non-zero count anywhere in decision 1's
+blocking set refuses, and the refusal carries every count by name.** The
+host-facing entry is `StatifierPersistence.Executions.retire_chart/4`,
+taking the store, the content hash, the list of pin-source modules and
+options carrying the retiring actor; the facade beneath it is
+`StatifierPersistence.Storage.retire_chart/3`, taking the store, the content
+hash and options. The split is the one decision 3 makes, in the same words:
+`Executions` is the host-facing entry and owns what reaches outside this
+package - it calls each pin source and holds decision 4's refusal for a
+source that raises - while `Storage` is the facade over this package's own
+tables and owns the transaction, the counts taken inside it, and the
+tombstone write. Exactly decision 1's four pin kinds refuse: a non-zero
+`active`, a non-zero `children`, a non-zero position count, or a non-zero
+count from any source. The drained query's three terminal arms are reported
+and never refuse. The position count is deliberately not in decision 3's
+map; the retire call counts position rows on the hash inside the transaction
+it already opens. Whatever the reason for the refusal, it carries all of the
+counts - this package's own under its own name and each source's under that
+source's module name - so the caller learns everything holding the chart in
+one answer rather than one refusal per retry.
 
 **6. A successful retirement tombstones the row and nulls the blobs in one
 transaction with the count it was decided on; `fetch_chart/2` then answers a
@@ -172,11 +207,15 @@ a chart back into service under a hash whose row still asserts, in
 `retired_at` and `retired_by`, that somebody decided it was done, and a
 content-addressed save is the one call with no way to express "yes, I mean to
 undo that" - it looks identical to an ordinary idempotent re-save. The
-refusal is the same answer read from the guard's side: ADR-0003 decision 2's
-identity guard compares a stored identity against the caller's machine, and a
-tombstoned row holds no identity blob to compare, so the retired arm is
-checked and answered *first*, on both doors, before any identity or
-byte-identity obligation applies. The adapter contract that a fetched
+refusal is the same answer read from the guard's side, and the guard itself
+is untouched: ADR-0003 decision 2's identity guard reads the *position*
+row's own identity blob and compares it against the caller's machine, it
+never reads a `charts` row, and a retirement writes no position row - so the
+guard goes on comparing exactly what it always compared. What a retirement
+changes is the chart doors' contract, and it changes it by adding an arm
+rather than weakening one: the retired arm is checked and answered *first*
+on both chart doors, before any identity or byte-identity obligation
+applies. The adapter contract that a fetched
 `identity_blob` is byte-identical to what `save_chart/2` was given
 (`storage/adapter.ex:239`, @a1a83a2) is a statement about a chart the adapter
 holds; a tombstoned row is not one, and no call returns a chart record whose
@@ -188,7 +227,8 @@ host policy. This record names no number of days, no age, no retention
 window and no default, no call takes a duration, and nothing here retires on
 its own or on a schedule. The package answers "is it pinned" and performs a
 retirement it was asked for; deciding when to ask is the host's, and a host
-that wants a sweep writes one over `executions_on/2`.
+that wants a sweep writes one over `Executions.executions_on/2` and acts on
+what it finds through `Executions.retire_chart/4`.
 
 **8. Three things are not decided here.** Purging a finished execution's
 position and input log is a separate design bead and is not in scope: this
@@ -209,6 +249,17 @@ nulling cannot execute. Its `down/1` reverses all four, which means a
 down-migration over a store holding a tombstoned row cannot restore
 `null: false` while that row exists - the down refuses rather than
 inventing bytes, and that refusal is part of what V07's bead builds.
+
+**The pin set and the drained query's map deliberately differ.** The drained
+query answers "what is running on this chart" and keeps the five keys
+decision 3 names. The retire refusal answers "what would I break", and that
+is the larger set: it adds the position rows decision 1 counts and every
+registered source's counts. So the drained query is not a retirability test
+on its own and nothing should read it as one - a host asks it to see a
+chart's traffic, and asks `Executions.retire_chart/4` whether the chart can
+go. The position count stays out of the callback's map so the adapter
+surface does not grow a second query for it; the retirement takes that count
+inside its own transaction instead.
 
 **The adapter behaviour grows one callback and one predicate.**
 `count_executions_by_content_hash/2` and `supports_content_hash_query?/1`
@@ -233,6 +284,7 @@ against stored and retired.
 
 **Retirement is irreversible through the public surface.** Decision 6 refuses
 the revive and decision 8 leaves the un-retire door undecided, so a host that
-retires a hash it still wanted must re-author the chart under a new hash.
+retires a hash it still wanted must re-author the document and save the
+resulting chart under a new hash.
 That is the cost of the refusal being unambiguous, and it is named here so
 the next record that wants to reverse it knows what it is reversing.
