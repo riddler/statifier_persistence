@@ -334,7 +334,8 @@ Each word has exactly one job:
   opens and edits - under an id the host owns.
 - A **revision** is one saved state of a document.
 - A **chart** is what a revision compiles to, identified by its content
-  hash. It is the only one of the four this package stores.
+  hash. Documents and revisions never reach this package; the chart and
+  the execution are what it stores.
 - An **execution** runs exactly one chart for its whole life.
 
 The join between the host's side and this package's side is a publish row
