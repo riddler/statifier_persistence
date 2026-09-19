@@ -721,6 +721,64 @@ The replay itself is `statifier_ui`'s
 mapping from a stored entry to what that function takes, and nothing in
 this package depends on `statifier_ui` to say so.
 
+### Writing inside a caller's transaction
+
+A host that keeps rows of its own beside an execution - an address row
+that maps an incoming key to an execution id, say - can open one
+transaction on its own repo and call `Executions.create/4` and
+`Executions.step/5` inside it, from the same process. The two doors
+then write through the caller's transaction rather than one of their
+own:
+
+    MyApp.Repo.transaction(fn ->
+      {:ok, _execution, _state} =
+        StatifierPersistence.Executions.create(store, execution_id, machine, executor: MyApp.Executor)
+
+      {:ok, _execution, _state} =
+        StatifierPersistence.Executions.step(store, execution_id, machine, event, executor: MyApp.Executor)
+
+      # ... the host's own writes ...
+    end)
+
+This works because `lock_execution/3` opens its transaction with
+`repo.transaction/1`, and Ecto runs a transaction opened on the same repo
+in the same process as part of the one already open. The contract,
+pinned by `test/statifier_persistence/ecto/caller_transaction_test.exs`
+against real Postgres:
+
+- **Which doors.** `create/4` and `step/5`, called directly, over the
+  Ecto adapter and the default serialization. A rollback leaves no
+  execution row and no input log row behind; a commit keeps the
+  execution and the input row `step/5` wrote, and later steps append
+  after it as usual. The `StatifierPersistence.Driver` doors are not
+  part of this contract: a child's drive answers its parent after its
+  own exclusion is released (`Executions.cascade_cancel/3`'s doc says
+  why that order matters), and inside a caller's transaction nothing is
+  released before the commit.
+- **Effects fire before the commit.** Both doors hand their effects to
+  the executor before they write the execution record, and neither waits
+  for the caller's transaction. A rollback does not un-fire an effect: whatever the
+  executor did outside the repo has happened. Only writes the executor
+  itself makes through the same repo, from the calling process, join the
+  transaction and roll back with it (Ecto's ordinary rule, not this
+  package's).
+- **The lock joins the outer transaction.** The per-execution advisory
+  lock and row lock are transaction-scoped, so inside a caller's
+  transaction they are held until the caller commits or rolls back, not
+  until the door returns. Another connection stepping the same execution
+  waits for the caller's commit. A caller that touches two executions in
+  one transaction holds both exclusions to the end, and the order it
+  takes them in is the caller's to keep consistent.
+- **An `:execution_exists` refusal aborts the caller's transaction.**
+  `create/4` returns `{:error, :execution_exists}` for an id that
+  already exists, but the refusal is a failed `INSERT` on the unique
+  index, and Postgres refuses every later statement in that transaction.
+  The caller's transaction ends in `{:error, :rollback}` and its other
+  writes are rolled back. Treat the refusal as the end of the
+  transaction: retry the lookup in a new one. The refused create has
+  also already fired its initialize effects, exactly as it does outside
+  a caller's transaction.
+
 ### Encrypting the blob columns
 
 `use StatifierPersistence.Ecto` hard-codes `:binary` for its payload blob
