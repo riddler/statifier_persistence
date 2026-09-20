@@ -325,12 +325,12 @@ type's effects arrive and who owns the half the core does not.
 
 **A registered type adds no effect and no seam.** The split the persist
 tail makes is still `:done` and `:budget_exhausted` to the lifecycle and
-everything else to the executor, so `{:send, _}`, `{:send_delayed, _}` and
-`{:cancel, _}` of a registered type reach a host exactly where every other
-executable effect does - `lifecycle_effect?/1`,
-`lib/statifier_persistence/executions.ex:1773`, read at `85d863b`. Decision
-3's reopener, "an effect the lifecycle must consume beyond the two named",
-is not triggered.
+everything else to the executor, so `{:send, _}` and `{:send_delayed, _}`
+of a registered type, and the `{:cancel, _}` that names such a send, reach
+a host exactly where every other executable effect does -
+`lifecycle_effect?/1`, `lib/statifier_persistence/executions.ex:1773`, read
+at `85d863b`. The Consequences' reopener, "an effect the lifecycle must
+consume beyond the two named", is not triggered.
 
 **The host builds the event.** For a send of a registered type the event
 is `Statifier.Send.Event.build/3`'s, called by the host: statifier 2.6.0's
@@ -344,9 +344,9 @@ in this package should: the event is the host's to address.
 `%Statifier.Effect.Send{}` and `%Statifier.Effect.SendDelayed{}` each carry
 the registered `type` string, so a host dispatches on it and treats
 `target` as the processor's opaque route string.
-`%Statifier.Effect.Cancel{}` carries no type - its enforced keys are
-`send_id` and the counters (statifier 2.6.0, `Statifier.Effect.Cancel`) -
-so a cancel names a delayed send and not a processor.
+`%Statifier.Effect.Cancel{}` carries no `type` field at all (statifier
+2.6.0, `Statifier.Effect.Cancel`) - so a cancel names a delayed send and
+not a processor.
 
 **Holds are Session-only state, so a process-less host owns cancel
 routing.** The record of which processor was handed which delayed send id
@@ -368,9 +368,9 @@ path is the optional `ioprocessors_entry/1` alone.
 `invoke_types` as a field the position blob drops (st-ADR-0064), so the
 tripwire decision 3 names now matches all three fields before the
 re-stamp - `lib/statifier_persistence/executions.ex:1146`, read at
-`85d863b` - and `step/5` re-stamps it from `send_types:` on the next line
-(`:1152`, same read). On a create there is no stored position to stamp, so
-the snapshot travels inside `initialize:`
+`85d863b` - and `step_loaded/8` re-stamps it from `send_types:` six lines
+below (`:1152`, same read). On a create there is no stored position to
+stamp, so the snapshot travels inside `initialize:`
 (`StatifierPersistence.Driver.initialize_opt/3`,
 `lib/statifier_persistence/driver.ex:493`, read at `85d863b`). That routing
 is required rather than symmetric: `Statifier.MachineState.new/2` is the
