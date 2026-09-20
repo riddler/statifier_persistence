@@ -416,3 +416,66 @@ unchanged, because what it is really saying is that every adapter written
 before this record stays conformant without a line of change: it exports
 none of the five, the facade finds none, and only the retirement refuses on
 the absence.
+
+## Note (2026-09-19, sp-7av): a create on a tombstoned hash is refused, there is no un-retire door, and the facade takes the source counts it is handed
+
+Pure addition: nothing above is edited, and this record is read at the date
+its sections were decided.
+
+**Creating an execution on a tombstoned hash is refused, with decision 6's
+own retired arm.** Decision 6 changes the two chart doors and decision 1
+names what pins a chart; neither reaches the door that makes a new
+execution. `StatifierPersistence.Executions.create/4` derives its content
+hash from the machine it is handed and writes an execution row carrying that
+row's own identity and position blobs, so nothing in it reads a `charts` row
+(`lib/statifier_persistence/executions.ex`, `create/4`, read at `f6f0b1f`).
+A retirement refuses for as long as anything in decision 1's blocking set
+pins the hash, so every execution that existed before a successful
+retirement is safe; an execution created after one is not, and it is
+unresumable from the moment it is durable, because its chart is read back
+through `fetch_chart/2`, which answers the retired arm. So `create/4`
+answers `{:error, {:chart_retired, info}}` for a tombstoned hash, before it
+writes anything and before any effect is executed - the refusal-at-open
+ordering ADR-0006 decision 3 set for metadata, for the same reason. The arm
+is decision 6's and not a second spelling of it: a host that already matches
+the retired arm on the chart doors matches this one unchanged.
+
+Where the check lives follows decision 5's split, and it is the facade:
+reading the tombstone is a read of this package's own tables, so
+`StatifierPersistence.Storage.check_chart_retired/2` owns it and the
+host-facing entry calls it (`lib/statifier_persistence/storage.ex`,
+`check_chart_retired/2`, read at `f6f0b1f`). A hash this store never held is
+not a retired hash: `:chart_not_found` keeps the meaning decision 6 gave it,
+and a host may still create an execution on a machine whose chart it never
+saved. The refusal costs each create one read of the chart row, and that
+cost is part of the decision rather than an accident of it: an execution
+that can never be resumed is the more expensive of the two.
+
+**Retirement is permanent through this package's public surface, and that is
+now decided rather than left open.** Decision 8 leaves it undecided whether
+an explicit door should exist to reverse a tombstone. There is none, and
+none is coming: no call in this package reverses a retirement, and a host
+that retires a hash it still wanted re-authors the document and saves the
+result under its new hash, which is a different hash and therefore a
+different chart. The execution rows that named the old hash go on naming it,
+and it stays terminal on every door. The Consequences section already reads
+that consequence off decision 6's refusal to revive; what it could not say,
+with decision 8 open, is that the door itself is refused, and this Note says
+it. The reason is the one decision 6 gives for refusing the revive: a
+retirement is a host's own recorded decision, and a package that offers to
+undo it makes every other refusal in this record conditional on whether the
+caller also knows about the undo.
+
+**The facade takes its caller's source counts on trust, and a caller that
+reaches past the host-facing door takes the outside half with it.** Decision
+5 makes `StatifierPersistence.Storage.retire_chart/3` public and gives it
+this package's own tables; the pin sources belong to
+`StatifierPersistence.Executions.retire_chart/4`, and their counts arrive at
+the facade as the `source_counts:` option, defaulting to `%{}`
+(`lib/statifier_persistence/storage.ex`, `retire_chart/3`, read at
+`f6f0b1f`). So a host calling the facade directly decides its retirement on
+decision 1's first three pin kinds alone, and a host passing `%{}` while its
+own sources hold counts retires a chart its own sources would have blocked. That is the split working as
+designed and not a hole in it - the facade is documented for a host that
+keeps its own pin accounting and has already done the outside half itself -
+and it is recorded here because it was unrecorded, not because it changes.
