@@ -5,8 +5,8 @@ defmodule StatifierPersistence.Executions do
 
   A step runs in ADR-0004 decision 3's order, and the order is the
   contract: liveness check on the execution record -> load (guarded) -> re-stamp
-  `routes`/`invoke_types` unconditionally (with the nil tripwire from
-  st-ADR-0064: the fields are pattern-matched `nil` before stamping, so an
+  `routes`/`invoke_types`/`send_types` unconditionally (with the nil tripwire
+  from st-ADR-0064: the fields are pattern-matched `nil` before stamping, so an
   upstream regression fails loudly here, not silently downstream) -> step
   via `Interpreter.handle_event/2` -> execute effects via the executor
   seam -> consume `:done` and `:budget_exhausted` into execution status -> assert
@@ -194,6 +194,15 @@ defmodule StatifierPersistence.Executions do
     made".
   - `invoke_types:` - the `t:Statifier.Invoke.Types.t/0` snapshot, stamped
     the same way (st-ADR-0051). Defaults to `nil`, "the built-in set only".
+  - `send_types:` - the `t:Statifier.Send.Types.t/0` snapshot of the Event
+    I/O Processor types the host registers, stamped the same way
+    (st-ADR-0069). Defaults to `nil`, under which every non-built-in
+    `type` on a `<send>` classifies as unsupported and the element is
+    rejected with `error.execution`. On `step/5` it is stamped onto the
+    loaded position; on `create/4` it has to travel inside `initialize:`,
+    because `Statifier.MachineState.new/2` is the one writer of the
+    `_ioprocessors` entry each registered type gets and
+    `Statifier.MachineState.put_send_types/2` does not rewrite it.
   - `initialize:` (`create/4` only) - passed to
     `Statifier.Interpreter.initialize/2` unchanged.
   - `metadata:` (`create/4` only) - the optional opaque map of host
@@ -249,6 +258,7 @@ defmodule StatifierPersistence.Executions do
           {:executor, Executor.t()}
           | {:routes, MachineState.routes()}
           | {:invoke_types, MachineState.invoke_types()}
+          | {:send_types, MachineState.send_types()}
           | {:initialize, keyword()}
           | {:serialization, {module(), term()}}
           | {:metadata, Adapter.metadata()}
@@ -1130,15 +1140,16 @@ defmodule StatifierPersistence.Executions do
          entry
        ) do
     # The bare match IS the st-ADR-0064 tripwire: `from_binary/2` blanks
-    # both fields unconditionally on decode, so if upstream ever stops,
+    # all three fields unconditionally on decode, so if upstream ever stops,
     # this fails loudly here rather than silently resuming a stale
     # snapshot downstream.
-    %MachineState{routes: nil, invoke_types: nil} = machine_state
+    %MachineState{routes: nil, invoke_types: nil, send_types: nil} = machine_state
 
     machine_state =
       machine_state
       |> MachineState.put_routes(opts[:routes])
       |> MachineState.put_invoke_types(opts[:invoke_types])
+      |> MachineState.put_send_types(opts[:send_types])
 
     # Resolved here rather than at the entry point deliberately: a builder
     # reads the position this step is about to act on, under the exclusion
