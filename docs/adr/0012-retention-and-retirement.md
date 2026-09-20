@@ -293,3 +293,38 @@ retires a hash it still wanted must re-author the document and save the
 resulting chart under a new hash.
 That is the cost of the refusal being unambiguous, and it is named here so
 the next record that wants to reverse it knows what it is reversing.
+
+## Note (2026-09-19, sp-34l): a malformed answer is a second refusal beside the raise, and `PinSource.collect/3` is where decision 5's walk lives
+
+Pure addition: nothing above is edited, and this record is read at the date
+its sections were decided.
+
+**A source whose answer cannot be read refuses too, under the reason
+`:invalid_return`.** Decision 4 decides one failure - a source that raises is
+a refusal, never a zero - and leaves a second one open: a source that returns
+anything other than a map of atom to non-negative integer. That is decided
+here, the same way and for the same reason. "The source could not answer" and
+"the source answered zero" are different facts, and collapsing them retires a
+pinned chart; a return the callback's own type rules out is the first of
+those two facts wearing the shape of the second, which makes it the more
+dangerous of the pair, not the more forgiving. So the collection stops with
+the failing module named, exactly as a raise stops it, and the two reasons
+stay distinguishable to the caller: `{:raised, exception}` for the one
+decision 4 names and `{:invalid_return, value}` for the one this Note names
+(`@type reason`, `lib/statifier_persistence/pin_source.ex`, read at
+`60ca172`). A refusal is never a count, so neither reason ever reaches the
+retire door as a zero.
+
+**Decision 5's walk is public, and it lives on
+`StatifierPersistence.PinSource.collect/3`.** Decision 5 gives
+`Executions.retire_chart/4` the job of calling each pin source and holding
+the refusal for a source that raises; it does not say where the calling
+itself lives, and this Note says. `collect/3` takes the host's list of source
+modules, the content hash and the context, and answers either every source's
+counts keyed by that source's module or the first refusal
+(`lib/statifier_persistence/pin_source.ex`, `collect/3`, read at `60ca172`).
+`Executions.retire_chart/4` takes its source counts from that function rather
+than walking the list itself, so the refusal rules above hold at the one
+place, for that door and for any later caller. That the walk is public is the
+decision: a host may ask what its own sources say about a hash without asking
+for a retirement.
