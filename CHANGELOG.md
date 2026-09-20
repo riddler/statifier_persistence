@@ -10,6 +10,36 @@ fragment in [`changelog.d/`](changelog.d/README.md); the fragments are assembled
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
 
+## [0.13.0] 2026-09-20
+
+Feature release: a chart can now be retired. `StatifierPersistence.Executions.retire_chart/4`
+tombstones a chart nothing still uses and refuses with every pin count when
+something does, `executions_on/2` and the new `StatifierPersistence.PinSource`
+behaviour answer what is still using it, both chart doors answer a retired arm
+in place of a retired chart's bytes, and migration V07 adds the tombstone
+columns and the content-hash index those queries need.
+
+### Added
+
+- `StatifierPersistence.PinSource`, a behaviour a host implements so state this package cannot see - a pending timer, an address row - can report named counts against a content hash, with `collect/3` gathering each source's counts under its module name and turning a source that raises or answers malformed into `{:error, {module, reason}}` rather than a zero.
+- `StatifierPersistence.Storage.check_chart_retired/2`, which answers the retired arm for a machine's own content hash without writing anything.
+- `StatifierPersistence.Executions.executions_on/2` counts the executions on one content hash, per stored status.
+- `StatifierPersistence.Storage.count_executions_by_content_hash/2` and `content_hash_query_supported?/1` over two new optional adapter callbacks, `count_executions_by_content_hash/2` and `supports_content_hash_query?/1`.
+- Migration V07: an index on `executions(content_hash)`, the nullable `retired_at` and `retired_by` columns on `charts`, and - on Postgres - nullable `identity_blob` and `chart_blob` on `charts`.
+- `StatifierPersistence.Executions.retire_chart/4` retires a chart, or refuses with every pin count when anything still uses it.
+- `StatifierPersistence.Storage.retire_chart/3`, `chart_retirement_supported?/1` and `list_active_execution_ids_by_content_hash/2` over three new optional adapter callbacks, `retire_chart/3`, `supports_chart_retirement?/1` and `list_active_execution_ids_by_content_hash/2`.
+- A position row on a content hash is a pin: it refuses a retirement of that chart even when no execution runs on it.
+- The generated chart schema carries the `retired_at` and `retired_by` columns migration V07 adds.
+
+### Changed
+
+- `StatifierPersistence.Executions.create/4` refuses a chart a retirement has tombstoned with `{:error, {:chart_retired, info}}`, before it writes an execution row or executes an effect.
+- The adapter error vocabulary gains `:content_hash_query_unsupported`, the refusal for an adapter that cannot answer the content-hash count.
+- `StatifierPersistence.Storage.fetch_chart/2` gains a `{:chart_retired, info}` error arm for a retired hash, carrying who retired it and when, instead of `:chart_not_found`.
+- `StatifierPersistence.Storage.save_chart/3` refuses that same arm for a retired hash rather than reviving the row.
+- The adapter error vocabulary gains `:chart_retirement_unsupported`, the refusal for a store whose chart blob columns are not nullable, and `{:pinned, counts}`, the refusal carrying every count.
+- `StatifierPersistence.Executions.executions_on/2` answers a real `children` count: the durable-child linkage pins naming the hash whose parent execution is `:active`, in place of the zero both bundled adapters returned for that key.
+
 ## [0.12.0] 2026-09-13
 
 Breaking release: `run` is retired as the noun for the durable record, and
