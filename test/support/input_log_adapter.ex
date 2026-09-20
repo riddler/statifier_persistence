@@ -74,6 +74,23 @@ defmodule StatifierPersistence.Test.InputLogAdapter do
   @impl true
   defdelegate lock_execution(opts, execution_id, fun), to: InMemory
 
+  # The drained query and its companion listing, delegated - and
+  # `retire_chart/3` deliberately NOT. This is the adapter that answers
+  # what is running on a chart and still cannot carry a tombstone, which
+  # is the shape a store on a backend V07 could not finish arranging has
+  # (ADR-0012 decision 6, V07's Postgres-guarded `modify/3`). Without a
+  # double in that shape the conformance template's
+  # `:chart_retirement_unsupported` branch would never be reached by any
+  # adapter in this suite.
+  @impl true
+  defdelegate supports_content_hash_query?(opts), to: InMemory
+
+  @impl true
+  defdelegate count_executions_by_content_hash(opts, content_hash), to: InMemory
+
+  @impl true
+  defdelegate list_active_execution_ids_by_content_hash(opts, content_hash), to: InMemory
+
   @impl true
   @spec supports_input_log?(Adapter.opts()) :: boolean()
   def supports_input_log?(_opts), do: true

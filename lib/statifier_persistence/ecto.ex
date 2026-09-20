@@ -29,6 +29,13 @@ if Code.ensure_loaded?(Ecto) do
     are stored verbatim as strings and are never touched by the
     configured key scheme - ADR-0002 decision 1.
 
+    The chart schema also carries `retired_at` and `retired_by`, the two
+    tombstone columns V07 adds (ADR-0012 decision 6). Both are `nil` on
+    every chart that has not been retired, which is every chart until a
+    host asks for one to be; a row carrying a `retired_at` has had its
+    `identity_blob` and `chart_blob` nulled, and both chart doors answer
+    for it with the retired arm rather than with its bytes.
+
     The execution schema also carries `metadata`, the optional opaque map of
     host identities ADR-0006 grants, as a `jsonb` column (V02 of the
     migrations helper). It holds identities only, never personal data:
@@ -77,11 +84,19 @@ if Code.ensure_loaded?(Ecto) do
     ]
 
     # The storage contract's field set is the column list (ADR-0003
-    # decision 3); the migrations helper's V01 DDL mirrors these exactly.
+    # decision 3); the migrations helper's DDL mirrors these exactly -
+    # V01 for every column but the charts table's two tombstone fields,
+    # which V07 adds (ADR-0012 decision 6).
     # Blob columns are typed :binary here; schema_ast/3 substitutes the
     # configured :blob_type for any column in @blob_columns.
     @fields %{
-      charts: [content_hash: :string, identity_blob: :binary, chart_blob: :binary],
+      charts: [
+        content_hash: :string,
+        identity_blob: :binary,
+        chart_blob: :binary,
+        retired_at: :utc_datetime_usec,
+        retired_by: :string
+      ],
       positions: [
         session_id: :string,
         content_hash: :string,

@@ -328,3 +328,52 @@ than walking the list itself, so the refusal rules above hold at the one
 place, for that door and for any later caller. That the walk is public is the
 decision: a host may ask what its own sources say about a hash without asking
 for a retirement.
+
+## Note (2026-09-19, sp-brx): retirement needs a store whose chart blobs are nullable, and a source that could not answer refuses without counts
+
+Pure addition: nothing above is edited, and this record is read at the date
+its sections were decided.
+
+**The Consequences sentence "Migration V07 carries five changes" is
+unconditional; two of those five are not.** V07's two
+`modify(..., null: true)` calls, on `charts.identity_blob` and
+`charts.chart_blob`, are guarded to Postgres, because `ecto_sqlite3` raises
+`ArgumentError` from `modify/3` rather than emitting an `ALTER COLUMN` SQLite
+does not have, and dropping the constraint otherwise means rebuilding the
+table and copying every row into the copy - which this package's DDL has
+never done to a host's data
+(`lib/statifier_persistence/ecto/migrations/v07.ex`, `up/1` and its
+"Adapters other than Postgres" section, read at `ab67d62`). So on a backend
+that is not Postgres the two blob columns keep the `null: false` V01 gave
+them, and decision 6's nulling cannot execute there.
+
+What follows for decision 5's entry, and it is the point of this Note:
+**retirement requires a store whose chart blobs are nullable, and a store
+where they are not is refused at open rather than allowed to reach a
+constraint violation.** The refusal names the backend limit, because "this
+store cannot carry a tombstone" and "this package malfunctioned" read the
+same way out of a database error and are not the same fact - the same
+distinction decision 4 draws between a source that could not answer and a
+source that answered zero. A store is asked, not a backend: a host that
+altered the two columns itself, in a migration of its own, has a store that
+can be retired against, and the answer follows the columns rather than the
+adapter module. Nothing else in this record is affected - the drained query,
+the pin counting and both chart doors behave identically on every backend.
+
+**A refusal caused by a source that could not answer carries no counts, and
+it is not the pinned arm.** Decision 5 says a refusal "carries all of the
+counts"; decision 4 says a source that raises "stops with the failing module
+named"; the pin-source walk this record's sp-34l Note makes public halts at
+the first failure and collects nothing after it. The three cannot all hold,
+and this Note says which gives way: decision 5's sentence is about a refusal
+that knows all of the counts, which a stopped walk does not. So the two
+refusals are two arms. A pin refusal carries every count. A source-failure
+refusal carries the failing module and its reason, and no count map at all.
+
+Reporting the counts the walk did reach would be friendlier, and that is
+exactly the hazard: those counts are not all of them, they would arrive in
+the shape that elsewhere means all of them, and a host reading a partial
+count as complete is the one mistake decision 4 exists to prevent. An
+incomplete count is not a smaller answer to the same question; it is an
+answer to a different one. Making the two arms structurally different is
+what keeps a host from having to know the difference.

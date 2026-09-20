@@ -50,7 +50,7 @@ if Code.ensure_loaded?(Ecto) do
 
     @behaviour StatifierPersistence.Storage.Adapter
 
-    import Ecto.Query, only: [from: 2]
+    import Ecto.Query, only: [from: 2, subquery: 1]
 
     alias Ecto.Adapters.SQL.Sandbox
     alias Ecto.Changeset
@@ -107,10 +107,31 @@ if Code.ensure_loaded?(Ecto) do
     Stores `chart_record`, idempotent on its `content_hash`: an insert
     with `on_conflict: :nothing` against the unique index, so a repeated
     save of the same hash neither duplicates the row nor rewrites it.
+
+    A tombstoned hash is refused with
+    `{:error, {:chart_retired, info}}` and not revived (ADR-0012
+    decision 6). The read of the tombstone and the insert are one
+    transaction, so the refusal is not a check a concurrent retirement
+    can slip past; the transaction joins a caller's own when there is
+    one, which is what keeps the README's "Writing inside a caller's
+    transaction" contract intact.
     """
     @impl Adapter
     @spec save_chart(Adapter.opts(), Adapter.chart_record()) :: :ok | {:error, Adapter.error()}
     def save_chart(opts, chart_record) do
+      {:ok, answer} =
+        repo(opts).transaction(fn ->
+          case retired_info(opts, chart_record.content_hash) do
+            nil -> insert_chart(opts, chart_record)
+            info -> {:error, {:chart_retired, info}}
+          end
+        end)
+
+      answer
+    end
+
+    @spec insert_chart(Adapter.opts(), Adapter.chart_record()) :: :ok
+    defp insert_chart(opts, chart_record) do
       {:ok, _row} =
         repo(opts).insert(struct(chart_schema(opts), chart_record),
           on_conflict: :nothing,
@@ -122,6 +143,11 @@ if Code.ensure_loaded?(Ecto) do
 
     @doc """
     Fetches the chart stored under `content_hash`, or `:chart_not_found`.
+
+    A tombstoned hash answers `{:error, {:chart_retired, info}}` instead,
+    carrying who retired it and when (ADR-0012 decision 6): the row is
+    still there and its blobs are `nil`, and a record with `nil` blobs is
+    not a chart this adapter holds.
     """
     @impl Adapter
     @spec fetch_chart(Adapter.opts(), Adapter.content_hash()) ::
@@ -131,6 +157,9 @@ if Code.ensure_loaded?(Ecto) do
         nil ->
           {:error, :chart_not_found}
 
+        %{retired_at: retired_at} = row when not is_nil(retired_at) ->
+          {:error, {:chart_retired, %{retired_at: retired_at, retired_by: row.retired_by}}}
+
         row ->
           {:ok,
            %{
@@ -139,6 +168,20 @@ if Code.ensure_loaded?(Ecto) do
              chart_blob: row.chart_blob
            }}
       end
+    end
+
+    # The tombstone on one hash, or nil for a hash that has none - which
+    # includes a hash with no row at all, because "no row" is
+    # `:chart_not_found`'s answer to give and not this function's.
+    @spec retired_info(Adapter.opts(), Adapter.content_hash()) :: Adapter.retired_info() | nil
+    defp retired_info(opts, content_hash) do
+      repo(opts).one(
+        from(c in chart_schema(opts),
+          where: c.content_hash == ^content_hash,
+          where: not is_nil(c.retired_at),
+          select: %{retired_at: c.retired_at, retired_by: c.retired_by}
+        )
+      )
     end
 
     @doc """
@@ -558,6 +601,299 @@ if Code.ensure_loaded?(Ecto) do
       else
         0
       end
+    end
+
+    @doc """
+    Lists the ids of the `:active` executions on `content_hash` (the
+    optional
+    `c:StatifierPersistence.Storage.Adapter.list_active_execution_ids_by_content_hash/2`,
+    ADR-0012 decision 4).
+
+    One column, one arm, under the same V07 index on
+    `executions(content_hash)` the grouped count uses: the ids are what
+    a pin source is handed as its context, and nothing else about those
+    executions is read.
+    """
+    @impl Adapter
+    @spec list_active_execution_ids_by_content_hash(Adapter.opts(), Adapter.content_hash()) ::
+            {:ok, [Adapter.execution_id()]} | {:error, Adapter.error()}
+    def list_active_execution_ids_by_content_hash(opts, content_hash) do
+      {:ok,
+       repo(opts).all(
+         from(r in execution_schema(opts),
+           where: r.content_hash == ^content_hash,
+           where: r.status == ^encode_status(:active),
+           select: r.execution_id
+         )
+       )}
+    end
+
+    @doc """
+    Declares whether the store this adapter is pointed at can be
+    tombstoned (the optional
+    `c:StatifierPersistence.Storage.Adapter.supports_chart_retirement?/1`,
+    ADR-0012 decision 6).
+
+    It asks the store, not the backend. The retirement writes `NULL`
+    into `identity_blob` and `chart_blob` and writes `retired_at` and
+    `retired_by`, so what has to be true is that those four columns are
+    there and the two blob columns are nullable - which is exactly what
+    migration V07 arranges, and which V07 can only arrange on Postgres,
+    because `ecto_sqlite3` raises from the `modify/3` that drops a
+    `NOT NULL`.
+
+    Asking the catalog rather than the adapter module keeps the answer
+    true for the host V07's moduledoc sends elsewhere: one that altered
+    the two columns itself, in a migration of its own on a backend that
+    is not Postgres, has a store that can be retired against and this
+    predicate says so. One query, on a call a host makes once per
+    retirement.
+    """
+    @impl Adapter
+    @spec supports_chart_retirement?(Adapter.opts()) :: boolean()
+    def supports_chart_retirement?(opts) do
+      schema = chart_schema(opts)
+
+      tombstone_columns_ready?(
+        repo(opts),
+        schema.__schema__(:prefix),
+        schema.__schema__(:source)
+      )
+    end
+
+    # Four columns have to be in place: the two tombstone columns at
+    # all, and the two blob columns nullable. Counting the ones that
+    # qualify and comparing against four answers all four questions in
+    # one round trip, and answers `false` for a table that is not there
+    # rather than raising about the wrong thing - V07's own `down/1`
+    # probe takes the same posture.
+    @spec tombstone_columns_ready?(Ecto.Repo.t(), String.t() | nil, String.t()) :: boolean()
+    defp tombstone_columns_ready?(repo, prefix, charts) do
+      sql =
+        if repo.__adapter__() == Ecto.Adapters.Postgres do
+          "SELECT count(*) FROM information_schema.columns " <>
+            "WHERE table_schema = #{schema_expression(prefix)} AND table_name = $1 " <>
+            "AND (column_name IN ('retired_at', 'retired_by') " <>
+            "OR (column_name IN ('identity_blob', 'chart_blob') AND is_nullable = 'YES'))"
+        else
+          "SELECT count(*) FROM pragma_table_info(?1) " <>
+            "WHERE (name IN ('retired_at', 'retired_by') " <>
+            "OR (name IN ('identity_blob', 'chart_blob') AND \"notnull\" = 0))"
+        end
+
+      %{rows: [[qualifying]]} = repo.query!(sql, [charts])
+
+      qualifying == 4
+    end
+
+    @spec schema_expression(String.t() | nil) :: String.t()
+    defp schema_expression(nil), do: "current_schema()"
+    defp schema_expression(prefix), do: "'#{String.replace(prefix, "'", "''")}'"
+
+    @doc """
+    Retires the chart on `content_hash`: the counts and the tombstone in
+    one transaction (the optional
+    `c:StatifierPersistence.Storage.Adapter.retire_chart/3`, ADR-0012
+    decisions 5 and 6).
+
+    The transaction is what the callback's contract asks for, and one
+    thing inside it is worth naming, because it is what closes the race
+    the record cares about. The tombstone is not an update the counts
+    authorise; it is a single conditional `UPDATE` that re-asserts every
+    one of them in its own `WHERE` - no `:active` execution row on the
+    hash, no position row on it, no durable-child pin naming it, and the
+    row not already retired. The counts taken above it are what a
+    refusal reports; the `UPDATE` is what decides. So there is no
+    interval between the count and the write for an execution to be
+    created in: an execution visible when the statement runs is in its
+    `NOT EXISTS`, and one committed after it is after the tombstone. A
+    statement that matches no row is read back as the refusal it is -
+    the counts are taken again and reported, or the retired arm is
+    answered if a concurrent retirement won.
+
+    This transaction joins a caller's own when there is one, and it
+    takes no per-execution lock: the two contracts the README's
+    "Writing inside a caller's transaction" and "Delivering while a
+    step is in flight" sections state are untouched by it.
+
+    No row: `:chart_not_found`. Already retired: the retired arm,
+    never a second tombstone.
+    """
+    @impl Adapter
+    @spec retire_chart(Adapter.opts(), Adapter.content_hash(), Adapter.retirement()) ::
+            {:ok, Adapter.retired_info()} | {:error, Adapter.error()}
+    def retire_chart(opts, content_hash, retirement) do
+      # No `rollback/1` anywhere below: every refusal writes nothing, so
+      # there is nothing to undo, and rolling back here would abort a
+      # caller's own transaction over an answer that changed no row.
+      {:ok, answer} =
+        repo(opts).transaction(fn -> tombstone(opts, content_hash, retirement) end)
+
+      answer
+    end
+
+    @spec tombstone(Adapter.opts(), Adapter.content_hash(), Adapter.retirement()) ::
+            {:ok, Adapter.retired_info()} | {:error, Adapter.error()}
+    defp tombstone(opts, content_hash, retirement) do
+      # Only the miss is decided here. An already-retired row is left to
+      # the conditional UPDATE's own `retired_at IS NULL` clause and to
+      # `written/4`, which reads the tombstone back: one guard, in the
+      # statement that writes, rather than a pre-check the statement
+      # then repeats.
+      if is_nil(repo(opts).get_by(chart_schema(opts), content_hash: content_hash)) do
+        {:error, :chart_not_found}
+      else
+        counted(opts, content_hash, retirement)
+      end
+    end
+
+    @spec counted(Adapter.opts(), Adapter.content_hash(), Adapter.retirement()) ::
+            {:ok, Adapter.retired_info()} | {:error, Adapter.error()}
+    defp counted(opts, content_hash, retirement) do
+      # This package's own three pin kinds are guarded inside the
+      # conditional UPDATE and are deliberately not re-checked here: one
+      # guard, in the statement that writes, is what makes "between the
+      # count and the write" an interval with nothing in it. A source's
+      # counts cannot be guarded there - they were taken outside the
+      # database and arrive as data - so they are the one kind checked
+      # before the statement runs.
+      if Adapter.sources_pinned?(retirement.sources) do
+        {:error, {:pinned, pin_counts(opts, content_hash, retirement.sources)}}
+      else
+        written(opts, content_hash, retirement, write_tombstone(opts, content_hash, retirement))
+      end
+    end
+
+    # A conditional UPDATE that matched nothing means something arrived
+    # between the counts above and the statement itself: either a pin,
+    # or another retirement. Which one it was is read back rather than
+    # guessed, so a host is never told "pinned" with a map of zeros.
+    @spec written(
+            Adapter.opts(),
+            Adapter.content_hash(),
+            Adapter.retirement(),
+            non_neg_integer()
+          ) :: {:ok, Adapter.retired_info()} | {:error, Adapter.error()}
+    defp written(_opts, _content_hash, retirement, 1) do
+      {:ok, %{retired_at: retirement.retired_at, retired_by: retirement.retired_by}}
+    end
+
+    defp written(opts, content_hash, retirement, 0) do
+      case retired_info(opts, content_hash) do
+        nil -> {:error, {:pinned, pin_counts(opts, content_hash, retirement.sources)}}
+        info -> {:error, {:chart_retired, info}}
+      end
+    end
+
+    @spec pin_counts(Adapter.opts(), Adapter.content_hash(), Adapter.source_counts()) ::
+            Adapter.pin_counts()
+    defp pin_counts(opts, content_hash, sources) do
+      {:ok, counts} = count_executions_by_content_hash(opts, content_hash)
+
+      Adapter.pin_counts(counts, position_count(opts, content_hash), sources)
+    end
+
+    # ADR-0012 decision 1's fourth pin kind, and the one the drained
+    # query's map deliberately leaves out: a position row is a saved
+    # session waiting to be resumed through `load_position/3`, which
+    # needs the bytes this retirement would null. Positions are keyed by
+    # session, so a hash with no execution row at all can still hold
+    # them.
+    @spec position_count(Adapter.opts(), Adapter.content_hash()) :: non_neg_integer()
+    defp position_count(opts, content_hash) do
+      repo(opts).one(
+        from(p in position_schema(opts),
+          where: p.content_hash == ^content_hash,
+          select: count(p.session_id)
+        )
+      )
+    end
+
+    @spec write_tombstone(Adapter.opts(), Adapter.content_hash(), Adapter.retirement()) ::
+            non_neg_integer()
+    defp write_tombstone(opts, content_hash, retirement) do
+      {written, _rows} =
+        repo(opts).update_all(unpinned_chart(opts, content_hash),
+          set: [
+            retired_at: retirement.retired_at,
+            retired_by: retirement.retired_by,
+            identity_blob: nil,
+            chart_blob: nil,
+            updated_at: retirement.retired_at
+          ]
+        )
+
+      written
+    end
+
+    # The blocking set of ADR-0012 decision 1, as the WHERE of the one
+    # statement that writes the tombstone. The three terminal execution
+    # arms are absent on purpose: they are reported in a refusal and
+    # never cause one.
+    @spec unpinned_chart(Adapter.opts(), Adapter.content_hash()) :: Ecto.Query.t()
+    defp unpinned_chart(opts, content_hash) do
+      executions = execution_schema(opts)
+      positions = position_schema(opts)
+
+      active =
+        from(r in executions,
+          where: r.content_hash == ^content_hash,
+          where: r.status == ^encode_status(:active),
+          select: 1
+        )
+
+      held =
+        from(p in positions,
+          where: p.content_hash == ^content_hash,
+          select: 1
+        )
+
+      unpinned =
+        from(c in chart_schema(opts),
+          where: c.content_hash == ^content_hash,
+          where: is_nil(c.retired_at),
+          where: not exists(subquery(active)),
+          where: not exists(subquery(held))
+        )
+
+      without_child_pins(unpinned, opts, content_hash)
+    end
+
+    # An adapter holding no metadata holds no linkage pin, so there is
+    # no clause to add - the same reading `children_pin_count/2` takes
+    # of the same fact.
+    @spec without_child_pins(Ecto.Query.t(), Adapter.opts(), Adapter.content_hash()) ::
+            Ecto.Query.t()
+    defp without_child_pins(query, opts, content_hash) do
+      if supports_metadata?(opts) do
+        pins = child_pins(opts, content_hash)
+
+        from(_c in query, where: not exists(subquery(pins)))
+      else
+        query
+      end
+    end
+
+    @spec child_pins(Adapter.opts(), Adapter.content_hash()) :: Ecto.Query.t()
+    defp child_pins(opts, content_hash) do
+      reserved = Linkage.reserved_key()
+      pin_match = %{reserved => %{"content_hash" => content_hash}}
+      executions = execution_schema(opts)
+
+      from(child in executions,
+        join: parent in ^executions,
+        on:
+          parent.execution_id ==
+            fragment(
+              "?->?->>?",
+              child.metadata,
+              type(^reserved, :string),
+              type(^"parent_execution_id", :string)
+            ),
+        where: fragment("? @> ?", child.metadata, type(^pin_match, :map)),
+        where: parent.status == ^encode_status(:active),
+        select: 1
+      )
     end
 
     @doc """

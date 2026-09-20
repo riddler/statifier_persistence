@@ -49,7 +49,16 @@ defmodule StatifierPersistence.EctoTest do
     # sabotage: @fields executions list drops :failure -> red (executions field list mismatch)
     test "schemas carry the engine identity columns verbatim" do
       assert Default.Chart.__schema__(:fields) ==
-               [:id, :content_hash, :identity_blob, :chart_blob, :inserted_at, :updated_at]
+               [
+                 :id,
+                 :content_hash,
+                 :identity_blob,
+                 :chart_blob,
+                 :retired_at,
+                 :retired_by,
+                 :inserted_at,
+                 :updated_at
+               ]
 
       assert Default.Position.__schema__(:fields) ==
                [

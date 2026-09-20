@@ -151,6 +151,74 @@ defmodule StatifierPersistence.Storage.Adapter do
         }
 
   @typedoc """
+  One pin source's own named counts, under the module that answered them
+  (ADR-0012 decision 4). The names are the source's to choose; this layer
+  neither reads nor interprets them, and only asks whether any is
+  non-zero.
+  """
+  @type source_counts :: %{module() => %{atom() => non_neg_integer()}}
+
+  @typedoc """
+  What a retirement is refused with (ADR-0012 decision 5): every count
+  the refusal knows, this package's own under its own name and each
+  source's under that source's module name.
+
+  Deliberately not `t:execution_counts/0`. The drained query answers
+  "what is running on this chart" and keeps decision 3's five flat keys;
+  this answers "what would I break", so the four execution arms are
+  nested under `:executions` to keep them distinguishable from the two
+  counts that are not execution rows at all, and `:positions` and
+  `:sources` are here and are not in the drained query's map.
+
+  Only four of these block a retirement: `executions.active`,
+  `children`, `positions`, and any non-zero count under any source. The
+  three terminal execution arms are reported and never block, because a
+  terminal row never goes away and counting one would make a chart
+  permanently unretirable the first time anything on it finished
+  (ADR-0012 decision 1).
+  """
+  @type pin_counts :: %{
+          executions: %{
+            active: non_neg_integer(),
+            completed: non_neg_integer(),
+            failed: non_neg_integer(),
+            cancelled: non_neg_integer()
+          },
+          children: non_neg_integer(),
+          positions: non_neg_integer(),
+          sources: source_counts()
+        }
+
+  @typedoc """
+  The tombstone a retirement writes and the counts it is decided against
+  (ADR-0012 decisions 5 and 6): when it was retired, the opaque host
+  string recording who asked, and the pin-source counts the layer above
+  this one already collected.
+
+  `sources` is carried into the callback rather than checked above it
+  because decision 6 makes the count and the write one atomic unit: a
+  source count that blocks has to block inside the same unit that would
+  otherwise write, so that no path writes a tombstone the counts did not
+  clear.
+  """
+  @type retirement :: %{
+          retired_at: DateTime.t(),
+          retired_by: String.t(),
+          sources: source_counts()
+        }
+
+  @typedoc """
+  A tombstoned chart's own record of its retirement (ADR-0012 decision
+  6): when, and the opaque host string saying who. It is what the
+  retired arm of both chart doors carries, so a host reads its own
+  decision back rather than a miss.
+  """
+  @type retired_info :: %{
+          retired_at: DateTime.t(),
+          retired_by: String.t() | nil
+        }
+
+  @typedoc """
   An execution's input log ordinal: dense, zero-based, per execution, assigned by the
   adapter. Not a position blob (ADR-0010 decision 3).
   """
@@ -216,7 +284,18 @@ defmodule StatifierPersistence.Storage.Adapter do
   `outcome_blob` or cannot answer the indexed status projection, which
   together are what a fan-out's settlement needs;
   `:content_hash_query_unsupported` is the same refusal for an adapter that
-  cannot answer the drained query of ADR-0012 decision 3; `:input_log_full` is
+  cannot answer the drained query of ADR-0012 decision 3;
+  `:chart_retirement_unsupported` is the refusal-at-open arm for a store
+  whose `charts` row cannot be tombstoned at all - the two blob columns
+  are still `NOT NULL`, or the two tombstone columns are absent - which
+  is a backend limit named as a refusal rather than surfaced as a
+  database error; `{:pinned, counts}` is what a retirement answers when
+  anything in ADR-0012 decision 1's blocking set is non-zero, carrying
+  every count it knows; `{:chart_retired, info}` is what both chart doors
+  answer on a tombstoned hash, carrying who retired it and when
+  (ADR-0012 decision 6) - never `:chart_not_found`, which keeps its
+  meaning exactly: never stored, as against stored and retired;
+  `:input_log_full` is
   `append_input/3`'s refusal past the host-declared cap, after the log has
   closed itself with a marker (ADR-0010 decision 6) - it refuses the
   append and never the step; `{:adapter, term()}` carries a backend
@@ -232,6 +311,9 @@ defmodule StatifierPersistence.Storage.Adapter do
           | :execution_outcome_unsupported
           | :execution_states_unsupported
           | :content_hash_query_unsupported
+          | :chart_retirement_unsupported
+          | {:pinned, pin_counts()}
+          | {:chart_retired, retired_info()}
           | :input_log_full
           | {:adapter, term()}
 
@@ -255,6 +337,13 @@ defmodule StatifierPersistence.Storage.Adapter do
   returns for it. This callback does not inspect, decode, or validate
   `chart_blob`'s bytes and performs no identity check - both are outside
   this layer's job (ADR-0003 decisions 1 and 2).
+
+  A hash this adapter has tombstoned is the one save it refuses:
+  `{:error, {:chart_retired, info}}`, and the row is not revived
+  (ADR-0012 decision 6). A content-addressed save looks identical to an
+  ordinary idempotent re-save, so it is the one call with no way to
+  express "yes, I mean to undo that"; the retired arm is answered first,
+  before the idempotency above applies.
   """
   @callback save_chart(opts(), StatifierPersistence.Storage.Adapter.chart_record()) ::
               :ok | {:error, error()}
@@ -266,6 +355,12 @@ defmodule StatifierPersistence.Storage.Adapter do
   hash - never `{:ok, nil}` and never a raise. The returned `chart_blob` and
   `identity_blob` must be byte-identical to what `save_chart/2` was given;
   an adapter must not normalize, truncate, or re-encode them.
+
+  A tombstoned hash answers `{:error, {:chart_retired, info}}` instead,
+  carrying who retired it and when (ADR-0012 decision 6), and the arm is
+  answered first: the byte-identity obligation above is a statement
+  about a chart the adapter holds, and a tombstoned row is not one. No
+  call returns a chart record whose blobs are `nil`.
   """
   @callback fetch_chart(opts(), content_hash()) ::
               {:ok, StatifierPersistence.Storage.Adapter.chart_record()} | {:error, error()}
@@ -509,6 +604,11 @@ defmodule StatifierPersistence.Storage.Adapter do
   cannot be retired against a store that cannot count what is running on
   it, so the retirement refuses at open rather than acting on a count it
   could not take.
+
+  The predicate covers `c:list_active_execution_ids_by_content_hash/2`
+  as well: both read the same column under the same index, and a second
+  opt-in for the second of them would be a capability a host has no way
+  to want separately.
   """
   @callback supports_content_hash_query?(opts()) :: boolean()
 
@@ -542,6 +642,88 @@ defmodule StatifierPersistence.Storage.Adapter do
   @callback count_executions_by_content_hash(opts(), content_hash()) ::
               {:ok, StatifierPersistence.Storage.Adapter.execution_counts()}
               | {:error, error()}
+
+  @doc """
+  Optional listing of the ids of the `:active` executions on one content
+  hash (ADR-0012 decision 4).
+
+  Part of `supports_content_hash_query?/1`'s capability rather than a
+  capability of its own: an adapter that declares that predicate exports
+  this too, and one that does not export the predicate is not asked.
+
+  It exists because decision 4 hands a pin source `:execution_ids` in its
+  context - a source such as a timer queue knows executions and never
+  knows hashes, so the ids are what let it answer without learning this
+  package's key - and decision 3's query answers counts, which a source
+  cannot be handed. Only the `:active` arm is listed: a terminal
+  execution pins nothing (decision 1), and a source asked about one
+  would be asked about work that cannot resume.
+
+  A hash this store has never seen answers `{:ok, []}`, not a not-found
+  arm, for the reason the counts answer zeros.
+  """
+  @callback list_active_execution_ids_by_content_hash(opts(), content_hash()) ::
+              {:ok, [execution_id()]} | {:error, error()}
+
+  @doc """
+  Optional declaration that this adapter can tombstone a chart row
+  (ADR-0012 decision 6).
+
+  The same opt-in-by-export shape `supports_metadata?/1` uses, with one
+  difference worth stating: this predicate is about the **store**, not
+  about the adapter's code. Migration V07 makes `charts.identity_blob`
+  and `charts.chart_blob` nullable and adds `retired_at` and
+  `retired_by`, and V07's two `modify/3` calls are guarded to Postgres
+  because `ecto_sqlite3` raises from `modify/3`. So the very same
+  adapter module answers `true` against one store and `false` against
+  another, and an adapter answers by asking the store it is pointed at
+  rather than by asking what backend it is.
+
+  Nulling a chart's bytes against a store whose blob columns are still
+  `NOT NULL` is a constraint violation, and a database error is the
+  wrong answer to "may I retire this": it reads as a defect rather than
+  as the backend limit it is. So
+  `StatifierPersistence.Storage.retire_chart/3` refuses at open with
+  `{:error, :chart_retirement_unsupported}` for such a store, before it
+  counts anything and before it opens a transaction.
+  """
+  @callback supports_chart_retirement?(opts()) :: boolean()
+
+  @doc """
+  Optional retirement of one chart (ADR-0012 decisions 5 and 6): the
+  counts and the tombstone, as one atomic unit.
+
+  The unit is the contract. An adapter takes decision 1's counts and
+  writes the tombstone so that nothing can appear between the two - one
+  transaction on a database, one atomic state transition on an adapter
+  without one - because a pin that appears between a count and a write
+  is exactly the chart this record exists to keep from being retired out
+  from under.
+
+  Inside that unit, in this order:
+
+  - no row on the hash: `{:error, :chart_not_found}`, and nothing is
+    written;
+  - a row already carrying a `retired_at`: `{:error, {:chart_retired,
+    info}}`, and nothing is written - a second retirement is the retired
+    arm, never a second tombstone;
+  - otherwise the counts: the `:active` execution rows on the hash, the
+    durable-child linkage pins naming it whose parent is `:active`, and
+    the position rows on it, folded with the `sources` counts
+    `retirement` carries into a `t:pin_counts/0`. If any of the four
+    blocking counts is non-zero, `{:error, {:pinned, counts}}` and
+    **nothing is written**; the three terminal arms are reported in that
+    map and never cause it.
+  - all four clear: `retired_at` and `retired_by` are set from
+    `retirement`, `identity_blob` and `chart_blob` are nulled, and the
+    row and its content hash are kept. `{:ok, info}`.
+
+  The row and the hash surviving is the point: the removal is the bytes,
+  and what is left is a hash that answers for its own retirement on both
+  chart doors.
+  """
+  @callback retire_chart(opts(), content_hash(), retirement()) ::
+              {:ok, retired_info()} | {:error, error()}
 
   @doc """
   Optional declaration that this adapter keeps an execution's input log
@@ -611,7 +793,64 @@ defmodule StatifierPersistence.Storage.Adapter do
                       list_execution_states_by_metadata: 2,
                       supports_content_hash_query?: 1,
                       count_executions_by_content_hash: 2,
+                      list_active_execution_ids_by_content_hash: 2,
+                      supports_chart_retirement?: 1,
+                      retire_chart: 3,
                       supports_input_log?: 1,
                       append_input: 3,
                       list_inputs: 2
+
+  @doc """
+  Folds one hash's counts into the shape a refusal carries
+  (`t:pin_counts/0`).
+
+  Every adapter that implements `c:retire_chart/3` builds its refusal
+  through this function, so the two adapters cannot drift into two
+  shapes for one answer. `counts` is the drained query's own five-key
+  map, which both adapters already compute.
+  """
+  @spec pin_counts(execution_counts(), non_neg_integer(), source_counts()) :: pin_counts()
+  def pin_counts(%{} = counts, positions, %{} = sources) when is_integer(positions) do
+    %{
+      executions: Map.take(counts, [:active, :completed, :failed, :cancelled]),
+      children: counts.children,
+      positions: positions,
+      sources: sources
+    }
+  end
+
+  @doc """
+  Whether `counts` holds a pin that refuses a retirement: ADR-0012
+  decision 1's blocking set, and nothing else.
+
+  A non-zero `executions.active`, a non-zero `children`, a non-zero
+  `positions`, or a non-zero count under any source. The three terminal
+  execution arms are reported in `counts` and are not read here, which
+  is what keeps a chart retirable after everything on it has finished.
+
+  One function so that the blocking set is one list rather than one per
+  adapter: an adapter answers what it counted, and this answers whether
+  what it counted is a pin.
+  """
+  @spec pinned?(pin_counts()) :: boolean()
+  def pinned?(%{executions: %{active: active}, children: children, positions: positions} = counts) do
+    active > 0 or children > 0 or positions > 0 or sources_pinned?(counts.sources)
+  end
+
+  @doc """
+  Whether any registered source reported a non-zero count: the one
+  member of ADR-0012 decision 1's blocking set that is not a row in
+  this package's tables.
+
+  Separate from `pinned?/1` because an adapter whose atomic unit is a
+  database statement guards its own three pin kinds inside that
+  statement and cannot guard this one there - a source's counts were
+  taken outside the database and arrive as data.
+  """
+  @spec sources_pinned?(source_counts()) :: boolean()
+  def sources_pinned?(sources) do
+    Enum.any?(sources, fn {_source, named} ->
+      Enum.any?(named, fn {_name, count} -> count > 0 end)
+    end)
+  end
 end
