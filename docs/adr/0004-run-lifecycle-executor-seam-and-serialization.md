@@ -316,3 +316,66 @@ The lifecycle entry points this record names are `StatifierPersistence.Execution
 `create/4`, `step/5`, `fail/4` and `cancel/3` at `71537dc`; the per-`run`
 exclusion of decision 5 is the per-execution exclusion, reached through
 `c:StatifierPersistence.Serialization.with_execution/3`.
+
+## Note (2026-09-20, sp-l4p): the executor seam under host-registered send types
+
+Pure addition: nothing above is edited. Decision 3's order and decision 4's
+seam are unchanged by `send_types:`; this note says where a registered
+type's effects arrive and who owns the half the core does not.
+
+**A registered type adds no effect and no seam.** The split the persist
+tail makes is still `:done` and `:budget_exhausted` to the lifecycle and
+everything else to the executor, so `{:send, _}`, `{:send_delayed, _}` and
+`{:cancel, _}` of a registered type reach a host exactly where every other
+executable effect does - `lifecycle_effect?/1`,
+`lib/statifier_persistence/executions.ex:1773`, read at `85d863b`. Decision
+3's reopener, "an effect the lifecycle must consume beyond the two named",
+is not triggered.
+
+**The host builds the event.** For a send of a registered type the event
+is `Statifier.Send.Event.build/3`'s, called by the host: statifier 2.6.0's
+moduledoc for that function states that a host driving
+`Statifier.Interpreter` with no session reads the effect off the core and
+calls it itself, where `Statifier.Session` would have called it and handed
+the result to a processor. Nothing in this package calls it, and nothing
+in this package should: the event is the host's to address.
+
+**The host routes a send by `type` and a cancel by its own record.**
+`%Statifier.Effect.Send{}` and `%Statifier.Effect.SendDelayed{}` each carry
+the registered `type` string, so a host dispatches on it and treats
+`target` as the processor's opaque route string.
+`%Statifier.Effect.Cancel{}` carries no type - its enforced keys are
+`send_id` and the counters (statifier 2.6.0, `Statifier.Effect.Cancel`) -
+so a cancel names a delayed send and not a processor.
+
+**Holds are Session-only state, so a process-less host owns cancel
+routing.** The record of which processor was handed which delayed send id
+is the live session's, and statifier 2.6.0's `Statifier.Send.Processor`
+moduledoc states it is not part of the persisted position, so a resumed
+session holds nothing. This package resumes from a position on every step
+by decision 3's order and therefore never holds it either. A host that
+issues a delayed send of a registered type keeps its own record, keyed by
+the send id and its session scope, and a `%Statifier.Effect.Cancel{}`
+crossing this seam is routed from that record.
+
+**`Statifier.Send.Processor` is not this package's seam.** Its `deliver/3`
+and `cancel/2` are `Statifier.Session.Effects.plan/2`'s planning callbacks
+(statifier 2.6.0, that behaviour's moduledoc), and there is no session
+here. What a module registered in a `send_types:` map is read for on this
+path is the optional `ioprocessors_entry/1` alone.
+
+**The snapshot is stamped, never stored.** `send_types` joins `routes` and
+`invoke_types` as a field the position blob drops (st-ADR-0064), so the
+tripwire decision 3 names now matches all three fields before the
+re-stamp - `lib/statifier_persistence/executions.ex:1146`, read at
+`85d863b` - and `step/5` re-stamps it from `send_types:` on the next line
+(`:1152`, same read). On a create there is no stored position to stamp, so
+the snapshot travels inside `initialize:`
+(`StatifierPersistence.Driver.initialize_opt/3`,
+`lib/statifier_persistence/driver.ex:493`, read at `85d863b`). That routing
+is required rather than symmetric: `Statifier.MachineState.new/2` is the
+only writer of the `_ioprocessors` entry a registered type gets, and
+`Statifier.MachineState.put_send_types/2` does not rewrite it (statifier
+2.6.0, that module's moduledoc), so a create that stamped outside
+`initialize:` would leave `_ioprocessors` short of the host's own types for
+the life of the execution.
