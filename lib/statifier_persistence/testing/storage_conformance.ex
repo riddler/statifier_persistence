@@ -114,6 +114,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           ] do
       alias Statifier.Machine
       alias Statifier.Machine.Identity
+      alias StatifierPersistence.Execution.Linkage
       alias StatifierPersistence.Storage
       alias StatifierPersistence.Testing.Charts
 
@@ -770,6 +771,215 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                      store.opts,
                      "sha256:counts-moving"
                    )
+        end
+
+        # -- the children key: ADR-0012 decision 1's child clause --------
+        #
+        # Generated only where the adapter under test also holds
+        # metadata: a linkage lives under the reserved metadata key, so
+        # an adapter that drops metadata holds no pin to count and the
+        # zero it answers is already covered by the unknown-hash case
+        # above.
+
+        if Code.ensure_loaded?(conformance_adapter) and
+             function_exported?(conformance_adapter, :supports_metadata?, 1) do
+          # sabotage: in the adapter under test's children count, drop
+          # the parent-status predicate (the `where: parent.status ==
+          # ^encode_status(:active)` clause on the Ecto side, the
+          # `match?(%{status: :active}, ...)` on the in-memory side, the
+          # latter left as a bare key lookup) -> red, the last assertion
+          # below read children: 2 after the parent had completed, where
+          # it asserts 0. Verified red over the two conformance suites
+          # and `StatifierPersistence.ExecutionsTest` in one run ("130
+          # tests, 3 failures"): this case on both adapters, plus that
+          # module's own entry-level case. Reverted from the copies.
+          test "adapter: a parent's two durable children count on the child chart, and stop counting when the parent leaves the active arm",
+               %{store: store} do
+            parent =
+              insert_counted_execution(
+                store,
+                "counts-pin-parent",
+                "sha256:counts-pin-parent",
+                :active
+              )
+
+            for index <- 0..1 do
+              insert_pinned_child(
+                store,
+                "counts-pin-parent/call/#{index}",
+                "sha256:counts-pin-child",
+                index,
+                :active
+              )
+            end
+
+            assert {:ok, %{children: 2}} =
+                     @conformance_adapter.count_executions_by_content_hash(
+                       store.opts,
+                       "sha256:counts-pin-child"
+                     )
+
+            # The parent's own chart carries no pin: pins name the
+            # child's chart, and the parent is nobody's child here.
+            assert {:ok, %{children: 0}} =
+                     @conformance_adapter.count_executions_by_content_hash(
+                       store.opts,
+                       "sha256:counts-pin-parent"
+                     )
+
+            assert :ok =
+                     @conformance_adapter.update_execution(
+                       store.opts,
+                       %{parent | status: :completed}
+                     )
+
+            assert {:ok, %{children: 0}} =
+                     @conformance_adapter.count_executions_by_content_hash(
+                       store.opts,
+                       "sha256:counts-pin-child"
+                     )
+          end
+
+          # The inversion this case exists to catch: it is the PARENT's
+          # arm that decides, never the child's. A terminal child of an
+          # active parent is still reachable (ADR-0012 decision 1), so
+          # it counts, and an implementation reading the child's own
+          # status instead reads 0 here.
+          #
+          # sabotage: in the adapter under test's children count, test
+          # the CHILD's status for :active rather than the parent's
+          # (`where: child.status == ^encode_status(:active)` on the
+          # Ecto side, `execution.status == :active` on the in-memory
+          # side) -> red, this case read 0 where it asserts children ==
+          # 1. Verified red over the two conformance suites and
+          # `StatifierPersistence.ExecutionsTest` in one run ("130
+          # tests, 6 failures"): this case on both adapters, and four
+          # more the inversion also breaks. Reverted from the copies.
+          test "adapter: a terminal child of an active parent still counts", %{store: store} do
+            insert_counted_execution(
+              store,
+              "counts-terminal-parent",
+              "sha256:counts-terminal-parent",
+              :active
+            )
+
+            insert_pinned_child(
+              store,
+              "counts-terminal-parent/call/0",
+              "sha256:counts-terminal-child",
+              0,
+              :completed
+            )
+
+            assert {:ok, counts} =
+                     @conformance_adapter.count_executions_by_content_hash(
+                       store.opts,
+                       "sha256:counts-terminal-child"
+                     )
+
+            assert counts.children == 1
+            assert counts.completed == 1
+            assert counts.active == 0
+          end
+
+          # sabotage: in the adapter under test's children count, take
+          # the hash from the child row's own content_hash instead of
+          # from its linkage pin (`where: child.content_hash ==
+          # ^content_hash` in place of the containment clause on the
+          # Ecto side, a `when execution.content_hash == content_hash`
+          # guard in place of the pinned match on the in-memory side) ->
+          # red, the pinned hash came back children: 0 and the row's own
+          # hash came back children: 1, the exact reverse of what this
+          # case asserts. Verified red over the two conformance suites
+          # and `StatifierPersistence.ExecutionsTest` in one run ("130
+          # tests, 2 failures"): this case on both adapters and nothing
+          # else. Reverted from the copies.
+          test "adapter: the pin decides, not the child row's own content hash", %{store: store} do
+            insert_counted_execution(
+              store,
+              "counts-pinned-parent",
+              "sha256:counts-pinned-parent",
+              :active
+            )
+
+            record = %{
+              execution_id: "counts-pinned-parent/call/0",
+              status: :active,
+              content_hash: "sha256:counts-row-hash",
+              identity_blob: <<1, 2, 3>>,
+              position_blob: <<7, 8, 9>>,
+              failure: nil,
+              metadata:
+                Linkage.to_metadata(
+                  Linkage.new("counts-pinned-parent", "call", 0, "sha256:counts-pin-hash")
+                ),
+              outcome_blob: nil
+            }
+
+            assert :ok = @conformance_adapter.insert_execution(store.opts, record)
+
+            assert {:ok, %{children: 1}} =
+                     @conformance_adapter.count_executions_by_content_hash(
+                       store.opts,
+                       "sha256:counts-pin-hash"
+                     )
+
+            assert {:ok, %{children: 0, active: 1}} =
+                     @conformance_adapter.count_executions_by_content_hash(
+                       store.opts,
+                       "sha256:counts-row-hash"
+                     )
+          end
+
+          # sabotage: in the adapter under test's children count, drop
+          # the join to the parent row entirely and count every matching
+          # pin (the `join:`/`on:` and the status clause on the Ecto
+          # side, the parent lookup replaced by `true` on the in-memory
+          # side) -> red, this case read children: 1 where it asserts 0.
+          # Verified red over the two conformance suites and
+          # `StatifierPersistence.ExecutionsTest` in one run ("130
+          # tests, 5 failures"): this case on both adapters, and three
+          # more that turn on a parent leaving the active arm. Reverted
+          # from the copies.
+          test "adapter: a pin whose parent execution is not stored counts nothing", %{
+            store: store
+          } do
+            insert_pinned_child(
+              store,
+              "counts-orphan-parent/call/0",
+              "sha256:counts-orphan-child",
+              0,
+              :active
+            )
+
+            assert {:ok, %{children: 0}} =
+                     @conformance_adapter.count_executions_by_content_hash(
+                       store.opts,
+                       "sha256:counts-orphan-child"
+                     )
+          end
+
+          defp insert_pinned_child(store, execution_id, content_hash, child_index, status) do
+            [parent_execution_id, invoke_id, _index] = String.split(execution_id, "/")
+
+            linkage =
+              Linkage.new(parent_execution_id, invoke_id, child_index, content_hash)
+
+            record = %{
+              execution_id: execution_id,
+              status: status,
+              content_hash: content_hash,
+              identity_blob: <<1, 2, 3>>,
+              position_blob: <<7, 8, 9>>,
+              failure: nil,
+              metadata: Linkage.to_metadata(linkage),
+              outcome_blob: nil
+            }
+
+            assert :ok = @conformance_adapter.insert_execution(store.opts, record)
+
+            record
+          end
         end
 
         defp insert_counted_execution(store, execution_id, content_hash, status) do

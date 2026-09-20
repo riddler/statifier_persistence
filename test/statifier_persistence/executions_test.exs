@@ -1200,6 +1200,53 @@ defmodule StatifierPersistence.ExecutionsTest do
       assert {:ok, %{active: 0, cancelled: 1}} = Executions.executions_on(store, hash_of(machine))
     end
 
+    # The public entry over the child clause of ADR-0012 decision 1: the
+    # count follows the PARENT's arm, so cancelling the parent drops the
+    # child's pin even though the child row itself never moves.
+    #
+    # sabotage: in the in-memory adapter's children count, read the
+    # child's own status rather than its parent's
+    # (`execution.status == :active` in place of the parent lookup) ->
+    # red here: the pin survived the parent's cancellation and the last
+    # assertion read children: 1 where it asserts 0. Verified red over
+    # this module and the two conformance suites in one run ("130 tests,
+    # 6 failures"): this case, plus five adapter-level cases the same
+    # inversion breaks. Reverted from a copy.
+    test "a durable child's pin counts on its own chart while its parent is active",
+         %{store: store} do
+      {_source, parent_chart} = Charts.chart_a()
+      {_source_b, child_chart} = Charts.chart_b()
+
+      assert {:ok, _execution, _ms} =
+               Executions.create(store, "counts-pin-parent", parent_chart,
+                 executor: RecordingExecutor
+               )
+
+      child_state = MachineState.new(child_chart, session_id: "sess-counts-pin")
+
+      linkage = Linkage.new("counts-pin-parent", "call", 0, hash_of(child_chart))
+
+      assert :ok =
+               Storage.insert_execution(
+                 store,
+                 Linkage.child_execution_id("counts-pin-parent", "call", 0),
+                 child_state,
+                 :active,
+                 metadata: Linkage.to_metadata(linkage)
+               )
+
+      assert {:ok, %{children: 1, active: 1}} =
+               Executions.executions_on(store, hash_of(child_chart))
+
+      assert {:ok, %{children: 0}} = Executions.executions_on(store, hash_of(parent_chart))
+
+      assert {:ok, %Execution{status: :cancelled}} =
+               Executions.cancel(store, "counts-pin-parent", executor: RecordingExecutor)
+
+      assert {:ok, %{children: 0, active: 1}} =
+               Executions.executions_on(store, hash_of(child_chart))
+    end
+
     # An adapter that does not export the callback is declined at open by
     # the facade, and the entry surfaces that answer unchanged.
     #
