@@ -34,6 +34,11 @@ defmodule StatifierPersistence.Storage.InMemory do
   # How long a contended lock_execution/3 sleeps between acquisition attempts.
   @lock_spin_sleep_ms 5
 
+  # Every key of the drained query's answer at zero: what an unknown hash
+  # answers, and what a hash with executions on it is folded onto, so a
+  # missing arm is impossible rather than merely unlikely.
+  @zero_counts %{active: 0, completed: 0, failed: 0, cancelled: 0, children: 0}
+
   @doc """
   Starts the backing Agent and returns `opts` with `:pid` merged in - the
   handle every other callback expects as its first argument.
@@ -290,6 +295,44 @@ defmodule StatifierPersistence.Storage.InMemory do
     raise ArgumentError,
           "list_executions_by_metadata/2 takes a non-empty map with string keys, " <>
             "got: #{inspect(other)}"
+  end
+
+  @doc """
+  Declares the drained query (the optional
+  `c:StatifierPersistence.Storage.Adapter.supports_content_hash_query?/1`):
+  this adapter holds every execution record in one map and can count them.
+  """
+  @impl Adapter
+  @spec supports_content_hash_query?(Adapter.opts()) :: boolean()
+  def supports_content_hash_query?(_opts), do: true
+
+  @doc """
+  Counts the executions on `content_hash` per stored arm (the optional
+  `c:StatifierPersistence.Storage.Adapter.count_executions_by_content_hash/2`,
+  ADR-0012 decision 3).
+
+  Every key is present for every hash, so an unknown one answers zeros.
+  A fold over the execution map is what this adapter has - an Agent holds
+  no index - so this is the reference implementation of the *contract*,
+  not of the aggregate the contract exists for; the Ecto adapter is where
+  the count is a grouped count.
+
+  `children` is `0` here; sp-yig builds the linkage-pin count.
+  """
+  @impl Adapter
+  @spec count_executions_by_content_hash(Adapter.opts(), Adapter.content_hash()) ::
+          {:ok, Adapter.execution_counts()} | {:error, Adapter.error()}
+  def count_executions_by_content_hash(opts, content_hash) do
+    counts =
+      pid(opts)
+      |> Agent.get(& &1.executions)
+      |> Map.values()
+      |> Enum.filter(&(&1.content_hash == content_hash))
+      |> Enum.reduce(@zero_counts, fn execution, counts ->
+        Map.update!(counts, execution.status, &(&1 + 1))
+      end)
+
+    {:ok, counts}
   end
 
   @doc """

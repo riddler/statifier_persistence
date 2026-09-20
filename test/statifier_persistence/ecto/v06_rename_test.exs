@@ -68,8 +68,10 @@ defmodule StatifierPersistence.Ecto.V06RenameTest do
 
     @opts [repo: StatifierPersistence.TestRepo, key: :uxid, table_prefix: "kx_v06u_"]
 
+    # Capped in both directions: the up stops at V06, so the down starts
+    # there rather than at whatever the newest version has become.
     def up, do: Migrations.up(@opts ++ [from: 6, version: 6])
-    def down, do: Migrations.down(@opts)
+    def down, do: Migrations.down(@opts ++ [from: 6])
   end
 
   # The same upgraded install, one Postgres schema over: `prefix:` names a
@@ -198,7 +200,7 @@ defmodule StatifierPersistence.Ecto.V06RenameTest do
       refute relation_exists?(@fresh_prefix <> "runs")
       refute relation_exists?(@fresh_prefix <> "runs_run_id_index")
 
-      assert Migrations.expected_version() == 6
+      assert Migrations.expected_version() == 7
     end
 
     # The rollback this package advertises - `down(for: Host)`, and

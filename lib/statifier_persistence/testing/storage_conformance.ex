@@ -678,6 +678,143 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         end
       end
 
+      # -- Adapter level: the optional drained query (ADR-0012) ----------
+      #
+      # Generated only when the adapter under test exports the optional
+      # count_executions_by_content_hash/2 - the same opt-in-by-export
+      # shape every optional callback above uses.
+      #
+      # Untagged, like the input log and unlike the two listings: the
+      # query is an equality predicate and a GROUP BY, which needs no
+      # Postgres-only feature, so these cases are the contract on every
+      # backend.
+
+      if Code.ensure_loaded?(conformance_adapter) and
+           function_exported?(conformance_adapter, :count_executions_by_content_hash, 2) do
+        # sabotage: in the adapter under test's
+        # count_executions_by_content_hash/2, fold onto %{} instead of
+        # onto @zero_counts, so the answer carries only the arms the
+        # store holds rows in -> red, this case's unknown hash came back
+        # as %{} rather than the five zero keys. Verified red on both
+        # conformance suites, four cases red in each ("35 tests, 4
+        # failures" over InMemory, "40 tests, 4 failures" over Ecto).
+        # Reverted from a copy.
+        test "adapter: an unknown content hash answers every key at zero", %{store: store} do
+          assert {:ok, counts} =
+                   @conformance_adapter.count_executions_by_content_hash(
+                     store.opts,
+                     "sha256:conformance-never-stored"
+                   )
+
+          assert counts == %{active: 0, completed: 0, failed: 0, cancelled: 0, children: 0}
+        end
+
+        # sabotage: in the adapter under test's
+        # count_executions_by_content_hash/2, drop the content_hash
+        # predicate (the Enum.filter/2 on the in-memory side, the where:
+        # clause on the Ecto side) -> red, the first chart counted the
+        # second chart's executions too. Verified red on both conformance
+        # suites, this case alone in each ("35 tests, 1 failure" over
+        # InMemory, "40 tests, 1 failure" over Ecto). Reverted from a
+        # copy.
+        test "adapter: two charts' executions never count into each other", %{store: store} do
+          insert_counted_execution(store, "counts-a-active", "sha256:counts-a", :active)
+          insert_counted_execution(store, "counts-b-active", "sha256:counts-b", :active)
+          insert_counted_execution(store, "counts-b-done", "sha256:counts-b", :completed)
+
+          assert {:ok, a} =
+                   @conformance_adapter.count_executions_by_content_hash(
+                     store.opts,
+                     "sha256:counts-a"
+                   )
+
+          assert {:ok, b} =
+                   @conformance_adapter.count_executions_by_content_hash(
+                     store.opts,
+                     "sha256:counts-b"
+                   )
+
+          assert a.active == 1
+          assert a.completed == 0
+          assert b.active == 1
+          assert b.completed == 1
+        end
+
+        # sabotage: in the in-memory adapter's
+        # count_executions_by_content_hash/2, count every matched row into
+        # :active rather than into its own status
+        # (Map.update!(counts, :active, ...)) -> red, the second
+        # assertion below still read active: 1, completed: 0 after the
+        # execution had completed. Verified red on the InMemory
+        # conformance suite, two cases red ("35 tests, 2 failures" - this
+        # one and the two-charts case). Reverted from a copy.
+        test "adapter: an execution that completes moves from the active key to the completed one",
+             %{store: store} do
+          inserted =
+            insert_counted_execution(store, "counts-moving", "sha256:counts-moving", :active)
+
+          assert {:ok, %{active: 1, completed: 0}} =
+                   @conformance_adapter.count_executions_by_content_hash(
+                     store.opts,
+                     "sha256:counts-moving"
+                   )
+
+          assert :ok =
+                   @conformance_adapter.update_execution(
+                     store.opts,
+                     %{inserted | status: :completed}
+                   )
+
+          assert {:ok, %{active: 0, completed: 1}} =
+                   @conformance_adapter.count_executions_by_content_hash(
+                     store.opts,
+                     "sha256:counts-moving"
+                   )
+        end
+
+        defp insert_counted_execution(store, execution_id, content_hash, status) do
+          record = %{
+            execution_id: execution_id,
+            status: status,
+            content_hash: content_hash,
+            identity_blob: <<1, 2, 3>>,
+            position_blob: <<7, 8, 9>>,
+            failure: nil,
+            metadata: %{},
+            outcome_blob: nil
+          }
+
+          assert :ok = @conformance_adapter.insert_execution(store.opts, record)
+
+          record
+        end
+      end
+
+      # The capability itself is asserted for every adapter, supporting or
+      # not: an adapter that cannot answer the drained query stays
+      # conformant by declining it, and the facade refuses at open without
+      # calling it (ADR-0012 decision 3). Silently answering a partial map
+      # is what neither answer allows.
+
+      # sabotage: in
+      # StatifierPersistence.Storage.count_executions_by_content_hash/2,
+      # call the adapter unconditionally instead of consulting
+      # content_hash_query_supported?/1 -> red on the declining arm: the
+      # call raised UndefinedFunctionError instead of returning
+      # {:error, :content_hash_query_unsupported}. Verified red on the
+      # NoLockAdapter conformance suite, this case alone ("27 tests, 1
+      # failure"). Reverted from a copy.
+      test "facade: the drained query either counts or is declined at open", %{store: store} do
+        answer = Storage.count_executions_by_content_hash(store, "sha256:conformance-capability")
+
+        if Storage.content_hash_query_supported?(store) do
+          assert {:ok, counts} = answer
+          assert counts == %{active: 0, completed: 0, failed: 0, cancelled: 0, children: 0}
+        else
+          assert {:error, :content_hash_query_unsupported} = answer
+        end
+      end
+
       # -- Adapter level: the optional execution metadata (ADR-0006) -----------
       #
       # A conformant adapter either round-trips a non-empty metadata map or

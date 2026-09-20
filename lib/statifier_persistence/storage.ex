@@ -73,6 +73,7 @@ defmodule StatifierPersistence.Storage do
           | :child_listing_unsupported
           | :execution_outcome_unsupported
           | :execution_states_unsupported
+          | :content_hash_query_unsupported
           | {:unsupported_format_version, term()}
           | {:identity_mismatch, Identity.t(), Identity.t() | nil}
 
@@ -555,6 +556,63 @@ defmodule StatifierPersistence.Storage do
       end)
     else
       {:error, :child_listing_unsupported}
+    end
+  end
+
+  @doc """
+  Whether `store`'s adapter can answer the drained query (ADR-0012
+  decision 3).
+
+  True when the adapter exports the optional
+  `c:StatifierPersistence.Storage.Adapter.supports_content_hash_query?/1`
+  and it answers `true` - the same shape `metadata_supported?/1` checks.
+
+  Public because a host asks it before it plans a retirement: a chart is
+  retired against the counts this query takes, so a store that cannot
+  answer it cannot retire a chart, and that is worth learning before the
+  sweep rather than at the refusal.
+  """
+  @spec content_hash_query_supported?(store :: t()) :: boolean()
+  def content_hash_query_supported?(%__MODULE__{} = store) do
+    Code.ensure_loaded?(store.adapter) and
+      function_exported?(store.adapter, :supports_content_hash_query?, 1) and
+      adapter_call(store.adapter, :supports_content_hash_query?, [], fn ->
+        store.adapter.supports_content_hash_query?(store.opts)
+      end) == true
+  end
+
+  @doc """
+  Counts the executions on `content_hash`, per stored arm (ADR-0012
+  decision 3).
+
+  Delegates to the adapter's optional
+  `c:StatifierPersistence.Storage.Adapter.count_executions_by_content_hash/2`
+  when `content_hash_query_supported?/1` is true; returns
+  `{:error, :content_hash_query_unsupported}` otherwise, without calling
+  the adapter at all.
+
+  A hash this store has never seen answers zeros, not a not-found arm:
+  the question is how much traffic a chart carries, and none is a
+  number.
+
+  The answer is not a retirability test (ADR-0012's consequences say so
+  in full): it reports the three terminal arms, which never block a
+  retirement, and it leaves out the position rows and the host's own pin
+  sources, which do.
+  """
+  @spec count_executions_by_content_hash(store :: t(), content_hash :: Adapter.content_hash()) ::
+          {:ok, Adapter.execution_counts()} | {:error, error()}
+  def count_executions_by_content_hash(%__MODULE__{} = store, content_hash)
+      when is_binary(content_hash) do
+    if content_hash_query_supported?(store) do
+      adapter_call(
+        store.adapter,
+        :count_executions_by_content_hash,
+        [content_hash: content_hash],
+        fn -> store.adapter.count_executions_by_content_hash(store.opts, content_hash) end
+      )
+    else
+      {:error, :content_hash_query_unsupported}
     end
   end
 

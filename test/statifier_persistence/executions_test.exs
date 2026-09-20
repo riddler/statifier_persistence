@@ -282,6 +282,12 @@ defmodule StatifierPersistence.ExecutionsTest do
 
   # The active leaf states as sorted string ids - the readable form of a
   # configuration assertion.
+  # The key a chart is stored and counted under, taken from the machine
+  # the way every writer in this package takes it.
+  defp hash_of(%Machine{} = machine) do
+    Machine.identity(machine).content_hash
+  end
+
   defp active_ids(%MachineState{} = machine_state) do
     machine_state
     |> MachineState.active_leaf_states()
@@ -1133,6 +1139,81 @@ defmodule StatifierPersistence.ExecutionsTest do
     # sabotage: cancel_tail/2's fetch error arm rewrites the reason -> red
     test "on a missing execution returns {:error, :execution_not_found}", %{store: store} do
       assert {:error, :execution_not_found} = Executions.cancel(store, "absent")
+    end
+  end
+
+  describe "executions_on/2 (ADR-0012 decision 3)" do
+    # sabotage: in StatifierPersistence.Executions.executions_on/2,
+    # answer Storage.count_executions_by_content_hash(store, "") instead
+    # of the given hash -> red on the two cases below that have rows to
+    # count ("46 tests, 2 failures"); this case stays green, because an
+    # empty hash answers zeros too, which is exactly why it is not the
+    # only case here. Verified red, reverted from a copy.
+    test "a hash this store has never seen answers every key at zero", %{store: store} do
+      assert {:ok, counts} = Executions.executions_on(store, "sha256:never-stored")
+
+      assert counts == %{active: 0, completed: 0, failed: 0, cancelled: 0, children: 0}
+    end
+
+    # sabotage: in the in-memory adapter's
+    # count_executions_by_content_hash/2, drop the Enum.filter/2 on
+    # content_hash -> red here, this case alone in this module ("46
+    # tests, 1 failure"): chart A's count carried chart B's execution
+    # too. Verified red, reverted from a copy.
+    test "two charts' executions never count into each other", %{store: store} do
+      {_source, chart_a} = Charts.chart_a()
+      {_source_b, chart_b} = Charts.chart_b()
+
+      assert {:ok, _execution, _ms} =
+               Executions.create(store, "counts-on-a", chart_a, executor: RecordingExecutor)
+
+      assert {:ok, _execution, _ms} =
+               Executions.create(store, "counts-on-b", chart_b, executor: RecordingExecutor)
+
+      assert {:ok, a} = Executions.executions_on(store, hash_of(chart_a))
+      assert {:ok, b} = Executions.executions_on(store, hash_of(chart_b))
+
+      assert a.active == 1
+      assert b.active == 1
+    end
+
+    # The keys are a fold over what is stored, so a lifecycle move is a
+    # move between them - which is what makes the answer a reading of
+    # what is running rather than of what was ever created.
+    #
+    # sabotage: in the in-memory adapter's
+    # count_executions_by_content_hash/2, count every matched row into
+    # :active -> red here, this case alone in this module ("46 tests, 1
+    # failure"): the cancelled execution was still counted as active.
+    # Verified red, reverted from a copy.
+    test "a cancelled execution leaves the active key for the cancelled one", %{store: store} do
+      {_source, machine} = Charts.chart_a()
+
+      assert {:ok, _execution, _ms} =
+               Executions.create(store, "counts-cancelling", machine, executor: RecordingExecutor)
+
+      assert {:ok, %{active: 1, cancelled: 0}} = Executions.executions_on(store, hash_of(machine))
+
+      assert {:ok, %Execution{status: :cancelled}} =
+               Executions.cancel(store, "counts-cancelling", executor: RecordingExecutor)
+
+      assert {:ok, %{active: 0, cancelled: 1}} = Executions.executions_on(store, hash_of(machine))
+    end
+
+    # An adapter that does not export the callback is declined at open by
+    # the facade, and the entry surfaces that answer unchanged.
+    #
+    # sabotage: in
+    # StatifierPersistence.Storage.count_executions_by_content_hash/2,
+    # call the adapter without consulting the predicate -> red here with
+    # an UndefinedFunctionError instead of the refusal, this case alone
+    # in this module ("46 tests, 1 failure"). Verified red, reverted
+    # from a copy.
+    test "an adapter that declines the query is refused at open" do
+      {:ok, store} = Storage.new(NoLockAdapter, [])
+
+      assert {:error, :content_hash_query_unsupported} =
+               Executions.executions_on(store, "sha256:anything")
     end
   end
 

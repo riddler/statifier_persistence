@@ -63,6 +63,11 @@ if Code.ensure_loaded?(Ecto) do
     # bytes, and an unknown stored status fails loudly on a clause.
     @statuses [active: "active", completed: "completed", failed: "failed", cancelled: "cancelled"]
 
+    # Every key of the drained query's answer at zero. The grouped count
+    # returns only the arms the table holds rows in, so the answer is
+    # folded onto this rather than built from what came back.
+    @zero_counts %{active: 0, completed: 0, failed: 0, cancelled: 0, children: 0}
+
     @doc """
     Resolves the `:persistence` host module into the handle every other
     callback takes: the host's repo, its three generated schema modules,
@@ -455,6 +460,58 @@ if Code.ensure_loaded?(Ecto) do
       else
         {:error, :metadata_unsupported}
       end
+    end
+
+    @doc """
+    Declares the drained query (the optional
+    `c:StatifierPersistence.Storage.Adapter.supports_content_hash_query?/1`):
+    this adapter counts the executions table's rows on one
+    `content_hash`, on every Ecto backend.
+
+    Unconditional, unlike `supports_metadata?/1`. The query is an equality
+    predicate on a `text` column with a `GROUP BY` over another, which
+    every backend this package tests parses, and V07 indexes the column
+    it filters on for every backend too.
+    """
+    @impl Adapter
+    @spec supports_content_hash_query?(Adapter.opts()) :: boolean()
+    def supports_content_hash_query?(_opts), do: true
+
+    @doc """
+    Counts the executions on `content_hash` per stored arm (the optional
+    `c:StatifierPersistence.Storage.Adapter.count_executions_by_content_hash/2`,
+    ADR-0012 decision 3).
+
+    One grouped count against the V07 index on
+    `executions(content_hash)`: no row is loaded and no blob is read,
+    which is the point of a callback that answers "what is running on
+    this chart" rather than "which executions are".
+
+    The database answers only the arms it holds rows in, so the grouped
+    result is folded onto a map of zeros: every key is present for every
+    hash, and a hash this store has never seen answers zeros.
+
+    `children` is `0` here; sp-yig builds the linkage-pin count.
+    """
+    @impl Adapter
+    @spec count_executions_by_content_hash(Adapter.opts(), Adapter.content_hash()) ::
+            {:ok, Adapter.execution_counts()} | {:error, Adapter.error()}
+    def count_executions_by_content_hash(opts, content_hash) do
+      grouped =
+        repo(opts).all(
+          from(r in execution_schema(opts),
+            where: r.content_hash == ^content_hash,
+            group_by: r.status,
+            select: {r.status, count(r.execution_id)}
+          )
+        )
+
+      counts =
+        Enum.reduce(grouped, @zero_counts, fn {status, count}, counts ->
+          Map.put(counts, decode_status(status), count)
+        end)
+
+      {:ok, counts}
     end
 
     @doc """
