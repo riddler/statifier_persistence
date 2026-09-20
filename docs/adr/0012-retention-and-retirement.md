@@ -425,10 +425,11 @@ its sections were decided.
 **Creating an execution on a tombstoned hash is refused, with decision 6's
 own retired arm.** Decision 6 changes the two chart doors and decision 1
 names what pins a chart; neither reaches the door that makes a new
-execution. `StatifierPersistence.Executions.create/4` derives its content
-hash from the machine it is handed and writes an execution row carrying that
-row's own identity and position blobs, so nothing in it reads a `charts` row
-(`lib/statifier_persistence/executions.ex`, `create/4`, read at `f6f0b1f`).
+execution. `StatifierPersistence.Executions.create/4` derived its content
+hash from the machine it was handed and wrote an execution row carrying that
+row's own identity and position blobs, and nothing in it read a `charts` row
+- the state this Note changes (`lib/statifier_persistence/executions.ex`,
+`create/4`, read at `49f7ffc`).
 A retirement refuses for as long as anything in decision 1's blocking set
 pins the hash, so every execution that existed before a successful
 retirement is safe; an execution created after one is not, and it is
@@ -447,9 +448,11 @@ host-facing entry calls it (`lib/statifier_persistence/storage.ex`,
 `check_chart_retired/2`, read at `f6f0b1f`). A hash this store never held is
 not a retired hash: `:chart_not_found` keeps the meaning decision 6 gave it,
 and a host may still create an execution on a machine whose chart it never
-saved. The refusal costs each create one read of the chart row, and that
-cost is part of the decision rather than an accident of it: an execution
-that can never be resumed is the more expensive of the two.
+saved. The refusal costs each create one read of the chart row; as
+implemented that read transfers the chart's stored bytes, so its cost
+scales with the size of the chart until a narrower read exists. That cost
+is part of the decision rather than an accident of it: an execution that
+can never be resumed is the more expensive of the two.
 
 **Retirement is permanent through this package's public surface, and that is
 now decided rather than left open.** Decision 8 leaves it undecided whether
