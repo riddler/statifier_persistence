@@ -533,10 +533,11 @@ defmodule StatifierPersistence.Storage.Adapter do
   exporting `supports_content_hash_query?/1` rather than answering a
   partial map.
 
-  `children` is the one key this package's own two adapters do not yet
-  count: both answer `0` for it while sp-yig builds the linkage-pin
-  count. The key is in the shape from the start so its arrival is a
-  change of value and not a change of shape.
+  `children` is not a count of rows on the hash. It counts the durable
+  children pinned to it: a linkage pin under this package's reserved
+  metadata key naming `content_hash`, whose parent execution is in the
+  `:active` arm, whatever arm the child itself is in (ADR-0012 decision
+  1). An adapter that holds no metadata holds no pin and counts zero.
   """
   @callback count_executions_by_content_hash(opts(), content_hash()) ::
               {:ok, StatifierPersistence.Storage.Adapter.execution_counts()}

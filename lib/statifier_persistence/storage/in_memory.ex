@@ -317,22 +317,60 @@ defmodule StatifierPersistence.Storage.InMemory do
   not of the aggregate the contract exists for; the Ecto adapter is where
   the count is a grouped count.
 
-  `children` is `0` here; sp-yig builds the linkage-pin count.
+  `children` counts the durable-child linkage pins naming `content_hash`
+  whose parent execution is `:active` (ADR-0012 decision 1): a second
+  pass over the same map, reading each execution's reserved metadata key
+  through `StatifierPersistence.Execution.Linkage.from_metadata/1` and
+  looking its parent up by execution id.
   """
   @impl Adapter
   @spec count_executions_by_content_hash(Adapter.opts(), Adapter.content_hash()) ::
           {:ok, Adapter.execution_counts()} | {:error, Adapter.error()}
   def count_executions_by_content_hash(opts, content_hash) do
+    executions = Agent.get(pid(opts), & &1.executions)
+
     counts =
-      pid(opts)
-      |> Agent.get(& &1.executions)
+      executions
       |> Map.values()
       |> Enum.filter(&(&1.content_hash == content_hash))
       |> Enum.reduce(@zero_counts, fn execution, counts ->
         Map.update!(counts, execution.status, &(&1 + 1))
       end)
 
-    {:ok, counts}
+    {:ok, %{counts | children: children_pin_count(executions, content_hash)}}
+  end
+
+  # ADR-0012 decision 1's child clause: a linkage pin naming this hash
+  # counts for as long as the execution its `parent_execution_id` names
+  # is `:active`, whatever arm the child itself is in. The pin is read
+  # off the child's metadata rather than taken from the child's
+  # `content_hash` field, because the pin is the value the decision
+  # names and the two are written by separate calls.
+  @spec children_pin_count(
+          %{Adapter.execution_id() => Adapter.execution_record()},
+          Adapter.content_hash()
+        ) :: non_neg_integer()
+  defp children_pin_count(executions, content_hash) do
+    executions
+    |> Map.values()
+    |> Enum.count(&pinned_child?(&1, executions, content_hash))
+  end
+
+  @spec pinned_child?(
+          Adapter.execution_record(),
+          %{Adapter.execution_id() => Adapter.execution_record()},
+          Adapter.content_hash()
+        ) :: boolean()
+  defp pinned_child?(execution, executions, content_hash) do
+    metadata = Map.get(execution, :metadata) || %{}
+
+    case Linkage.from_metadata(metadata) do
+      {:ok, %Linkage{content_hash: ^content_hash, parent_execution_id: parent_execution_id}} ->
+        match?(%{status: :active}, Map.get(executions, parent_execution_id))
+
+      _no_pin_on_this_hash ->
+        false
+    end
   end
 
   @doc """

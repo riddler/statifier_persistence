@@ -732,11 +732,10 @@ defmodule StatifierPersistence.Executions do
   `completed`, `failed` and `cancelled` itself.
 
   `children` counts the durable-child linkage pins on the hash whose
-  parent is `:active`. **Both adapters in this package answer `0` for it
-  today**: the key is in the shape from the start so its arrival is a
-  change of value and not a change of shape, and sp-yig is the bead that
-  fills it. Read the other four as authoritative and `children` as not
-  yet answered.
+  parent execution is `:active`, whatever arm the child itself is in
+  (ADR-0012 decision 1). It counts pins and not rows, so it is a
+  different population from the four arm keys and can be non-zero for a
+  hash carrying no execution row of its own.
 
   `{:error, :content_hash_query_unsupported}` for a store whose adapter
   does not answer the query, without calling the adapter at all.

@@ -491,7 +491,19 @@ if Code.ensure_loaded?(Ecto) do
     result is folded onto a map of zeros: every key is present for every
     hash, and a hash this store has never seen answers zeros.
 
-    `children` is `0` here; sp-yig builds the linkage-pin count.
+    `children` is a second query, because it counts something the
+    executions table's own `content_hash` column does not hold: the
+    linkage pins naming this hash whose parent execution is `:active`
+    (ADR-0012 decision 1). It is a containment probe on the reserved
+    metadata key joined to the parent row by `execution_id`, and
+    containment is the operator V03's `jsonb_path_ops` GIN index on
+    `metadata` serves.
+
+    Off Postgres it is `0`, and that is the count rather than a gap:
+    `supports_metadata?/1` is false there, so
+    `StatifierPersistence.Storage.insert_execution/5` refuses a
+    `metadata:` option at open and no linkage reaches the table through
+    a supported door.
     """
     @impl Adapter
     @spec count_executions_by_content_hash(Adapter.opts(), Adapter.content_hash()) ::
@@ -511,7 +523,41 @@ if Code.ensure_loaded?(Ecto) do
           Map.put(counts, decode_status(status), count)
         end)
 
-      {:ok, counts}
+      {:ok, %{counts | children: children_pin_count(opts, content_hash)}}
+    end
+
+    # ADR-0012 decision 1's child clause, as decision 3's `children` key:
+    # a linkage pin naming this hash counts for as long as the execution
+    # its `parent_execution_id` names is `:active`, whatever arm the
+    # child itself is in. The child row is matched on its pin rather
+    # than on its `content_hash` column, because the pin is the value
+    # the decision names and the two are written by separate calls.
+    @spec children_pin_count(Adapter.opts(), Adapter.content_hash()) :: non_neg_integer()
+    defp children_pin_count(opts, content_hash) do
+      if supports_metadata?(opts) do
+        reserved = Linkage.reserved_key()
+        pin_match = %{reserved => %{"content_hash" => content_hash}}
+        executions = execution_schema(opts)
+
+        repo(opts).one(
+          from(child in executions,
+            join: parent in ^executions,
+            on:
+              parent.execution_id ==
+                fragment(
+                  "?->?->>?",
+                  child.metadata,
+                  type(^reserved, :string),
+                  type(^"parent_execution_id", :string)
+                ),
+            where: fragment("? @> ?", child.metadata, type(^pin_match, :map)),
+            where: parent.status == ^encode_status(:active),
+            select: count(child.execution_id)
+          )
+        )
+      else
+        0
+      end
     end
 
     @doc """

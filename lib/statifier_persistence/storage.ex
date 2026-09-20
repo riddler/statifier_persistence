@@ -595,6 +595,12 @@ defmodule StatifierPersistence.Storage do
   the question is how much traffic a chart carries, and none is a
   number.
 
+  The four arm keys count execution rows on the hash; `children` counts
+  the durable-child linkage pins naming it whose parent execution is
+  `:active` (ADR-0012 decision 1), which is a different population and
+  can be non-zero for a hash with no execution row of its own in any
+  arm.
+
   The answer is not a retirability test (ADR-0012's consequences say so
   in full): it reports the three terminal arms, which never block a
   retirement, and it leaves out the position rows and the host's own pin
