@@ -19,6 +19,14 @@ behaviour answer what is still using it, both chart doors answer a retired arm
 in place of a retired chart's bytes, and migration V07 adds the tombstone
 columns and the content-hash index those queries need.
 
+Upgrading: run V07 against an existing database. An install already at V06
+writes `up(for: MyApp.Persistence, from: 7)` - `from:` is inclusive, so that
+call runs V07 and nothing before it - and V07 copies no data. A host that
+reads charts gains one arm to handle: `StatifierPersistence.Storage.fetch_chart/2`
+answers `{:error, {:chart_retired, info}}` for a hash a retirement has
+tombstoned, in place of `:chart_not_found`. A host that never retires a chart
+never sees it.
+
 ### Added
 
 - `StatifierPersistence.PinSource`, a behaviour a host implements so state this package cannot see - a pending timer, an address row - can report named counts against a content hash, with `collect/3` gathering each source's counts under its module name and turning a source that raises or answers malformed into `{:error, {module, reason}}` rather than a zero.
