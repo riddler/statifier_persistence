@@ -15,6 +15,17 @@ defmodule StatifierPersistence.RetireChartTest do
 
   use ExUnit.Case, async: true
 
+  defmodule QuietExecutor do
+    @moduledoc false
+    # A StatifierPersistence.Executor that answers every effect with
+    # :ok. The charts below emit none on initialize, so it exists to
+    # satisfy the required `executor:` option and nothing else.
+    @behaviour StatifierPersistence.Executor
+
+    @impl StatifierPersistence.Executor
+    def execute(_effect, _context), do: :ok
+  end
+
   alias StatifierPersistence.{Executions, Storage}
 
   alias StatifierPersistence.Test.{
@@ -280,6 +291,69 @@ defmodule StatifierPersistence.RetireChartTest do
 
       assert value == [pending_timers: 3]
       assert {:ok, _chart} = Storage.fetch_chart(store, content_hash)
+    end
+  end
+
+  describe "a create on a retired chart" do
+    # The gap this closes: `create/4` derives its content hash from the
+    # machine it is handed and the executions table carries no chart
+    # bytes, so nothing before this read the `charts` row at all. A
+    # retirement refuses for as long as anything pins the hash, so every
+    # execution that existed before one is safe; the execution created
+    # after one is not, and it is unresumable from the moment it is
+    # durable.
+    #
+    # sabotage: in StatifierPersistence.Executions.create/4, drop the
+    # `:ok <- Storage.check_chart_retired(store, machine)` clause from
+    # the `with` -> red, the create returned {:ok, execution, state} and
+    # the execution row was readable back under its id. Reverted from a
+    # copy.
+    test "is refused with the retired arm, and no execution row is written", %{
+      store: store,
+      machine: machine,
+      content_hash: content_hash
+    } do
+      at = DateTime.from_naive!(~N[2026-09-19 18:30:00.000000], "Etc/UTC")
+
+      assert {:ok, _retired} =
+               Executions.retire_chart(store, content_hash, [],
+                 retired_by: "ops@example.test",
+                 now: at
+               )
+
+      assert {:error, {:chart_retired, info}} =
+               Executions.create(store, "execution-1", machine, executor: QuietExecutor)
+
+      assert info.retired_at == at
+      assert info.retired_by == "ops@example.test"
+
+      assert {:error, :execution_not_found} = Storage.fetch_execution(store, "execution-1")
+    end
+
+    # The other side of the same check: `:chart_not_found` keeps the
+    # meaning ADR-0012 decision 6 gave it, and a hash this store never
+    # held is not a retired one. A host may create an execution on a
+    # machine whose chart it never saved, and this check does not take
+    # that away.
+    #
+    # sabotage: in StatifierPersistence.Storage.chart_retired/2, answer
+    # `{:error, :chart_not_found}` as a refusal by forwarding every
+    # error arm instead of narrowing to the retired one -> red, the
+    # create on the unsaved chart was refused with :chart_not_found.
+    # Reverted from a copy.
+    test "a hash this store never held still creates", %{store: store} do
+      {:ok, unsaved} =
+        Statifier.compile("""
+        <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="waiting">
+            <state id="waiting">
+                <transition event="click" target="clicked"/>
+            </state>
+            <final id="clicked"/>
+        </scxml>
+        """)
+
+      assert {:ok, _execution, _machine_state} =
+               Executions.create(store, "execution-2", unsaved, executor: QuietExecutor)
     end
   end
 

@@ -187,6 +187,45 @@ defmodule StatifierPersistence.Storage do
   end
 
   @doc """
+  Answers the retired arm for `machine`'s own content hash without
+  writing anything: `:ok`, or `{:error, {:chart_retired, info}}`
+  (ADR-0012 decision 6).
+
+  The hash is derived from `Machine.identity/1`, never supplied by the
+  caller, exactly as `save_chart/3` derives it. A machine carrying no
+  identity is `:ok`: there is no hash to have retired, and the writers'
+  own `:unidentified_chart` refusal is the one that belongs to that
+  case.
+
+  Every answer other than the retired arm is `:ok`. A hash never stored
+  is not a retired hash - `:chart_not_found` keeps the meaning decision
+  6 gave it - and an adapter failure is the write's to report, not this
+  check's, which is why this function narrows to the one arm it exists
+  to see rather than forwarding whatever it read.
+
+  Public for the reason `check_metadata/2` is: a caller with work to do
+  *before* the write must not do it for a create that will be refused.
+  `StatifierPersistence.Executions.create/4` runs it ahead of
+  `Statifier.Interpreter.initialize/2`, so an execution on a retired
+  chart fires no effect on its way to the refusal.
+  """
+  @spec check_chart_retired(store :: t(), machine :: Machine.t()) :: :ok | {:error, error()}
+  def check_chart_retired(%__MODULE__{} = store, %Machine{} = machine) do
+    case Machine.identity(machine) do
+      nil -> :ok
+      identity -> chart_retired(store, identity.content_hash)
+    end
+  end
+
+  @spec chart_retired(t(), Adapter.content_hash()) :: :ok | {:error, error()}
+  defp chart_retired(store, content_hash) do
+    case fetch_chart(store, content_hash) do
+      {:error, {:chart_retired, _info}} = refusal -> refusal
+      _other -> :ok
+    end
+  end
+
+  @doc """
   Encodes `machine_state` with `Position.to_binary/1` and stores it under
   `session_id`, keyed by the content hash and identity envelope of
   `machine_state.machine`'s own `Machine.identity/1` - never a

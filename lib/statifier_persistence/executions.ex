@@ -301,6 +301,15 @@ defmodule StatifierPersistence.Executions do
   carry the stored map forward and take no `metadata:` of their own - and
   an adapter that cannot store a non-empty map refuses here, before any
   effect is executed: `{:error, :metadata_unsupported}`.
+
+  A chart a retirement has tombstoned refuses here too, in the same
+  place and for the same reason: `{:error, {:chart_retired, info}}`
+  (ADR-0012 decision 6). An execution created on a retired hash would
+  persist and then be unresumable, because the rebuild reads the chart
+  back through `StatifierPersistence.Storage.fetch_chart/2` and gets
+  the retired arm. A retirement refuses for as long as anything pins
+  the hash, so a create after one is the single way an execution comes
+  to stand on a tombstone.
   """
   @spec create(
           store :: Storage.t(),
@@ -335,7 +344,12 @@ defmodule StatifierPersistence.Executions do
     # decision 3 set for a host's own metadata.
     metadata = metadata(opts)
 
-    with :ok <- Storage.check_metadata(store, metadata: metadata) do
+    # The chart check is second because it is the expensive one: the
+    # metadata refusal is a capability the store already knows, and
+    # this one reads the `charts` row. Both are at open, ahead of
+    # `initialize/2`, for the reason above.
+    with :ok <- Storage.check_metadata(store, metadata: metadata),
+         :ok <- Storage.check_chart_retired(store, machine) do
       # Read before the advance so the `:initialize` span's `duration`
       # measures the core call alone, even though both halves are emitted
       # after it (`report_initialized/4` says why).
