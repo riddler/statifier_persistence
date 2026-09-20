@@ -377,6 +377,43 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
       assert "chart_blob" in not_null
       assert "identity_blob" in not_null
     end
+
+    # The consequence of the case above, as the answer a host gets
+    # rather than as a fact about the DDL. A retirement here would null
+    # two columns the schema still declares NOT NULL, so it refuses at
+    # open and names the backend limit; surfacing the constraint
+    # violation instead would read as a defect in this package rather
+    # than as the capability the store does not have (ADR-0012 decision
+    # 6).
+    #
+    # sabotage: in Storage.Ecto.tombstone_columns_ready?/3, answer
+    # `true` unconditionally -> red, and red the way the refusal exists
+    # to prevent: the retirement got as far as its UPDATE and the case
+    # ended on an Exqlite.Error for a NOT NULL constraint on
+    # sq_charts.identity_blob rather than on the refusal. Verified red,
+    # reverted from a copy.
+    test "a retirement refuses at open here, naming the limit rather than a constraint" do
+      {:ok, store} = Storage.new(Storage.Ecto, persistence: Host)
+      content_hash = "sha256:sqlite-retire-#{System.unique_integer([:positive])}"
+
+      assert :ok =
+               store.adapter.save_chart(store.opts, %{
+                 content_hash: content_hash,
+                 identity_blob: "identity-bytes",
+                 chart_blob: "chart-bytes"
+               })
+
+      refute Storage.chart_retirement_supported?(store)
+
+      assert {:error, :chart_retirement_unsupported} =
+               Executions.retire_chart(store, content_hash, [], retired_by: "ops@example.test")
+
+      # The drained query is unaffected: what this backend cannot do is
+      # carry a tombstone, not count.
+      assert {:ok, %{active: 0}} = Executions.executions_on(store, content_hash)
+      assert {:ok, chart} = Storage.fetch_chart(store, content_hash)
+      assert chart.chart_blob == "chart-bytes"
+    end
   end
 
   describe "V06 on an upgraded install" do

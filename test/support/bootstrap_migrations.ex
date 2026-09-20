@@ -6,14 +6,23 @@ defmodule StatifierPersistence.BootstrapMigrations do
   place - the SQL sandbox rolls each test's rows back, so only the DDL
   persists between runs.
 
-  Migrations 104, 105, 106 and 107 apply V02 (the executions `metadata`
-  column), V03 (the executions `outcome_blob` column and the `metadata` GIN
-  index), V05 (ADR-0010's input log table) and V06 (ADR-0011's rename) on
+  Migrations 104, 105, 106, 107 and 108 apply V02 (the executions
+  `metadata` column), V03 (the executions `outcome_blob` column and the
+  `metadata` GIN index), V05 (ADR-0010's input log table), V06
+  (ADR-0011's rename) and V07 (ADR-0012's `executions(content_hash)`
+  index, the two `charts` tombstone columns, and - on Postgres - the two
+  nullable chart blob columns) on
   their own with the helper's `from:`/`version:` options, because the
   migrations before each of them are already recorded as up in any database
   bootstrapped before that version existed. V04 is deliberately absent: it
   rebuilds V03's index concurrently, which needs a migration module of its
   own and changes nothing a test reads.
+
+  Migration 108 is what lets a chart be tombstoned in a test at all.
+  Without it `charts.retired_at` and `charts.retired_by` are absent here
+  and the two blob columns are still `NOT NULL`, so
+  `StatifierPersistence.Storage.retire_chart/3` would refuse at open
+  against this suite's own database.
 
   Migration 107 is what makes a developer's existing test database take the
   same upgrade a host's does: a database bootstrapped before `0.12.0` holds
@@ -34,7 +43,8 @@ defmodule StatifierPersistence.BootstrapMigrations do
     {20_260_829_000_104, __MODULE__.ExecutionMetadataColumns},
     {20_260_905_000_105, __MODULE__.ExecutionOutcomeColumns},
     {20_260_906_000_106, __MODULE__.InputLogTables},
-    {20_260_912_000_107, __MODULE__.ExecutionRenameTables}
+    {20_260_912_000_107, __MODULE__.ExecutionRenameTables},
+    {20_260_919_000_108, __MODULE__.ChartTombstoneColumns}
   ]
 
   defmodule DefaultTables do
@@ -171,6 +181,31 @@ defmodule StatifierPersistence.BootstrapMigrations do
     def down do
       for host <- [EctoHosts.Default, EctoHosts.Overridden, EctoHosts.BlobTyped] do
         Migrations.down(for: host, from: 6, version: 6)
+      end
+
+      :ok
+    end
+  end
+
+  defmodule ChartTombstoneColumns do
+    @moduledoc false
+    use Ecto.Migration
+
+    alias StatifierPersistence.Ecto.Migrations
+    alias StatifierPersistence.EctoHosts
+
+    # V07 alone, for the reason migration 104 applies V02 alone.
+    def up do
+      for host <- [EctoHosts.Default, EctoHosts.Overridden, EctoHosts.BlobTyped] do
+        Migrations.up(for: host, from: 7, version: 7)
+      end
+
+      :ok
+    end
+
+    def down do
+      for host <- [EctoHosts.Default, EctoHosts.Overridden, EctoHosts.BlobTyped] do
+        Migrations.down(for: host, from: 7, version: 7)
       end
 
       :ok

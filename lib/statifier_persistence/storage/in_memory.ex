@@ -55,27 +55,52 @@ defmodule StatifierPersistence.Storage.InMemory do
   @doc """
   Stores `chart_record` under its `content_hash`, idempotent on repeat
   writes of the same hash.
+
+  A tombstoned hash is refused with `{:error, {:chart_retired, info}}`
+  and is not revived (ADR-0012 decision 6). The read of the tombstone
+  and the write are one `Agent.get_and_update/2`, which is this
+  adapter's transaction.
   """
   @impl Adapter
   @spec save_chart(Adapter.opts(), Adapter.chart_record()) :: :ok | {:error, Adapter.error()}
   def save_chart(opts, %{content_hash: content_hash} = chart_record) do
-    agent(opts, fn state ->
-      put_in(state, [:charts, content_hash], chart_record)
+    Agent.get_and_update(pid(opts), fn state ->
+      case retired_info(get_in(state, [:charts, content_hash])) do
+        nil -> {:ok, put_in(state, [:charts, content_hash], chart_record)}
+        info -> {{:error, {:chart_retired, info}}, state}
+      end
     end)
   end
 
   @doc """
   Fetches the chart stored under `content_hash`, or `:chart_not_found`.
+
+  A tombstoned hash answers `{:error, {:chart_retired, info}}` instead
+  (ADR-0012 decision 6): the entry is still there and its blobs are
+  `nil`, and an entry with `nil` blobs is not a chart this adapter
+  holds.
   """
   @impl Adapter
   @spec fetch_chart(Adapter.opts(), Adapter.content_hash()) ::
           {:ok, Adapter.chart_record()} | {:error, Adapter.error()}
   def fetch_chart(opts, content_hash) do
-    case Agent.get(pid(opts), &get_in(&1, [:charts, content_hash])) do
-      nil -> {:error, :chart_not_found}
-      chart_record -> {:ok, chart_record}
+    chart_record = Agent.get(pid(opts), &get_in(&1, [:charts, content_hash]))
+
+    case {chart_record, retired_info(chart_record)} do
+      {nil, _none} -> {:error, :chart_not_found}
+      {_tombstone, %{} = info} -> {:error, {:chart_retired, info}}
+      {chart_record, nil} -> {:ok, chart_record}
     end
   end
+
+  # The tombstone on one stored entry, or nil for an entry that carries
+  # none. An entry that was never stored carries none either, and
+  # `:chart_not_found` is the answer for that, given by the caller.
+  @spec retired_info(Adapter.chart_record() | nil) :: Adapter.retired_info() | nil
+  defp retired_info(%{retired_at: %DateTime{} = retired_at} = chart_record),
+    do: %{retired_at: retired_at, retired_by: Map.get(chart_record, :retired_by)}
+
+  defp retired_info(_no_tombstone), do: nil
 
   @doc """
   Stores `position_record` under its `session_id`, overwriting any position
@@ -327,8 +352,14 @@ defmodule StatifierPersistence.Storage.InMemory do
   @spec count_executions_by_content_hash(Adapter.opts(), Adapter.content_hash()) ::
           {:ok, Adapter.execution_counts()} | {:error, Adapter.error()}
   def count_executions_by_content_hash(opts, content_hash) do
-    executions = Agent.get(pid(opts), & &1.executions)
+    {:ok, execution_counts(Agent.get(pid(opts), & &1.executions), content_hash)}
+  end
 
+  @spec execution_counts(
+          %{Adapter.execution_id() => Adapter.execution_record()},
+          Adapter.content_hash()
+        ) :: Adapter.execution_counts()
+  defp execution_counts(executions, content_hash) do
     counts =
       executions
       |> Map.values()
@@ -337,7 +368,7 @@ defmodule StatifierPersistence.Storage.InMemory do
         Map.update!(counts, execution.status, &(&1 + 1))
       end)
 
-    {:ok, %{counts | children: children_pin_count(executions, content_hash)}}
+    %{counts | children: children_pin_count(executions, content_hash)}
   end
 
   # ADR-0012 decision 1's child clause: a linkage pin naming this hash
@@ -371,6 +402,130 @@ defmodule StatifierPersistence.Storage.InMemory do
       _no_pin_on_this_hash ->
         false
     end
+  end
+
+  @doc """
+  Lists the ids of the `:active` executions on `content_hash` (the
+  optional
+  `c:StatifierPersistence.Storage.Adapter.list_active_execution_ids_by_content_hash/2`,
+  ADR-0012 decision 4): what a pin source is handed as its context.
+
+  A filter over the same execution map the counts fold over, in the
+  order the map yields, which is no order a caller may rely on: the
+  contract is a list of ids, not a sequence.
+  """
+  @impl Adapter
+  @spec list_active_execution_ids_by_content_hash(Adapter.opts(), Adapter.content_hash()) ::
+          {:ok, [Adapter.execution_id()]} | {:error, Adapter.error()}
+  def list_active_execution_ids_by_content_hash(opts, content_hash) do
+    ids =
+      pid(opts)
+      |> Agent.get(& &1.executions)
+      |> Map.values()
+      |> Enum.filter(&match?(%{status: :active, content_hash: ^content_hash}, &1))
+      |> Enum.map(& &1.execution_id)
+
+    {:ok, ids}
+  end
+
+  @doc """
+  Declares chart retirement (the optional
+  `c:StatifierPersistence.Storage.Adapter.supports_chart_retirement?/1`,
+  ADR-0012 decision 6): an Agent's map has no `NOT NULL` to drop, so
+  the backend limit V07 records on a database adapter has no
+  counterpart here.
+  """
+  @impl Adapter
+  @spec supports_chart_retirement?(Adapter.opts()) :: boolean()
+  def supports_chart_retirement?(_opts), do: true
+
+  @doc """
+  Retires the chart on `content_hash` (the optional
+  `c:StatifierPersistence.Storage.Adapter.retire_chart/3`, ADR-0012
+  decisions 5 and 6).
+
+  The counts and the tombstone are one `Agent.get_and_update/2`, which
+  is this adapter's whole answer to the callback's atomicity contract:
+  the Agent serves one message at a time, so nothing can be created on
+  the hash between the counting and the write.
+
+  A refused retirement returns the state unchanged, and the refusal
+  carries every count - the four execution arms, the durable-child
+  pins, the position rows, and each source's own counts - while only
+  ADR-0012 decision 1's blocking set causes one.
+
+  The tombstone keeps the entry and its content hash and nulls both
+  blobs, which is what makes the retired arm of `fetch_chart/2`
+  answerable at all.
+  """
+  @impl Adapter
+  @spec retire_chart(Adapter.opts(), Adapter.content_hash(), Adapter.retirement()) ::
+          {:ok, Adapter.retired_info()} | {:error, Adapter.error()}
+  def retire_chart(opts, content_hash, retirement) do
+    Agent.get_and_update(pid(opts), fn state ->
+      case get_in(state, [:charts, content_hash]) do
+        nil -> {{:error, :chart_not_found}, state}
+        chart_record -> retire_stored(state, content_hash, chart_record, retirement)
+      end
+    end)
+  end
+
+  @spec retire_stored(
+          state(),
+          Adapter.content_hash(),
+          Adapter.chart_record(),
+          Adapter.retirement()
+        ) :: {{:ok, Adapter.retired_info()} | {:error, Adapter.error()}, state()}
+  defp retire_stored(state, content_hash, chart_record, retirement) do
+    counts =
+      Adapter.pin_counts(
+        execution_counts(state.executions, content_hash),
+        position_count(state.positions, content_hash),
+        retirement.sources
+      )
+
+    cond do
+      info = retired_info(chart_record) -> {{:error, {:chart_retired, info}}, state}
+      Adapter.pinned?(counts) -> {{:error, {:pinned, counts}}, state}
+      true -> tombstone(state, content_hash, chart_record, retirement)
+    end
+  end
+
+  @spec tombstone(
+          state(),
+          Adapter.content_hash(),
+          Adapter.chart_record(),
+          Adapter.retirement()
+        ) :: {{:ok, Adapter.retired_info()}, state()}
+  defp tombstone(state, content_hash, chart_record, retirement) do
+    tombstoned = %{
+      chart_record
+      | identity_blob: nil,
+        chart_blob: nil
+    }
+
+    tombstoned =
+      tombstoned
+      |> Map.put(:retired_at, retirement.retired_at)
+      |> Map.put(:retired_by, retirement.retired_by)
+
+    {{:ok, %{retired_at: retirement.retired_at, retired_by: retirement.retired_by}},
+     put_in(state, [:charts, content_hash], tombstoned)}
+  end
+
+  # ADR-0012 decision 1's fourth pin kind, which decision 3's map leaves
+  # out: a position row is a saved session waiting to be resumed
+  # through `load_position/3`, and resuming it needs the bytes this
+  # retirement would null. Positions are keyed by session, so a hash
+  # with no execution at all can still hold them.
+  @spec position_count(
+          %{Adapter.session_id() => Adapter.position_record()},
+          Adapter.content_hash()
+        ) :: non_neg_integer()
+  defp position_count(positions, content_hash) do
+    positions
+    |> Map.values()
+    |> Enum.count(&(&1.content_hash == content_hash))
   end
 
   @doc """

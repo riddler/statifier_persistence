@@ -973,6 +973,60 @@ on that hash, so a source that knows executions and not hashes - a timer
 queue over an advertising chart waiting for a click after an impression -
 can answer without learning this package's key.
 
+### Retiring a chart
+
+A chart is stored once per content hash and stays for the life of the
+store. When a host wants to stop carrying the bytes of a chart nothing
+can resume, `StatifierPersistence.Executions.retire_chart/4` either
+refuses with every count holding the chart or tombstones the row: it
+keeps the row and its content hash, records `retired_at` and
+`retired_by`, and nulls the two blob columns.
+
+    case Executions.retire_chart(store, content_hash, [MyApp.TimerPins],
+           retired_by: "ops@example.test") do
+      {:ok, retired} ->
+        {:retired, retired.retired_at}
+
+      {:error, {:pinned, counts}} ->
+        {:still_in_use, counts}
+
+      {:error, {:pin_source_failed, {module, reason}}} ->
+        {:ask_again_later, module, reason}
+    end
+
+Four things pin a chart and each refuses: an execution row on the hash
+in the `:active` status, a durable child whose linkage pin names the
+hash while its parent is `:active`, a position row on the hash, and any
+non-zero count from a pin source. An execution that has finished pins
+nothing - its counts are reported in a refusal and never cause one -
+which is what keeps a chart retirable once its traffic is over. Asking
+`Executions.executions_on/2` first finds candidates; it is not a
+retirability test on its own, because it reports the finished arms and
+leaves out the position rows and the host's own sources.
+
+A refusal carries every count it knows, so one answer says everything
+holding the chart. A source that could not answer is a different arm
+and carries no counts at all: the walk stopped, so no complete count
+exists, and a partial one in the shape of a whole one is worse than
+none.
+
+Afterwards the hash is terminal on both chart doors: `fetch_chart/2`
+answers `{:error, {:chart_retired, info}}` rather than
+`:chart_not_found`, and `save_chart/3` refuses the same arm rather than
+reviving the row. A host that retires a hash it still wanted
+re-authors the document and saves the result under its new hash.
+
+Retirement needs migration V07 and a store whose two chart blob columns
+are nullable, which V07 can only arrange on Postgres. Elsewhere
+`Storage.chart_retirement_supported?/1` answers `false` and the
+retirement refuses at open with
+`{:error, :chart_retirement_unsupported}`, naming the limit instead of
+failing on a constraint. A host on another backend that wants the
+capability alters those two columns in a migration of its own.
+
+There is no clock here. Nothing retires on its own or on a schedule, no
+call takes a duration, and when a chart should go is the host's policy.
+
 ## Running the tests
 
 The suite includes database-backed tests against a real Postgres server -

@@ -1025,6 +1025,324 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         end
       end
 
+      # -- Adapter level: the optional retirement (ADR-0012) -------------
+      #
+      # Generated only when the adapter under test exports the optional
+      # retire_chart/3, the same opt-in-by-export shape every optional
+      # callback above uses.
+      #
+      # The refusal and the tombstone are one contract and are checked
+      # together here for that reason: an adapter that drops a chart's
+      # blobs without refusing a pinned one is the failure ADR-0012
+      # exists to prevent, and a suite that could pass with only half of
+      # it would not be checking the thing.
+
+      if Code.ensure_loaded?(conformance_adapter) and
+           function_exported?(conformance_adapter, :retire_chart, 3) do
+        @retire_hash "sha256:conformance-retire"
+
+        # sabotage: drop the adapter under test's guard on the :active
+        # arm - the `Adapter.pinned?(counts) -> ...` cond clause in the
+        # in-memory adapter's retire_stored/4, and the `active` NOT
+        # EXISTS clause of the Ecto adapter's unpinned_chart/2 -> red,
+        # an :active execution on the hash was retired instead of
+        # refused. Verified red on both conformance suites. Reverted
+        # from a copy.
+        test "adapter: an :active execution on the hash refuses the retirement", %{store: store} do
+          save_retirable_chart(store, @retire_hash)
+          insert_retire_execution(store, "retire-active", @retire_hash, :active)
+
+          assert {:error, {:pinned, counts}} =
+                   @conformance_adapter.retire_chart(store.opts, @retire_hash, retirement())
+
+          assert counts.executions.active == 1
+          assert counts.children == 0
+          assert counts.positions == 0
+          assert counts.sources == %{}
+
+          assert {:ok, chart} = @conformance_adapter.fetch_chart(store.opts, @retire_hash)
+          assert chart.chart_blob == <<4, 5, 6>>
+        end
+
+        # sabotage: drop the adapter under test's guard on the position
+        # rows - the `positions > 0` term of
+        # StatifierPersistence.Storage.Adapter.pinned?/1, and the `held`
+        # NOT EXISTS clause of the Ecto adapter's unpinned_chart/2 ->
+        # red, a hash carrying a saved position and no execution at all
+        # was retired, and the fetch below read the tombstone instead of
+        # the bytes. Verified red on both conformance suites. Reverted
+        # from a copy.
+        test "adapter: a position row on the hash refuses the retirement", %{store: store} do
+          save_retirable_chart(store, @retire_hash)
+
+          assert :ok =
+                   @conformance_adapter.save_position(store.opts, %{
+                     session_id: "sess_conformance_retire",
+                     content_hash: @retire_hash,
+                     identity_blob: <<1, 2, 3>>,
+                     position_blob: <<7, 8, 9>>
+                   })
+
+          assert {:error, {:pinned, counts}} =
+                   @conformance_adapter.retire_chart(store.opts, @retire_hash, retirement())
+
+          assert counts.positions == 1
+          assert counts.executions.active == 0
+
+          assert {:ok, chart} = @conformance_adapter.fetch_chart(store.opts, @retire_hash)
+          assert chart.chart_blob == <<4, 5, 6>>
+        end
+
+        # sabotage: in
+        # StatifierPersistence.Storage.Adapter.sources_pinned?/1, answer
+        # false unconditionally - the one function both adapters ask
+        # about a source's counts -> red, a source reporting a non-zero
+        # count did not refuse and the chart was retired. Verified red
+        # on both conformance suites. Reverted from a copy.
+        test "adapter: a source's non-zero count refuses, under that source's module name",
+             %{store: store} do
+          save_retirable_chart(store, @retire_hash)
+          sources = %{__MODULE__ => %{pending_timers: 2}}
+
+          assert {:error, {:pinned, counts}} =
+                   @conformance_adapter.retire_chart(
+                     store.opts,
+                     @retire_hash,
+                     retirement(sources)
+                   )
+
+          assert counts.sources == sources
+          assert counts.executions.active == 0
+          assert counts.positions == 0
+
+          assert {:ok, chart} = @conformance_adapter.fetch_chart(store.opts, @retire_hash)
+          assert chart.chart_blob == <<4, 5, 6>>
+        end
+
+        # The bytes themselves are not readable from here - every
+        # public door answers the retired arm for this hash, which is
+        # the contract - so that they are gone is asserted per adapter,
+        # where the store can be read directly:
+        # StatifierPersistence.RetireChartTest for the in-memory map and
+        # StatifierPersistence.Ecto.RetireChartRaceTest for the row.
+        #
+        # sabotage: in the adapter under test's retire_chart/3, write
+        # retired_at and leave retired_by unset (drop it from the
+        # in-memory adapter's tombstone/4 and from the Ecto adapter's
+        # write_tombstone/3 `set:`) -> red, the answer and the read-back
+        # both carried a nil retired_by, so the row no longer said who
+        # decided. Verified red on both conformance suites. Reverted
+        # from a copy.
+        test "adapter: a drained hash is retired, keeping the row and dropping the bytes",
+             %{store: store} do
+          save_retirable_chart(store, @retire_hash)
+          insert_retire_execution(store, "retire-done", @retire_hash, :completed)
+          at = DateTime.from_naive!(~N[2026-09-19 18:00:00.000000], "Etc/UTC")
+
+          assert {:ok, info} =
+                   @conformance_adapter.retire_chart(store.opts, @retire_hash, %{
+                     retired_at: at,
+                     retired_by: "conformance-operator",
+                     sources: %{}
+                   })
+
+          assert info.retired_at == at
+          assert info.retired_by == "conformance-operator"
+
+          # The row and its hash survive the removal: that is what makes
+          # the retired arm answerable at all, rather than a miss.
+          assert {:error, {:chart_retired, read_back}} =
+                   @conformance_adapter.fetch_chart(store.opts, @retire_hash)
+
+          assert read_back.retired_at == at
+          assert read_back.retired_by == "conformance-operator"
+
+          assert {:ok, counts} =
+                   @conformance_adapter.count_executions_by_content_hash(
+                     store.opts,
+                     @retire_hash
+                   )
+
+          assert counts.completed == 1
+        end
+
+        # sabotage: in the adapter under test's fetch_chart/2, drop the
+        # retired clause so a tombstoned row falls through to the
+        # ordinary chart record -> red, the fetch answered {:ok, record}
+        # with nil blobs instead of the retired arm. Verified red on
+        # both conformance suites. Reverted from a copy.
+        test "adapter: a terminal execution never pins, and a retired hash is never a miss",
+             %{store: store} do
+          save_retirable_chart(store, @retire_hash)
+          insert_retire_execution(store, "retire-failed", @retire_hash, :failed)
+          insert_retire_execution(store, "retire-cancelled", @retire_hash, :cancelled)
+
+          assert {:ok, _info} =
+                   @conformance_adapter.retire_chart(store.opts, @retire_hash, retirement())
+
+          assert {:error, {:chart_retired, _info}} =
+                   @conformance_adapter.fetch_chart(store.opts, @retire_hash)
+
+          refute match?(
+                   {:error, :chart_not_found},
+                   @conformance_adapter.fetch_chart(store.opts, @retire_hash)
+                 )
+        end
+
+        # sabotage: drop the adapter under test's already-retired
+        # answer - the `info = retired_info(...)` cond clause in the
+        # in-memory adapter's retire_stored/4, and the zero-row branch
+        # of the Ecto adapter's written/4, which is where a row its
+        # conditional UPDATE declined to touch is read back -> red, the
+        # second retirement answered {:ok, ...} over a chart it had not
+        # written. Verified red on both conformance suites. Reverted
+        # from a copy.
+        test "adapter: retiring twice answers the retired arm, never a second tombstone",
+             %{store: store} do
+          save_retirable_chart(store, @retire_hash)
+          first = DateTime.from_naive!(~N[2026-09-19 18:00:00.000000], "Etc/UTC")
+          second = DateTime.from_naive!(~N[2026-09-19 19:00:00.000000], "Etc/UTC")
+
+          assert {:ok, _info} =
+                   @conformance_adapter.retire_chart(store.opts, @retire_hash, %{
+                     retired_at: first,
+                     retired_by: "first-operator",
+                     sources: %{}
+                   })
+
+          assert {:error, {:chart_retired, info}} =
+                   @conformance_adapter.retire_chart(store.opts, @retire_hash, %{
+                     retired_at: second,
+                     retired_by: "second-operator",
+                     sources: %{}
+                   })
+
+          assert info.retired_at == first
+          assert info.retired_by == "first-operator"
+        end
+
+        # sabotage: in the adapter under test's save_chart/2, drop the
+        # retired check and go straight to the write -> red, the save
+        # after the retirement answered :ok instead of the retired arm.
+        # Verified red on both conformance suites. Reverted from a copy.
+        test "adapter: saving a tombstoned hash refuses and does not revive it", %{store: store} do
+          save_retirable_chart(store, @retire_hash)
+
+          assert {:ok, _info} =
+                   @conformance_adapter.retire_chart(store.opts, @retire_hash, retirement())
+
+          assert {:error, {:chart_retired, _info}} =
+                   @conformance_adapter.save_chart(store.opts, %{
+                     content_hash: @retire_hash,
+                     identity_blob: <<1, 2, 3>>,
+                     chart_blob: <<4, 5, 6>>
+                   })
+
+          assert {:error, {:chart_retired, _info}} =
+                   @conformance_adapter.fetch_chart(store.opts, @retire_hash)
+        end
+
+        # sabotage: in the adapter under test's retire_chart/3, drop the
+        # nil-row clause so a hash with no chart falls through to the
+        # counts -> red, an unknown hash answered {:ok, ...} (in-memory)
+        # rather than :chart_not_found. Verified red on both conformance
+        # suites. Reverted from a copy.
+        test "adapter: a hash this store never held is a miss, not a retirement",
+             %{store: store} do
+          assert {:error, :chart_not_found} =
+                   @conformance_adapter.retire_chart(
+                     store.opts,
+                     "sha256:conformance-retire-never-stored",
+                     retirement()
+                   )
+        end
+
+        # sabotage: in the adapter under test's
+        # list_active_execution_ids_by_content_hash/2, drop the status
+        # predicate -> red, the completed execution's id came back
+        # beside the active one. Verified red on both conformance
+        # suites. Reverted from a copy.
+        test "adapter: only the :active executions on the hash are listed for a pin source",
+             %{store: store} do
+          save_retirable_chart(store, @retire_hash)
+          insert_retire_execution(store, "retire-listed", @retire_hash, :active)
+          insert_retire_execution(store, "retire-unlisted", @retire_hash, :completed)
+
+          assert {:ok, ids} =
+                   @conformance_adapter.list_active_execution_ids_by_content_hash(
+                     store.opts,
+                     @retire_hash
+                   )
+
+          assert ids == ["retire-listed"]
+        end
+
+        defp retirement(sources \\ %{}) do
+          %{
+            retired_at: DateTime.utc_now(),
+            retired_by: "conformance-operator",
+            sources: sources
+          }
+        end
+
+        defp save_retirable_chart(store, content_hash) do
+          assert :ok =
+                   @conformance_adapter.save_chart(store.opts, %{
+                     content_hash: content_hash,
+                     identity_blob: <<1, 2, 3>>,
+                     chart_blob: <<4, 5, 6>>
+                   })
+        end
+
+        defp insert_retire_execution(store, execution_id, content_hash, status) do
+          assert :ok =
+                   @conformance_adapter.insert_execution(store.opts, %{
+                     execution_id: execution_id,
+                     status: status,
+                     content_hash: content_hash,
+                     identity_blob: <<1, 2, 3>>,
+                     position_blob: <<7, 8, 9>>,
+                     failure: nil,
+                     metadata: %{},
+                     outcome_blob: nil
+                   })
+        end
+      end
+
+      # The capability itself is asserted for every adapter, supporting
+      # or not. A store that cannot carry a tombstone declines at open
+      # and names the backend limit; what neither answer allows is a
+      # constraint violation surfacing from the database as though the
+      # retirement were a defect (ADR-0012 decision 6, and V07's
+      # Postgres-guarded `modify/3`).
+
+      # sabotage: in
+      # StatifierPersistence.Storage.retire_chart/3, drop the
+      # chart_retirement_supported?/1 cond clause and call the adapter
+      # unconditionally -> red on the declining arm: the call raised
+      # UndefinedFunctionError instead of returning
+      # {:error, :chart_retirement_unsupported}. Verified red on the
+      # InputLogAdapter conformance suite, which is the double that
+      # answers the drained query and still cannot carry a tombstone.
+      # Reverted from a copy.
+      test "facade: a retirement either runs or is declined at open", %{store: store} do
+        answer =
+          Storage.retire_chart(store, "sha256:conformance-retire-capability",
+            retired_by: "conformance-operator"
+          )
+
+        cond do
+          not Storage.content_hash_query_supported?(store) ->
+            assert {:error, :content_hash_query_unsupported} = answer
+
+          not Storage.chart_retirement_supported?(store) ->
+            assert {:error, :chart_retirement_unsupported} = answer
+
+          true ->
+            assert {:error, :chart_not_found} = answer
+        end
+      end
+
       # -- Adapter level: the optional execution metadata (ADR-0006) -----------
       #
       # A conformant adapter either round-trips a non-empty metadata map or

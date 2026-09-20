@@ -110,7 +110,7 @@ defmodule StatifierPersistence.Executions do
   # implementation of a 27-name contract.
   alias Statifier.Telemetry, as: CoreTelemetry
 
-  alias StatifierPersistence.{Driver, Execution, Executor, Storage, Telemetry}
+  alias StatifierPersistence.{Driver, Execution, Executor, PinSource, Storage, Telemetry}
   alias StatifierPersistence.Execution.Linkage
   alias StatifierPersistence.Serialization.AdapterLock
   alias StatifierPersistence.Storage.Adapter
@@ -181,6 +181,7 @@ defmodule StatifierPersistence.Executions do
           Storage.error()
           | {:budget_exhausted, BudgetExhausted.t()}
           | {:serialization, term()}
+          | {:pin_source_failed, {module(), PinSource.reason()}}
 
   @typedoc """
   Options `create/4` and `step/5` accept:
@@ -753,6 +754,135 @@ defmodule StatifierPersistence.Executions do
           {:ok, Adapter.execution_counts()} | {:error, error()}
   def executions_on(%Storage{} = store, content_hash) when is_binary(content_hash),
     do: Storage.count_executions_by_content_hash(store, content_hash)
+
+  @typedoc """
+  What a completed retirement answers (ADR-0012 decision 6): the hash
+  that was retired, which the row keeps, and the tombstone written on
+  it.
+  """
+  @type retired_chart :: %{
+          content_hash: Adapter.content_hash(),
+          retired_at: DateTime.t(),
+          retired_by: String.t()
+        }
+
+  @doc """
+  Retires the chart on `content_hash`, or refuses with every count
+  (ADR-0012 decisions 5 and 6).
+
+  The host-facing door of the two decision 5 names. This one owns
+  everything that reaches outside the package - the pin sources a host
+  registered, and the refusal for a source that cannot answer - and
+  `StatifierPersistence.Storage.retire_chart/3` beneath it owns this
+  package's own tables, the counts taken inside the transaction, and
+  the tombstone write.
+
+  `pin_sources` is the host's list of
+  `StatifierPersistence.PinSource` modules, `[]` for a host with none.
+  Each is asked through `StatifierPersistence.PinSource.collect/3`, with
+  a context carrying the ids of the `:active` executions on the hash,
+  because a source such as a timer queue knows executions and never
+  knows content hashes (decision 4).
+
+  ## What refuses
+
+  A non-zero count anywhere in decision 1's blocking set - an `:active`
+  execution row on the hash, a durable-child linkage pin naming it whose
+  parent is `:active`, a position row on it, or any source's non-zero
+  count - answers `{:error, {:pinned, counts}}` and writes nothing. The
+  refusal carries every count it knows, this package's own under its own
+  name and each source's under that source's module name, so a host
+  learns everything holding the chart in one answer rather than one
+  refusal per retry. The three terminal execution arms are in that map
+  and never cause it: a terminal row never goes away, and counting one
+  as a pin would make a chart permanently unretirable the first time
+  anything on it finished.
+
+  A store that cannot answer the drained query refuses at open with
+  `{:error, :content_hash_query_unsupported}`, and a store that cannot
+  carry a tombstone at all with `{:error, :chart_retirement_unsupported}`
+  - both before any source is asked and before anything is counted.
+  `{:error, :chart_not_found}` is a hash never stored, and
+  `{:error, {:chart_retired, info}}` a hash already retired: a second
+  retirement is the retired arm, never a second tombstone.
+
+  ## A source that could not answer refuses on its own, and carries no counts
+
+  `{:error, {:pin_source_failed, {module, reason}}}`, where `reason` is
+  `StatifierPersistence.PinSource`'s own `{:raised, exception}` or
+  `{:invalid_return, value}`. It is a different arm from
+  `{:pinned, counts}` and it carries no count map at all, deliberately:
+  the walk stops at the first source that could not answer, so no
+  complete count exists to report, and a refusal shaped like a count
+  would let a host read a partial one as the whole. "The source could
+  not answer" and "the source answered zero" are different facts
+  (decision 4), and so are "here is everything holding this chart" and
+  "here is some of it".
+
+  ## Options
+
+  - `retired_by:` (required) - the opaque host string recorded on the
+    row as who asked. This package does not interpret it.
+  - `now:` - the `t:DateTime.t/0` written as `retired_at`. Defaults to
+    `DateTime.utc_now/0`. There is no clock here: deciding *when* a
+    chart should be retired is host policy, and nothing in this package
+    retires on its own or on a schedule (decision 7).
+
+  ## Afterwards
+
+  The row and its content hash are kept and both blobs are `nil`.
+  `StatifierPersistence.Storage.fetch_chart/2` on that hash answers the
+  retired arm rather than `:chart_not_found`, and
+  `StatifierPersistence.Storage.save_chart/3` refuses it rather than
+  reviving the row. Retirement is irreversible through the public
+  surface: a host that retires a hash it still wanted re-authors the
+  document and saves the result under its new hash.
+  """
+  @spec retire_chart(
+          store :: Storage.t(),
+          content_hash :: Adapter.content_hash(),
+          pin_sources :: [module()],
+          opts :: keyword()
+        ) :: {:ok, retired_chart()} | {:error, error()}
+  def retire_chart(%Storage{} = store, content_hash, pin_sources, opts \\ [])
+      when is_binary(content_hash) and is_list(pin_sources) do
+    cond do
+      not Storage.content_hash_query_supported?(store) ->
+        {:error, :content_hash_query_unsupported}
+
+      not Storage.chart_retirement_supported?(store) ->
+        {:error, :chart_retirement_unsupported}
+
+      true ->
+        retire_counted(store, content_hash, pin_sources, opts)
+    end
+  end
+
+  @spec retire_counted(Storage.t(), Adapter.content_hash(), [module()], keyword()) ::
+          {:ok, retired_chart()} | {:error, error()}
+  defp retire_counted(store, content_hash, pin_sources, opts) do
+    with {:ok, execution_ids} <-
+           Storage.list_active_execution_ids_by_content_hash(store, content_hash),
+         {:ok, source_counts} <- ask_pin_sources(pin_sources, content_hash, execution_ids),
+         {:ok, info} <-
+           Storage.retire_chart(store, content_hash, [{:source_counts, source_counts} | opts]) do
+      {:ok, Map.put(info, :content_hash, content_hash)}
+    end
+  end
+
+  # The walk itself is `PinSource.collect/3`'s, public so a host can ask
+  # what its own sources say without asking for a retirement (ADR-0012's
+  # sp-34l Note). What this adds is the arm the retire door answers
+  # with: a source's failure reaches a caller tagged as a source
+  # failure, never folded in among counts.
+  @spec ask_pin_sources([module()], Adapter.content_hash(), [execution_id()]) ::
+          {:ok, Adapter.source_counts()} | {:error, error()}
+  defp ask_pin_sources(pin_sources, content_hash, execution_ids) do
+    case PinSource.collect(pin_sources, content_hash, %{execution_ids: execution_ids}) do
+      {:ok, source_counts} -> {:ok, source_counts}
+      {:error, {source, reason}} -> {:error, {:pin_source_failed, {source, reason}}}
+    end
+  end
 
   # The match map is this package's own (`Execution.Linkage.parent_match/1` or
   # `invocation_match/2`), so reading the two ids back out of it is

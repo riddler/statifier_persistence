@@ -74,6 +74,7 @@ defmodule StatifierPersistence.Storage do
           | :execution_outcome_unsupported
           | :execution_states_unsupported
           | :content_hash_query_unsupported
+          | :chart_retirement_unsupported
           | {:unsupported_format_version, term()}
           | {:identity_mismatch, Identity.t(), Identity.t() | nil}
 
@@ -138,6 +139,13 @@ defmodule StatifierPersistence.Storage do
   not derive or inspect (ADR-0003 decision 1). Returns
   `{:error, :unidentified_chart}` when `machine` carries no identity,
   without calling the adapter at all.
+
+  A hash a retirement has tombstoned is refused with
+  `{:error, {:chart_retired, info}}` and is not revived (ADR-0012
+  decision 6): a content-addressed save looks identical to an ordinary
+  idempotent re-save, so it is the one call with no way to say "yes, I
+  mean to undo that". A host that still wants the chart re-authors the
+  document and saves the result under its new hash.
   """
   @spec save_chart(store :: t(), machine :: Machine.t(), chart_blob :: binary()) ::
           :ok | {:error, error()}
@@ -162,6 +170,13 @@ defmodule StatifierPersistence.Storage do
 
   @doc """
   Fetches the chart stored under `content_hash`.
+
+  A tombstoned hash answers `{:error, {:chart_retired, info}}` carrying
+  who retired it and when, never `:chart_not_found` (ADR-0012 decision
+  6): a host that asked for the removal reads its own decision back
+  rather than a miss it would debug as data loss. `:chart_not_found`
+  keeps its meaning exactly - never stored, as against stored and
+  retired.
   """
   @spec fetch_chart(store :: t(), content_hash :: Adapter.content_hash()) ::
           {:ok, Adapter.chart_record()} | {:error, error()}
@@ -619,6 +634,151 @@ defmodule StatifierPersistence.Storage do
       )
     else
       {:error, :content_hash_query_unsupported}
+    end
+  end
+
+  @doc """
+  Lists the ids of the `:active` executions on `content_hash` (ADR-0012
+  decision 4).
+
+  Delegates to the adapter's optional
+  `c:StatifierPersistence.Storage.Adapter.list_active_execution_ids_by_content_hash/2`
+  under the same capability `count_executions_by_content_hash/2` checks;
+  returns `{:error, :content_hash_query_unsupported}` otherwise, without
+  calling the adapter at all.
+
+  It is public because it is what a host building a pin source's context
+  by hand would otherwise have no way to ask for, and
+  `StatifierPersistence.Executions.retire_chart/4` asks it on a host's
+  behalf on every retirement. A hash this store has never seen answers
+  `{:ok, []}`.
+  """
+  @spec list_active_execution_ids_by_content_hash(
+          store :: t(),
+          content_hash :: Adapter.content_hash()
+        ) :: {:ok, [Adapter.execution_id()]} | {:error, error()}
+  def list_active_execution_ids_by_content_hash(%__MODULE__{} = store, content_hash)
+      when is_binary(content_hash) do
+    if content_hash_query_supported?(store) do
+      adapter_call(
+        store.adapter,
+        :list_active_execution_ids_by_content_hash,
+        [content_hash: content_hash],
+        fn ->
+          store.adapter.list_active_execution_ids_by_content_hash(store.opts, content_hash)
+        end
+      )
+    else
+      {:error, :content_hash_query_unsupported}
+    end
+  end
+
+  @doc """
+  Whether a chart can be tombstoned in `store` (ADR-0012 decision 6).
+
+  True when the adapter exports the optional
+  `c:StatifierPersistence.Storage.Adapter.supports_chart_retirement?/1`
+  and it answers `true` for these opts - the same shape
+  `metadata_supported?/1` checks, asked of the store rather than of the
+  adapter module, because migration V07 makes the two chart blob columns
+  nullable only on Postgres.
+
+  Public for `content_hash_query_supported?/1`'s reason: a host plans a
+  retirement before it asks for one, and learning that this store cannot
+  carry a tombstone is worth learning then rather than at the refusal.
+  """
+  @spec chart_retirement_supported?(store :: t()) :: boolean()
+  def chart_retirement_supported?(%__MODULE__{} = store) do
+    Code.ensure_loaded?(store.adapter) and
+      function_exported?(store.adapter, :supports_chart_retirement?, 1) and
+      adapter_call(store.adapter, :supports_chart_retirement?, [], fn ->
+        store.adapter.supports_chart_retirement?(store.opts)
+      end) == true
+  end
+
+  @doc """
+  Retires the chart on `content_hash` over this package's own tables
+  (ADR-0012 decisions 5 and 6).
+
+  The facade half of the split decision 5 names: this function owns the
+  counts this package can take and the tombstone write, and
+  `StatifierPersistence.Executions.retire_chart/4` above it owns
+  everything that reaches outside the package. A host calls that one;
+  this one is here for a host that keeps its own pin accounting and has
+  already done the outside half itself.
+
+  Two refusals happen at open, before anything is counted and before a
+  transaction is opened:
+
+  - `{:error, :content_hash_query_unsupported}` for a store that cannot
+    answer the drained query, because a chart must not be retired
+    against a count that was never taken (decision 3);
+  - `{:error, :chart_retirement_unsupported}` for a store that cannot
+    carry a tombstone - the two chart blob columns are still `NOT NULL`,
+    or the two tombstone columns are absent. Migration V07 makes them
+    nullable on Postgres only, so this is the answer on a store V07
+    could not finish arranging, and it names the backend limit instead
+    of surfacing a constraint violation.
+
+  Everything after that is one atomic unit in the adapter: the counts,
+  the refusal, and the tombstone. A non-zero count anywhere in ADR-0012
+  decision 1's blocking set answers `{:error, {:pinned, counts}}` and
+  writes nothing, and the counts it carries include the three terminal
+  execution arms, which are reported and never block. A hash with no
+  chart is `{:error, :chart_not_found}`; a hash already retired is
+  `{:error, {:chart_retired, info}}` and never a second tombstone.
+
+  ## Options
+
+  - `retired_by:` (required) - the opaque host string recorded on the
+    row as who asked. This package does not interpret it.
+  - `now:` - the `t:DateTime.t/0` written as `retired_at`. Defaults to
+    `DateTime.utc_now/0`; there is no clock in this package and nothing
+    here decides *when* a chart should be retired (decision 7).
+  - `source_counts:` - the pin-source counts already collected, keyed by
+    source module. Defaults to `%{}`. They are folded into the same
+    atomic unit as this package's own counts, so a source count that
+    blocks blocks inside the unit that would otherwise write.
+  """
+  @spec retire_chart(store :: t(), content_hash :: Adapter.content_hash(), opts :: keyword()) ::
+          {:ok, Adapter.retired_info()} | {:error, error()}
+  def retire_chart(%__MODULE__{} = store, content_hash, opts \\ [])
+      when is_binary(content_hash) do
+    cond do
+      not content_hash_query_supported?(store) ->
+        {:error, :content_hash_query_unsupported}
+
+      not chart_retirement_supported?(store) ->
+        {:error, :chart_retirement_unsupported}
+
+      true ->
+        retirement = %{
+          retired_at: Keyword.get(opts, :now) || DateTime.utc_now(),
+          retired_by: retired_by!(opts),
+          sources: Keyword.get(opts, :source_counts, %{})
+        }
+
+        adapter_call(store.adapter, :retire_chart, [content_hash: content_hash], fn ->
+          store.adapter.retire_chart(store.opts, content_hash, retirement)
+        end)
+    end
+  end
+
+  # Who asked is the one thing a retirement cannot default. A tombstone
+  # whose `retired_by` is blank answers the question decision 6 says the
+  # row exists to answer with nothing, so a missing actor is a caller
+  # bug and raises here - the same posture `metadata_opt!/1` takes for a
+  # malformed `metadata:`.
+  @spec retired_by!(keyword()) :: String.t()
+  defp retired_by!(opts) do
+    case Keyword.get(opts, :retired_by) do
+      actor when is_binary(actor) and actor != "" ->
+        actor
+
+      other ->
+        raise ArgumentError,
+              "retire_chart requires a non-empty `retired_by:` string naming who asked " <>
+                "for the retirement (ADR-0012 decision 6), got: #{inspect(other)}"
     end
   end
 
