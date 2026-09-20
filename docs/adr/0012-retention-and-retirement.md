@@ -3,7 +3,7 @@
 Status: proposed (2026-09-19, sp-ryi, campaign RF063; the code beads of this
 campaign build against it at proposed and cite its Decision items. sp-9oa
 builds the drained query and migration V07, sp-34l builds the pin-source
-behaviour, and `retire_chart` follows both)
+behaviour, and `Executions.retire_chart/4` follows both)
 
 ## Context
 
@@ -152,8 +152,8 @@ adapter declares the capability the way the optional callbacks already do:
 it exports the callback, the facade checks with `function_exported?/3`, and
 `supports_content_hash_query?/1` is the predicate a host can ask directly.
 An adapter that does not export it cannot be retired against, and
-`retire_chart` refuses at open rather than retiring on a count it could not
-take.
+`Storage.retire_chart/3` refuses at open rather than retiring on a count it
+could not take.
 
 **4. A pin source is a behaviour a host implements, and this package gains no
 dependency for it.** `StatifierPersistence.PinSource` declares one callback,
