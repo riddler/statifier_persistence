@@ -38,6 +38,7 @@ never sees it.
 - `StatifierPersistence.Storage.retire_chart/3`, `chart_retirement_supported?/1` and `list_active_execution_ids_by_content_hash/2` over three new optional adapter callbacks, `retire_chart/3`, `supports_chart_retirement?/1` and `list_active_execution_ids_by_content_hash/2`.
 - A position row on a content hash is a pin: it refuses a retirement of that chart even when no execution runs on it.
 - The generated chart schema carries the `retired_at` and `retired_by` columns migration V07 adds.
+- `StatifierPersistence.Storage.Adapter.pin_counts/3`, `pinned?/1` and `sources_pinned?/1`, with the `pin_counts/0`, `execution_counts/0` and `source_counts/0` types: the one shape a `retire_chart/3` refusal carries and the predicate for whether what an adapter counted is a pin, so a third-party adapter builds its refusal through them instead of inventing a second shape for one answer.
 
 ### Changed
 
