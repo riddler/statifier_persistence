@@ -240,12 +240,12 @@ tombstone is left open rather than answered by omission.
 
 ## Consequences
 
-**Migration V07 carries four changes, and one bead owns it.** An index on
+**Migration V07 carries five changes, and one bead owns it.** An index on
 `executions(content_hash)`, which the drained query needs and which nothing
 provides today; the two tombstone columns on `charts`, `retired_at` and
 `retired_by`; and two `modify(..., null: true)` changes, on
 `charts.identity_blob` and `charts.chart_blob`, without which decision 6's
-nulling cannot execute. Its `down/1` reverses all four, which means a
+nulling cannot execute. Its `down/1` reverses all five, which means a
 down-migration over a store holding a tombstoned row cannot restore
 `null: false` while that row exists - the down refuses rather than
 inventing bytes, and that refusal is part of what V07's bead builds.
