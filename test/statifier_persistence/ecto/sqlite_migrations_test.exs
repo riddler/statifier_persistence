@@ -160,8 +160,11 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
       table_prefix: "sq_uf_"
     ]
 
+    # Capped in both directions, which is what this package's moduledoc
+    # asks of a capped migration: the up stops at V06, so the down starts
+    # there too rather than at whatever the newest version has become.
     def up, do: Migrations.up(@opts ++ [from: 6, version: 6])
-    def down, do: Migrations.down(@opts)
+    def down, do: Migrations.down(@opts ++ [from: 6])
   end
 
   # The capped host pattern, spelled out: one host migration per package
@@ -269,7 +272,7 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
     # execution ended "6 tests, 0 failures, 6 invalid" - the rolled-back
     # migration left no tables for any case in this module. Verified red,
     # reverted.
-    test "V01 through V06 apply, and the executions table carries every column" do
+    test "V01 through V07 apply, and the executions table carries every column" do
       assert tables() == ["sq_charts", "sq_executions", "sq_inputs", "sq_positions"]
 
       columns = columns("sq_executions")
@@ -320,7 +323,7 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
     # 1, right 5), this case and its Postgres twin alone ("45 tests, 2
     # failures"). Verified red, reverted.
     test "expected_version/0 answers the same version this backend migrated through" do
-      assert Migrations.expected_version() == 6
+      assert Migrations.expected_version() == 7
     end
 
     # sabotage: replaced V03.down/1's postgres?() guard with `true`, so
@@ -336,6 +339,43 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
       :ok = migrate(:up)
 
       assert tables() == ["sq_charts", "sq_executions", "sq_inputs", "sq_positions"]
+    end
+  end
+
+  describe "V07 on a non-Postgres adapter" do
+    # The index and the two tombstone columns are ordinary DDL on this
+    # backend and arrive with everything else.
+    #
+    # sabotage: removed V07's create(index(...)) and its drop/1 -> red,
+    # the index list carried no content_hash entry here, and red on the
+    # two Postgres cases beside it ("58 tests, 3 failures" over both
+    # migration modules). Verified red, reverted from a copy.
+    test "the content_hash index and the two tombstone columns arrive here too" do
+      assert Enum.any?(indexes("sq_executions"), &String.contains?(&1, "content_hash"))
+
+      columns = columns("sq_charts")
+
+      assert "retired_at" in columns
+      assert "retired_by" in columns
+    end
+
+    # The half V07 cannot do here, asserted rather than left implicit:
+    # SQLite has no ALTER COLUMN, so the guard skips both modify/3 calls
+    # and the blob columns keep the NOT NULL V01 gave them. A retirement
+    # is a Postgres capability under this version.
+    #
+    # sabotage: dropped V07.up/1's postgres?() guard around the two
+    # modify/3 calls, so they ran on this adapter -> red, and red the way
+    # the guard exists to prevent: setup_all raised
+    # `** (ArgumentError) ALTER COLUMN not supported by SQLite3` out of
+    # ecto_sqlite3's own column_change/2, the whole migration rolled back
+    # and the module ended "24 tests, 0 failures, 24 invalid". Verified
+    # red, reverted from a copy.
+    test "the chart blob columns keep their NOT NULL here, because this backend has no ALTER COLUMN" do
+      not_null = not_null_columns("sq_charts")
+
+      assert "chart_blob" in not_null
+      assert "identity_blob" in not_null
     end
   end
 
@@ -1053,6 +1093,15 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
       )
 
     List.flatten(rows)
+  end
+
+  # PRAGMA table_info's fourth column is notnull, 1 for a NOT NULL column.
+  defp not_null_columns(table) do
+    %{rows: rows} = SQL.query!(SqliteTestRepo, "PRAGMA table_info(#{table})", [])
+
+    rows
+    |> Enum.filter(fn row -> Enum.at(row, 3) == 1 end)
+    |> Enum.map(fn row -> Enum.at(row, 1) end)
   end
 
   defp columns(table) do

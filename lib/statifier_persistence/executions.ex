@@ -720,6 +720,41 @@ defmodule StatifierPersistence.Executions do
   def inputs(%Storage{} = store, execution_id) when is_binary(execution_id),
     do: Storage.list_inputs(store, execution_id)
 
+  @doc """
+  Counts the executions on `content_hash`, per stored arm (ADR-0012
+  decision 3).
+
+  Answers `%{active: n, completed: n, failed: n, cancelled: n,
+  children: n}` - every key present for every hash, and zeros for a hash
+  this store has never seen. The four arm keys are the stored statuses
+  and nothing else: `terminal` is a fold this record's decision 2 names
+  in prose and never stores, so a caller that wants it adds
+  `completed`, `failed` and `cancelled` itself.
+
+  `children` counts the durable-child linkage pins on the hash whose
+  parent is `:active`. **Both adapters in this package answer `0` for it
+  today**: the key is in the shape from the start so its arrival is a
+  change of value and not a change of shape, and sp-yig is the bead that
+  fills it. Read the other four as authoritative and `children` as not
+  yet answered.
+
+  `{:error, :content_hash_query_unsupported}` for a store whose adapter
+  does not answer the query, without calling the adapter at all.
+
+  This is a read of a chart's traffic and **not a retirability test**
+  (ADR-0012's consequences): the three terminal arms it reports never
+  block a retirement, and the position rows and host pin sources that do
+  are not in it. A host sweeping for retirable charts asks this to find
+  candidates and asks the retirement itself whether a candidate can go.
+
+  Read-only, and outside any execution's exclusion by design: it takes no
+  lock and counts what is committed at the moment it runs.
+  """
+  @spec executions_on(store :: Storage.t(), content_hash :: Adapter.content_hash()) ::
+          {:ok, Adapter.execution_counts()} | {:error, error()}
+  def executions_on(%Storage{} = store, content_hash) when is_binary(content_hash),
+    do: Storage.count_executions_by_content_hash(store, content_hash)
+
   # The match map is this package's own (`Execution.Linkage.parent_match/1` or
   # `invocation_match/2`), so reading the two ids back out of it is
   # reading what this package just wrote. `invoke_id` is `nil` for the

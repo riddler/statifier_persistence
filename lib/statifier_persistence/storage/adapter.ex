@@ -126,6 +126,31 @@ defmodule StatifierPersistence.Storage.Adapter do
         }
 
   @typedoc """
+  The drained query's answer for one content hash (ADR-0012 decision 3): a
+  count of execution rows on that hash in each stored arm, plus `children`.
+
+  Every key is always present and every value is a count, so an unknown
+  hash answers zeros rather than an empty map or a miss - "nothing is
+  running on this chart" is an answer, not an absence.
+
+  The four arm keys are the stored statuses of `t:execution_status/0` and
+  nothing else: there is no `terminal` key, because terminal is a fold
+  this package names in prose and never stores (decision 2). A reader
+  that wants the fold adds the three.
+
+  `children` counts the durable-child linkage pins naming that hash whose
+  parent execution is `:active` - the pin decision 1 counts, which is not
+  an execution row on the hash and so is not one of the four arms.
+  """
+  @type execution_counts :: %{
+          active: non_neg_integer(),
+          completed: non_neg_integer(),
+          failed: non_neg_integer(),
+          cancelled: non_neg_integer(),
+          children: non_neg_integer()
+        }
+
+  @typedoc """
   An execution's input log ordinal: dense, zero-based, per execution, assigned by the
   adapter. Not a position blob (ADR-0010 decision 3).
   """
@@ -189,7 +214,9 @@ defmodule StatifierPersistence.Storage.Adapter do
   decision 3); `:execution_outcome_unsupported` and `:execution_states_unsupported`
   are the refusal-at-open arms for an adapter that cannot store an execution's
   `outcome_blob` or cannot answer the indexed status projection, which
-  together are what a fan-out's settlement needs; `:input_log_full` is
+  together are what a fan-out's settlement needs;
+  `:content_hash_query_unsupported` is the same refusal for an adapter that
+  cannot answer the drained query of ADR-0012 decision 3; `:input_log_full` is
   `append_input/3`'s refusal past the host-declared cap, after the log has
   closed itself with a marker (ADR-0010 decision 6) - it refuses the
   append and never the step; `{:adapter, term()}` carries a backend
@@ -204,6 +231,7 @@ defmodule StatifierPersistence.Storage.Adapter do
           | :metadata_unsupported
           | :execution_outcome_unsupported
           | :execution_states_unsupported
+          | :content_hash_query_unsupported
           | :input_log_full
           | {:adapter, term()}
 
@@ -467,6 +495,54 @@ defmodule StatifierPersistence.Storage.Adapter do
               {:ok, [StatifierPersistence.Storage.Adapter.execution_state()]} | {:error, error()}
 
   @doc """
+  Optional declaration that this adapter can answer the drained query
+  (ADR-0012 decision 3).
+
+  The same opt-in-by-export shape `supports_metadata?/1` uses: an adapter
+  exports it and answers `true`, the facade checks with
+  `function_exported?/3`, and an adapter that does not export it stores
+  everything it stored before and sees no behaviour change.
+
+  `StatifierPersistence.Storage.count_executions_by_content_hash/2`
+  answers `{:error, :content_hash_query_unsupported}` for such an adapter
+  without calling it. The refusal matters beyond the query itself: a chart
+  cannot be retired against a store that cannot count what is running on
+  it, so the retirement refuses at open rather than acting on a count it
+  could not take.
+  """
+  @callback supports_content_hash_query?(opts()) :: boolean()
+
+  @doc """
+  Optional count of the executions on one content hash, per stored arm
+  (ADR-0012 decision 3).
+
+  Answers `t:execution_counts/0` for `content_hash`: how many execution
+  rows carry that hash in each of `:active`, `:completed`, `:failed` and
+  `:cancelled`, plus the `children` pin count. Every key is present for
+  every hash, including one this store has never seen, which answers
+  zeros.
+
+  This is a count, not a listing: an adapter serves it from its backend as
+  an aggregate and does not materialise the rows. Counting by loading
+  every execution on the hash and folding it in Elixir is conformant and
+  defeats the callback's whole purpose, which is to answer "what is
+  running on this chart" on a store whose executions table is large.
+
+  A chart is retired against this count (ADR-0012 decision 5), so an
+  adapter that cannot answer it declines the whole capability by not
+  exporting `supports_content_hash_query?/1` rather than answering a
+  partial map.
+
+  `children` is the one key this package's own two adapters do not yet
+  count: both answer `0` for it while sp-yig builds the linkage-pin
+  count. The key is in the shape from the start so its arrival is a
+  change of value and not a change of shape.
+  """
+  @callback count_executions_by_content_hash(opts(), content_hash()) ::
+              {:ok, StatifierPersistence.Storage.Adapter.execution_counts()}
+              | {:error, error()}
+
+  @doc """
   Optional declaration that this adapter keeps an execution's input log
   (ADR-0010 decision 1).
 
@@ -532,6 +608,8 @@ defmodule StatifierPersistence.Storage.Adapter do
                       list_executions_by_metadata: 2,
                       supports_execution_outcome?: 1,
                       list_execution_states_by_metadata: 2,
+                      supports_content_hash_query?: 1,
+                      count_executions_by_content_hash: 2,
                       supports_input_log?: 1,
                       append_input: 3,
                       list_inputs: 2

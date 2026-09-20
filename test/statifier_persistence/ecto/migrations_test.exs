@@ -137,6 +137,41 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     def down, do: Migrations.down(@opts ++ [from: 4, version: 4])
   end
 
+  # V07's own cycle, on tables nothing else in this module owns: the base
+  # stops at V06, and the second migration carries V07 alone - the
+  # upgrade an install running 0.12.0 actually performs.
+  defmodule MigrateKxV07Base do
+    @moduledoc false
+    use Ecto.Migration
+
+    alias StatifierPersistence.Ecto.Migrations
+
+    @opts [
+      repo: StatifierPersistence.TestRepo,
+      key: :uxid,
+      table_prefix: "kx_v07_"
+    ]
+
+    def up, do: Migrations.up(@opts ++ [version: 6])
+    def down, do: Migrations.down(@opts ++ [from: 6])
+  end
+
+  defmodule MigrateKxV07 do
+    @moduledoc false
+    use Ecto.Migration
+
+    alias StatifierPersistence.Ecto.Migrations
+
+    @opts [
+      repo: StatifierPersistence.TestRepo,
+      key: :uxid,
+      table_prefix: "kx_v07_"
+    ]
+
+    def up, do: Migrations.up(@opts ++ [from: 7])
+    def down, do: Migrations.down(@opts ++ [version: 7])
+  end
+
   @host_migrations [
     {20_260_822_000_001, MigrateKxUxid},
     {20_260_822_000_002, MigrateKxUuid},
@@ -150,6 +185,8 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
   @concurrent_versions [20_260_906_000_401, 20_260_906_000_402, 20_260_906_000_403]
 
   @input_log_version 20_260_906_000_501
+
+  @retirement_versions [20_260_919_000_701, 20_260_919_000_702]
 
   @key_prefixes ["kx_uxid_", "kx_uuid_", "kx_big_"]
 
@@ -438,6 +475,130 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     end
   end
 
+  describe "V07: the content_hash index and the chart tombstone columns" do
+    # sabotage: removed V07's create(index(...)) and its matching drop/1
+    # -> red, the definition list came back empty for every key
+    # configuration. Three cases red across this module and its SQLite
+    # twin ("58 tests, 3 failures"). Verified red, reverted from a copy.
+    test "executions carries a non-unique index on content_hash, across every key configuration" do
+      for prefix <- @key_prefixes do
+        table = prefix <> "executions"
+
+        assert [definition] = content_hash_index_definitions(table)
+        refute definition =~ "UNIQUE"
+        assert definition =~ "(content_hash)"
+      end
+    end
+
+    # sabotage: removed V07's add(:retired_at, ...) from up/1 and its
+    # remove/1 from down/1 together -> red here, the column list came back
+    # carrying retired_by alone. Four cases red across this module and its
+    # SQLite twin ("58 tests, 4 failures"). Verified red, reverted from a
+    # copy.
+    test "charts carries nullable retired_at and retired_by, across every key configuration" do
+      for prefix <- @key_prefixes do
+        assert identity_columns(prefix <> "charts", ["retired_at", "retired_by"]) ==
+                 [
+                   ["retired_at", "timestamp without time zone", "YES"],
+                   ["retired_by", "text", "YES"]
+                 ]
+      end
+    end
+
+    # This is the change decision 6's nulling cannot execute without, so
+    # the assertion is on the constraint rather than on the column.
+    #
+    # sabotage: removed V07's postgres?()-guarded alter block from up/1
+    # and its null: false counterpart from down/1 -> red here, both
+    # columns came back "NO"; red too on the round trip below and on the
+    # refusal case, whose tombstoned row cannot be inserted with the
+    # constraint in place ("34 tests, 3 failures"). Verified red,
+    # reverted from a copy.
+    test "the charts blob columns are nullable, across every key configuration" do
+      for prefix <- @key_prefixes do
+        assert identity_columns(prefix <> "charts", ["chart_blob", "identity_blob"]) ==
+                 [
+                   ["chart_blob", "bytea", "YES"],
+                   ["identity_blob", "bytea", "YES"]
+                 ]
+      end
+    end
+
+    # sabotage: made V07.down/1 a no-op -> red here on the assertion
+    # block after the rollback, which still found the index and the two
+    # columns; red too on the refusal case below, which then had no
+    # refusal to catch ("34 tests, 2 failures"). Verified red, reverted
+    # from a copy.
+    test "up from V06, down and up again: the index and the columns arrive, go and come back" do
+      [base_version, version] = @retirement_versions
+
+      on_exit(fn -> drop_retirement_tables(base_version, version) end)
+
+      :ok = migrate(:up, base_version, MigrateKxV07Base)
+
+      assert content_hash_index_definitions("kx_v07_executions") == []
+      assert identity_columns("kx_v07_charts", ["retired_at"]) == []
+      assert identity_columns("kx_v07_charts", ["chart_blob"]) == [["chart_blob", "bytea", "NO"]]
+
+      :ok = migrate(:up, version, MigrateKxV07)
+
+      assert [_definition] = content_hash_index_definitions("kx_v07_executions")
+
+      assert identity_columns("kx_v07_charts", ["retired_at", "retired_by"]) == [
+               ["retired_at", "timestamp without time zone", "YES"],
+               ["retired_by", "text", "YES"]
+             ]
+
+      assert identity_columns("kx_v07_charts", ["chart_blob"]) == [["chart_blob", "bytea", "YES"]]
+
+      :ok = migrate(:down, version, MigrateKxV07)
+
+      assert content_hash_index_definitions("kx_v07_executions") == []
+      assert identity_columns("kx_v07_charts", ["retired_at", "retired_by"]) == []
+      assert identity_columns("kx_v07_charts", ["chart_blob"]) == [["chart_blob", "bytea", "NO"]]
+
+      :ok = migrate(:up, version, MigrateKxV07)
+
+      assert [_again] = content_hash_index_definitions("kx_v07_executions")
+      assert identity_columns("kx_v07_charts", ["chart_blob"]) == [["chart_blob", "bytea", "YES"]]
+    end
+
+    # The refusal of ADR-0012's consequences: the bytes a retirement
+    # removed cannot be put back, so the rollback stops instead of
+    # dropping the constraint quietly or inventing data.
+    #
+    # sabotage: removed V07.down/1's execute(fn -> ... end) probe -> red,
+    # this case alone ("34 tests, 1 failure"): the rollback over the
+    # tombstoned row raised Postgrex's own not-null violation instead of
+    # the refusal, so assert_raise had no RuntimeError to catch.
+    # Verified red, reverted from a copy.
+    test "the rollback refuses over a tombstoned chart, and runs once the row is gone" do
+      [base_version, version] = @retirement_versions
+
+      on_exit(fn -> drop_retirement_tables(base_version, version) end)
+
+      :ok = migrate(:up, base_version, MigrateKxV07Base)
+      :ok = migrate(:up, version, MigrateKxV07)
+
+      tombstone_chart("kx_v07_charts", "sha256:kx-v07-retired")
+
+      assert_raise RuntimeError, ~r/cannot roll back statifier_persistence V07/, fn ->
+        migrate(:down, version, MigrateKxV07)
+      end
+
+      # The refusal is complete: it happens before the reversal, so the
+      # column the rollback would have dropped is still there.
+      assert identity_columns("kx_v07_charts", ["retired_at"]) ==
+               [["retired_at", "timestamp without time zone", "YES"]]
+
+      SQL.query!(TestRepo, "DELETE FROM kx_v07_charts", [])
+
+      :ok = migrate(:down, version, MigrateKxV07)
+
+      assert identity_columns("kx_v07_charts", ["retired_at"]) == []
+    end
+  end
+
   describe "unique indexes enforced" do
     # sabotage: removed V01's charts unique_index -> duplicate insert red
     test "a duplicate content_hash insert violates the charts unique index" do
@@ -646,7 +807,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     # sabotage: skipped parse!'s version validation -> red (KeyError, not ArgumentError)
     test "an unknown version raises before any DDL" do
       assert_raise ArgumentError, ~r/unknown migration version/, fn ->
-        Migrations.up(for: KxUxid, version: 7)
+        Migrations.up(for: KxUxid, version: 8)
       end
 
       assert_raise ArgumentError, ~r/unknown migration version/, fn ->
@@ -668,7 +829,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     # red, reverted.
     test "an unknown down from: raises before any DDL" do
       assert_raise ArgumentError, ~r/unknown migration from/, fn ->
-        Migrations.down(for: KxUxid, from: 7)
+        Migrations.down(for: KxUxid, from: 8)
       end
     end
 
@@ -726,7 +887,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     # 1, right 5), this case and its SQLite twin alone ("45 tests, 2
     # failures"). Verified red, reverted.
     test "expected_version/0 is the newest version the migration map holds" do
-      assert Migrations.expected_version() == 6
+      assert Migrations.expected_version() == 7
     end
   end
 
@@ -813,6 +974,49 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
       )
 
     definition
+  end
+
+  defp content_hash_index_definitions(table) do
+    %{rows: rows} =
+      SQL.query!(
+        TestRepo,
+        """
+        SELECT indexdef
+        FROM pg_indexes
+        WHERE schemaname = 'public' AND tablename = $1
+          AND indexname = $1 || '_content_hash_index'
+        """,
+        [table]
+      )
+
+    List.flatten(rows)
+  end
+
+  # A retired chart as decision 6 leaves it: the row and its hash stay,
+  # the bytes are gone, and the two tombstone columns say who and when.
+  defp tombstone_chart(table, content_hash) do
+    SQL.query!(
+      TestRepo,
+      """
+      INSERT INTO "#{table}" (id, content_hash, identity_blob, chart_blob,
+                              retired_at, retired_by, inserted_at, updated_at)
+      VALUES ($1, $2, NULL, NULL, now(), 'operator', now(), now())
+      """,
+      [content_hash, content_hash]
+    )
+  end
+
+  defp drop_retirement_tables(base_version, version) do
+    SQL.query!(TestRepo, "DROP TABLE IF EXISTS kx_v07_inputs", [])
+    SQL.query!(TestRepo, "DROP TABLE IF EXISTS kx_v07_executions", [])
+    SQL.query!(TestRepo, "DROP TABLE IF EXISTS kx_v07_positions", [])
+    SQL.query!(TestRepo, "DROP TABLE IF EXISTS kx_v07_charts", [])
+
+    SQL.query!(TestRepo, "DELETE FROM schema_migrations WHERE version = ANY($1)", [
+      [base_version, version]
+    ])
+
+    :ok
   end
 
   defp identity_columns(table, columns) do

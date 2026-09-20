@@ -147,6 +147,29 @@ if Code.ensure_loaded?(Ecto.Migration) do
     An install already at V05 needs none of that: `up(from: 6)` is the whole
     upgrade.
 
+    V07 needs no recipe of its own: it indexes `executions(content_hash)`,
+    adds the two tombstone columns to `charts` and - on Postgres - makes
+    the two chart blob columns nullable, inside an ordinary transaction
+    (ADR-0012). An install already at V06, which is every install running
+    `0.12.0`, picks it up with
+
+        defmodule MyApp.Repo.Migrations.AddStatifierPersistenceRetirement do
+          use Ecto.Migration
+
+          def up, do: StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, from: 7)
+          def down, do: StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence, version: 7)
+        end
+
+    `from:` is inclusive, so `from: 7` runs V07 and nothing before it.
+
+    Rolling that one back is the single place in this package's DDL where
+    a rollback can refuse: `down/1` raises rather than running when any
+    `charts` row has been retired, because a retirement removed the bytes
+    the `NOT NULL` it would restore requires.
+    `StatifierPersistence.Ecto.Migrations.V07` records the whole of it,
+    including what the two `modify` changes do on a backend that is not
+    Postgres.
+
     `expected_version/0` answers what that newest version is. A host that
     delegates its migrations here never needs it; a host whose schema is
     hand-written DDL has to check for itself that its tables are current,
@@ -167,7 +190,8 @@ if Code.ensure_loaded?(Ecto.Migration) do
       3 => StatifierPersistence.Ecto.Migrations.V03,
       4 => StatifierPersistence.Ecto.Migrations.V04,
       5 => StatifierPersistence.Ecto.Migrations.V05,
-      6 => StatifierPersistence.Ecto.Migrations.V06
+      6 => StatifierPersistence.Ecto.Migrations.V06,
+      7 => StatifierPersistence.Ecto.Migrations.V07
     }
 
     # Read off the map rather than written beside it: a version this module
