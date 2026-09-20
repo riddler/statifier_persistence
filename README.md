@@ -949,6 +949,30 @@ no DDL change. A `:blob_type` that dumps to a different underlying type
 (text, jsonb, a Postgres domain) needs you to alter those columns
 yourself; the migrations helper does not do it for you.
 
+### Pin sources
+
+Some of what holds a chart in use is not in this package's tables: a
+pending timer or an address row lives in a host's own store, and this
+package depends on neither. A host teaches it about that state by
+implementing `StatifierPersistence.PinSource`, whose single callback
+answers named counts for one content hash, and by passing the source
+modules in when it asks for a retirement. A source that cannot answer
+raises rather than answering zero, and the refusal names the module.
+
+    defmodule MyApp.TimerPins do
+      @behaviour StatifierPersistence.PinSource
+
+      @impl true
+      def pins(_content_hash, %{execution_ids: execution_ids}) do
+        %{pending_timers: MyApp.Timers.count_scheduled_for(execution_ids)}
+      end
+    end
+
+`context` carries `:execution_ids`, the ids of the `:active` executions
+on that hash, so a source that knows executions and not hashes - a timer
+queue over an advertising chart waiting for a click after an impression -
+can answer without learning this package's key.
+
 ## Running the tests
 
 The suite includes database-backed tests against a real Postgres server -
