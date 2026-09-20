@@ -18,6 +18,10 @@ something does, `executions_on/2` and the new `StatifierPersistence.PinSource`
 behaviour answer what is still using it, both chart doors answer a retired arm
 in place of a retired chart's bytes, and migration V07 adds the tombstone
 columns and the content-hash index those queries need.
+The release also carries the host's registered Event I/O Processor types
+through the execution paths: `send_types:` on `StatifierPersistence.Executions.step/5`
+and on `StatifierPersistence.Driver.new/3`, stamped onto the loaded position
+beside `invoke_types:`.
 
 Upgrading: run V07 against an existing database. An install already at V06
 writes `up(for: MyApp.Persistence, from: 7)` - `from:` is inclusive, so that
@@ -26,6 +30,8 @@ reads charts gains one arm to handle: `StatifierPersistence.Storage.fetch_chart/
 answers `{:error, {:chart_retired, info}}` for a hash a retirement has
 tombstoned, in place of `:chart_not_found`. A host that never retires a chart
 never sees it.
+The `statifier` floor moves to `~> 2.6`, the first release carrying
+host-registered send types.
 
 ### Added
 
@@ -39,6 +45,8 @@ never sees it.
 - A position row on a content hash is a pin: it refuses a retirement of that chart even when no execution runs on it.
 - The generated chart schema carries the `retired_at` and `retired_by` columns migration V07 adds.
 - `StatifierPersistence.Storage.Adapter.pin_counts/3`, `pinned?/1` and `sources_pinned?/1`, with the `pin_counts/0`, `execution_counts/0` and `source_counts/0` types: the one shape a `retire_chart/3` refusal carries and the predicate for whether what an adapter counted is a pin, so a third-party adapter builds its refusal through them instead of inventing a second shape for one answer.
+- `send_types:` on `StatifierPersistence.Executions.step/5`, the `Statifier.Send.Types.t/0` snapshot of the host's registered Event I/O Processor types, stamped onto the loaded position the way `invoke_types:` is; on `create/4` it travels inside `initialize:`.
+- `send_types:` on `StatifierPersistence.Driver.new/3`, a driver-level default carried onto every step and, through `initialize:`, onto the create.
 
 ### Changed
 
@@ -48,6 +56,7 @@ never sees it.
 - `StatifierPersistence.Storage.save_chart/3` refuses that same arm for a retired hash rather than reviving the row.
 - The adapter error vocabulary gains `:chart_retirement_unsupported`, the refusal for a store whose chart blob columns are not nullable, and `{:pinned, counts}`, the refusal carrying every count.
 - `StatifierPersistence.Executions.executions_on/2` answers a real `children` count: the durable-child linkage pins naming the hash whose parent execution is `:active`, in place of the zero both bundled adapters returned for that key.
+- The `statifier` floor is `~> 2.6`, the first release carrying host-registered send types.
 
 ## [0.12.0] 2026-09-13
 
