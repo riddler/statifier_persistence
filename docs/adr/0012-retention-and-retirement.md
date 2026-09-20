@@ -1,9 +1,9 @@
 # ADR-0012: Retention and retirement: what pins a chart, zero pins is retirable, `Executions.retire_chart/4` refuses with the counts or tombstones the row and nulls the blobs, a retired hash is its own error, and no clock
 
-Status: proposed (2026-09-19, sp-ryi, campaign RF063; the code beads of this
-campaign build against it at proposed and cite its Decision items. sp-9oa
-builds the drained query and migration V07, sp-34l builds the pin-source
-behaviour, and `Executions.retire_chart/4` follows both)
+Status: accepted (2026-09-20, sp-ryi, campaign RF063; proposed 2026-09-19 and
+accepted once the code beads had landed against it. sp-9oa built the drained
+query and migration V07, sp-34l built the pin-source behaviour, and
+`Executions.retire_chart/4` follows both)
 
 ## Context
 
