@@ -377,3 +377,42 @@ count as complete is the one mistake decision 4 exists to prevent. An
 incomplete count is not a smaller answer to the same question; it is an
 answer to a different one. Making the two arms structurally different is
 what keeps a host from having to know the difference.
+
+**Decision 3's capability now covers two callbacks, and an adapter that
+declares it exports both.** Decision 3 rules that an adapter declares the
+drained query by exporting one callback beside the predicate - "it exports
+the callback, the facade checks with `function_exported?/3`". Decision 4
+gives a pin source the ids of the `:active` executions on the hash, and
+decision 3's map holds counts and no ids, so the ids need a listing of their
+own; that listing,
+`list_active_execution_ids_by_content_hash/2`, is placed under
+`supports_content_hash_query?/1` rather than under a second predicate. Both
+read the same column under the same index, and an adapter has no way to
+want one and not the other. The consequence is a real widening of what the
+predicate promises: an adapter that answers `true` is called for both, so an
+adapter written to decision 3 exactly as ruled - the predicate and the count
+callback and nothing further - is no longer conformant, and exports the
+listing too.
+
+**Widening it rather than adding a second opt-in is safe only because the
+capability is unreleased, and that will not be true a second time.** Neither
+`supports_content_hash_query?/1` nor `count_executions_by_content_hash/2`
+exists at tag `v0.12.0`, the latest released version (verified by searching
+that tag's tree); both landed in the same unreleased cycle as the listing,
+and `0.13.0` has not been cut. So no adapter outside this repository can have
+declared the capability yet and nothing can be broken by changing what it
+means. Once `0.13.0` ships, the same widening is a breaking change to every
+adapter that declared the capability, and the answer then is a second
+predicate rather than a second callback under the first.
+
+**The Consequences sentence "The adapter behaviour grows one callback and
+one predicate" counted this record's first pass, not its whole.** It is
+exact about the two it then names. Read as a total it is now inexact: the
+behaviour grows three callbacks - `count_executions_by_content_hash/2`,
+`list_active_execution_ids_by_content_hash/2` and `retire_chart/3` - and two
+predicates, `supports_content_hash_query?/1` and
+`supports_chart_retirement?/1`. The sentence's substance survives
+unchanged, because what it is really saying is that every adapter written
+before this record stays conformant without a line of change: it exports
+none of the five, the facade finds none, and only the retirement refuses on
+the absence.
