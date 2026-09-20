@@ -327,6 +327,7 @@ defmodule StatifierPersistence.Driver do
     :dispatch,
     :effects,
     :invoke_types,
+    :send_types,
     :serialization,
     :chart_resolver,
     :child_canceller,
@@ -340,6 +341,7 @@ defmodule StatifierPersistence.Driver do
           dispatch: dispatch(),
           effects: Executor.t() | nil,
           invoke_types: MachineState.invoke_types(),
+          send_types: MachineState.send_types(),
           serialization: {module(), term()} | nil,
           chart_resolver: chart_resolver() | nil,
           child_canceller: child_canceller() | nil,
@@ -377,6 +379,13 @@ defmodule StatifierPersistence.Driver do
     because the registered set is fixed for a session's lifetime
     (st-ADR-0051); `routes:`, which is not, stays per call. Defaults to
     `nil`, "the built-in set only".
+  - `send_types:` - the `t:Statifier.Send.Types.t/0` snapshot of the Event
+    I/O Processor types this host registers, stamped on every step and,
+    through `initialize:`, on the create. A driver-level default for the
+    same reason `invoke_types:` is one: the registered set is fixed for a
+    session's lifetime (st-ADR-0069). Defaults to `nil`, under which a
+    `<send>` carrying a non-built-in `type` is rejected with
+    `error.execution`.
   - `serialization:` - the `{module, config}` per-execution strategy every entry
     point runs inside (ADR-0004 decision 5). Defaults to whatever
     `StatifierPersistence.Executions` defaults to, the adapter's own
@@ -425,6 +434,7 @@ defmodule StatifierPersistence.Driver do
       dispatch: Keyword.fetch!(opts, :dispatch),
       effects: Keyword.get(opts, :effects),
       invoke_types: Keyword.get(opts, :invoke_types),
+      send_types: Keyword.get(opts, :send_types),
       serialization: Keyword.get(opts, :serialization),
       chart_resolver: Keyword.get(opts, :chart_resolver),
       child_canceller: Keyword.get(opts, :child_canceller),
@@ -439,8 +449,8 @@ defmodule StatifierPersistence.Driver do
   `StatifierPersistence.Executions.create/4` with this driver's executor, then
   the answer loop. `opts` takes everything `create/4` takes except
   `executor:`, which this module supplies - `initialize:`, `metadata:`,
-  `routes:`, and per-call overrides of the driver's own `invoke_types:`
-  and `serialization:`.
+  `routes:`, and per-call overrides of the driver's own `invoke_types:`,
+  `send_types:` and `serialization:`.
   """
   @spec create(driver :: t(), execution_id :: Executions.execution_id(), opts :: keyword()) ::
           result()
@@ -465,15 +475,29 @@ defmodule StatifierPersistence.Driver do
   # take effect on every step of an execution and not on the step that starts it,
   # and the very first `<invoke>` a chart makes - the one in its initial
   # configuration - would go unregistered.
+  #
+  # `send_types:` travels the same way and for one more reason:
+  # `Statifier.MachineState.new/2` is the only writer of the
+  # `_ioprocessors` entry a registered type gets (st-ADR-0069), and
+  # `Statifier.MachineState.put_send_types/2` does not rewrite it, so a
+  # create that stamped outside `initialize:` would leave `_ioprocessors`
+  # missing the host's own types for the life of the execution.
   @spec create_opts(t(), keyword()) :: keyword()
-  defp create_opts(%__MODULE__{invoke_types: nil}, opts), do: opts
+  defp create_opts(%__MODULE__{} = driver, opts) do
+    opts
+    |> initialize_opt(:invoke_types, driver.invoke_types)
+    |> initialize_opt(:send_types, driver.send_types)
+  end
 
-  defp create_opts(%__MODULE__{invoke_types: invoke_types}, opts) do
+  @spec initialize_opt(keyword(), :invoke_types | :send_types, term()) :: keyword()
+  defp initialize_opt(opts, _key, nil), do: opts
+
+  defp initialize_opt(opts, key, value) do
     Keyword.update(
       opts,
       :initialize,
-      [invoke_types: invoke_types],
-      &Keyword.put_new(&1, :invoke_types, invoke_types)
+      [{key, value}],
+      &Keyword.put_new(&1, key, value)
     )
   end
 
@@ -1554,6 +1578,7 @@ defmodule StatifierPersistence.Driver do
       |> Keyword.delete(:after_step)
       |> Keyword.put(:executor, executor(driver, ref))
       |> Keyword.put_new(:invoke_types, driver.invoke_types)
+      |> Keyword.put_new(:send_types, driver.send_types)
       |> step_reporter_opt(after_step, ref)
 
     case driver.serialization do

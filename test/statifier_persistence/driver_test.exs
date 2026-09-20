@@ -4,8 +4,20 @@ defmodule StatifierPersistence.DriverTest do
   alias Statifier.Effect.Invoke
   alias Statifier.Event
   alias Statifier.Invoke.Types, as: InvokeTypes
+  alias Statifier.Send.Types, as: SendTypes
   alias StatifierPersistence.{Driver, Storage}
   alias StatifierPersistence.Storage.InMemory
+
+  defmodule SinkProcessor do
+    @moduledoc false
+    # The module a `send_types:` map registers a type against. It does NOT
+    # implement `Statifier.Send.Processor`: that behaviour's `deliver/3`
+    # and `cancel/2` are `Statifier.Session.Effects.plan/2`'s planning
+    # callbacks, and this driver drives `Statifier.Interpreter` with no
+    # session, so nothing here ever calls them.
+    @spec ioprocessors_entry(String.t()) :: map()
+    def ioprocessors_entry(type), do: %{"location" => type}
+  end
 
   # One call, answered or refused, with a plain state on each side so the
   # execution stays active and its position stays readable either way.
@@ -34,6 +46,28 @@ defmodule StatifierPersistence.DriverTest do
           <transition event="done.invoke.call" target="approved"/>
       </state>
       <state id="approved"/>
+  </scxml>
+  """
+
+  # A <send> of a host-registered type on the initial configuration's
+  # <onentry>, and a second on the "go" transition: the first is emitted
+  # only when the driver's send_types snapshot reached the core through
+  # `initialize:`, the second only when it was stamped on the step.
+  @registered_send_source """
+  <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="a">
+      <state id="a">
+          <onentry>
+              <send event="impression.recorded" type="myapp:sink" target="sink://impressions"/>
+          </onentry>
+          <transition event="go" target="delivered">
+              <send event="click.recorded" type="myapp:sink" target="sink://clicks"/>
+          </transition>
+          <transition event="error.execution" target="rejected"/>
+      </state>
+      <state id="delivered">
+          <transition event="error.execution" target="rejected"/>
+      </state>
+      <state id="rejected"/>
   </scxml>
   """
 
@@ -134,6 +168,54 @@ defmodule StatifierPersistence.DriverTest do
 
       assert {:ok, _execution, machine_state} = Driver.create(driver, "execution_1")
       assert leaves(machine_state) == ["approved"]
+    end
+
+    # Sabotage: misspelled `initialize_opt/3`'s `:initialize` key for
+    # `:send_types` - the snapshot never reached
+    # `Statifier.MachineState.new/2`, the onentry send classified as
+    # unsupported, no {:send, ...} crossed the seam and the execution
+    # rested in "rejected".
+    test "registers the driver's send types on the creating step", %{store: store} do
+      test_pid = self()
+
+      driver =
+        driver(store, @registered_send_source,
+          dispatch: fn _t, _p, _c -> {:ok, %{}} end,
+          effects: fn effect, _context -> send(test_pid, {:effect, effect}) && :ok end,
+          send_types: SendTypes.from_send_types(%{"myapp:sink" => SinkProcessor})
+        )
+
+      assert {:ok, _execution, machine_state} = Driver.create(driver, "execution_1")
+
+      assert leaves(machine_state) == ["a"]
+
+      assert_received {:effect,
+                       {:send,
+                        %{
+                          event: "impression.recorded",
+                          type: "myapp:sink",
+                          target: "sink://impressions"
+                        }}}
+    end
+
+    # The same driver without the snapshot, which is what makes the test
+    # above assert the registration rather than the chart.
+    # Sabotage: made `Statifier.Send.Types.classify/2` answer `:registered`
+    # for an unregistered type - the send was emitted and this went red on
+    # both the configuration and the refute.
+    test "without send types the same send is 6.2.5's error.execution", %{store: store} do
+      test_pid = self()
+
+      driver =
+        driver(store, @registered_send_source,
+          dispatch: fn _t, _p, _c -> {:ok, %{}} end,
+          effects: fn effect, _context -> send(test_pid, {:effect, effect}) && :ok end
+        )
+
+      assert {:ok, _execution, machine_state} = Driver.create(driver, "execution_1")
+
+      assert leaves(machine_state) == ["rejected"]
+      refute_received {:effect, {:send, _}}
     end
 
     # Sabotage: had the failure arm build a `done.invoke.` name - the chart
@@ -241,6 +323,32 @@ defmodule StatifierPersistence.DriverTest do
 
       assert execution.status == :failed
       refute_received :dispatched
+    end
+
+    # Sabotage: dropped `Keyword.put_new(:send_types, driver.send_types)`
+    # from `execution_opts/3` - the step re-stamped nothing, the
+    # transition's send classified as unsupported, and the execution
+    # landed in "rejected" with no {:send, ...} for "click.recorded".
+    test "stamps the driver's send types on every step", %{store: store} do
+      test_pid = self()
+
+      driver =
+        driver(store, @registered_send_source,
+          dispatch: fn _t, _p, _c -> {:ok, %{}} end,
+          effects: fn effect, _context -> send(test_pid, {:effect, effect}) && :ok end,
+          send_types: SendTypes.from_send_types(%{"myapp:sink" => SinkProcessor})
+        )
+
+      assert {:ok, _execution, _ms} = Driver.create(driver, "execution_1")
+
+      assert {:ok, _execution, machine_state} =
+               Driver.send_event(driver, "execution_1", Event.external("go"))
+
+      assert leaves(machine_state) == ["delivered"]
+
+      assert_received {:effect,
+                       {:send,
+                        %{event: "click.recorded", type: "myapp:sink", target: "sink://clicks"}}}
     end
   end
 

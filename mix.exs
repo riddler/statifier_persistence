@@ -106,14 +106,19 @@ defmodule StatifierPersistence.MixProject do
   # change that spans both repos. It is an env var rather than a mix.exs edit
   # so the override never lands in a commit by accident.
   #
-  # The floor is 2.2.1: the first release carrying the queue-discard-on-exit
-  # fix this package's completion conformance cases need (a session that
-  # reaches a top-level <final> leaves an empty internal queue, so a :done
+  # The floor is 2.6: the first release carrying host-registered send types.
+  # `Statifier.MachineState.put_send_types/2` is what stamps a `send_types:`
+  # snapshot back onto a decoded position, and without it a
+  # `<send type="myapp:sink">` on a durable execution classifies as
+  # unsupported and raises `error.execution` before any effect exists. It
+  # subsumes the previous 2.2.1 floor (the queue-discard-on-exit fix this
+  # package's completion conformance cases need: a session that reaches a
+  # top-level <final> leaves an empty internal queue, so a :done
   # MachineState is quiescent by construction and reaches the persist tail).
   defp statifier_dep do
     case System.get_env("STATIFIER_PATH") do
       nil ->
-        {:statifier, "~> 2.2 and >= 2.2.1"}
+        {:statifier, "~> 2.6"}
 
       path ->
         {:statifier, path: path, override: true}

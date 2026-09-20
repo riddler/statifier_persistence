@@ -285,18 +285,20 @@ defmodule StatifierPersistence.Storage do
   reuse `Identity.matches?/2` and produce the same
   `{:identity_mismatch, expected, actual}` arm, whichever check fires.
 
-  The returned `MachineState.t()` carries `nil` for both `routes` and
-  `invoke_types`. Neither survives the round trip: `Position.to_binary/1`
-  drops both alongside `:machine` when it encodes the payload, and
-  `from_binary/2` drops both from the decoded payload before it rebuilds
-  the struct - unconditionally, so a blob written by an older encoder
-  decodes to `nil` too (st-ADR-0064, which amends st-ADR-0052 in part).
+  The returned `MachineState.t()` carries `nil` for `routes`,
+  `invoke_types` and `send_types`. None survives the round trip:
+  `Position.to_binary/1` drops all three alongside `:machine` when it
+  encodes the payload, and `from_binary/2` drops all three from the
+  decoded payload before it rebuilds the struct - unconditionally, so a
+  blob written by an older encoder decodes to `nil` too (st-ADR-0064,
+  which amends st-ADR-0052 in part).
 
-  A caller must therefore stamp both before the next drive, via
-  `MachineState.put_routes/2` and `MachineState.put_invoke_types/2`: both
-  are per-drive/per-session snapshots (st-ADR-0048, st-ADR-0051), and a
-  persisted position is not the place they live. Stamping is the stepper's
-  job (sp-4an.2), not this function's; this function is documented here as
+  A caller must therefore stamp all three before the next drive, via
+  `MachineState.put_routes/2`, `MachineState.put_invoke_types/2` and
+  `MachineState.put_send_types/2`: each is a per-drive or per-session
+  snapshot (st-ADR-0048, st-ADR-0051, st-ADR-0069), and a persisted
+  position is not the place they live. Stamping is the stepper's job
+  (sp-4an.2), not this function's; this function is documented here as
   the place a reader learns the snapshot does not come back.
   """
   @spec load_position(
@@ -962,9 +964,9 @@ defmodule StatifierPersistence.Storage do
   then `Position.from_binary/2` as the authoritative check, its result
   returned unchanged.
 
-  Like `load_position/3`, the returned state carries `nil` for both
-  `routes` and `invoke_types` (st-ADR-0064); re-stamping them before the
-  next drive is the stepper's job, not this function's.
+  Like `load_position/3`, the returned state carries `nil` for `routes`,
+  `invoke_types` and `send_types` (st-ADR-0064); re-stamping them before
+  the next drive is the stepper's job, not this function's.
   """
   @spec load_execution_position(
           store :: t(),

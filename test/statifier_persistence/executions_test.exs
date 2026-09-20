@@ -18,6 +18,19 @@ defmodule StatifierPersistence.ExecutionsTest do
     end
   end
 
+  defmodule SinkProcessor do
+    @moduledoc false
+    # The module a `send_types:` map registers a type against. It does NOT
+    # implement `Statifier.Send.Processor`: that behaviour's `deliver/3`
+    # and `cancel/2` are `Statifier.Session.Effects.plan/2`'s planning
+    # callbacks, and this package drives `Statifier.Interpreter` with no
+    # session, so nothing here ever calls them. What
+    # `Statifier.Send.Types.from_send_types/1` reads off the module is the
+    # optional `ioprocessors_entry/1`, and only that.
+    @spec ioprocessors_entry(String.t()) :: map()
+    def ioprocessors_entry(type), do: %{"location" => type}
+  end
+
   # A module capture rather than an anonymous fun: :telemetry logs a
   # performance warning for a local handler, which is noise in the suite
   # output (the same shape `telemetry_test.exs` uses).
@@ -33,6 +46,7 @@ defmodule StatifierPersistence.ExecutionsTest do
   alias Statifier.Machine
   alias Statifier.MachineState
   alias Statifier.Send.Routes
+  alias Statifier.Send.Types, as: SendTypes
   alias StatifierPersistence.{Execution, Executions, Storage}
   alias StatifierPersistence.Execution.Linkage
   alias StatifierPersistence.Storage.InMemory
@@ -133,6 +147,43 @@ defmodule StatifierPersistence.ExecutionsTest do
           </transition>
       </state>
       <state id="b"/>
+  </scxml>
+  """
+
+  # A <send> carrying a host-registered `type` whose emission depends on
+  # the send_types snapshot stamped before the step (st-ADR-0069). With
+  # the type registered the core builds the effect and it crosses the
+  # seam; with `send_types` nil the type classifies as unsupported, 6.2.5
+  # rejects the element, and the error.execution that lands on the
+  # internal queue takes the execution out of `delivered` into `rejected`.
+  # The `target` is the processor's own opaque route string, never parsed.
+  @send_type_chart_source """
+  <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="a">
+      <state id="a">
+          <transition event="go" target="delivered">
+              <send event="impression.joined" type="myapp:sink" target="sink://impressions"/>
+          </transition>
+      </state>
+      <state id="delivered">
+          <transition event="error.execution" target="rejected"/>
+      </state>
+      <state id="rejected"/>
+  </scxml>
+  """
+
+  # The same registered type, sent from the initial configuration's
+  # <onentry>. Nothing stamps a created execution after the fact, so this
+  # send is emitted only when the snapshot reached
+  # `Statifier.MachineState.new/2` through `initialize:`.
+  @send_type_onentry_chart_source """
+  <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="a">
+      <state id="a">
+          <onentry>
+              <send event="impression.joined" type="myapp:sink" target="sink://impressions"/>
+          </onentry>
+          <transition event="error.execution" target="rejected"/>
+      </state>
+      <state id="rejected"/>
   </scxml>
   """
 
@@ -396,6 +447,37 @@ defmodule StatifierPersistence.ExecutionsTest do
       assert metadata["tenant_id"] == "acct_1"
       assert {:ok, ^linkage} = Linkage.from_metadata(metadata)
     end
+
+    # sabotage: drop `send_types` from the `initialize:` list below -> red
+    # (the onentry send classifies as unsupported and the execution lands
+    # in `rejected`), which is what makes this assert the create path
+    # carries the snapshot rather than the step path re-stamping it.
+    test "carries a send_types snapshot to the initial configuration through initialize:",
+         %{store: store} do
+      machine = compile!(@send_type_onentry_chart_source)
+      send_types = SendTypes.from_send_types(%{"myapp:sink" => SinkProcessor})
+
+      {:ok, _execution, unregistered} =
+        Executions.create(store, "execution-unregistered", machine, executor: RecordingExecutor)
+
+      refute Enum.any?(RecordingExecutor.effects(), &match?({:send, _}, &1))
+      assert active_ids(unregistered) == ["rejected"]
+
+      RecordingExecutor.reset()
+
+      {:ok, _execution, registered} =
+        Executions.create(store, "execution-registered", machine,
+          executor: RecordingExecutor,
+          initialize: [send_types: send_types]
+        )
+
+      assert Enum.any?(
+               RecordingExecutor.effects(),
+               &match?({:send, %{event: "impression.joined", type: "myapp:sink"}}, &1)
+             )
+
+      assert active_ids(registered) == ["a"]
+    end
   end
 
   describe "step/5" do
@@ -615,6 +697,72 @@ defmodule StatifierPersistence.ExecutionsTest do
                RecordingExecutor.effects(),
                &match?({:send, %{event: "ping", target: "#_parent"}}, &1)
              )
+    end
+
+    # sabotage: step_loaded/6 skips the put_send_types/2 re-stamp -> red
+    # (the send classifies as unsupported and the execution lands in
+    # `rejected` with no :send effect)
+    test "stamps the send_types snapshot onto the loaded position before the step",
+         %{store: store} do
+      machine = compile!(@send_type_chart_source)
+      send_types = SendTypes.from_send_types(%{"myapp:sink" => SinkProcessor})
+
+      # Unstamped: the type is not in the registered set, so 6.2.5 rejects
+      # the element and no :send crosses the seam.
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-unregistered", machine, executor: RecordingExecutor)
+
+      RecordingExecutor.reset()
+
+      {:ok, _execution, unregistered} =
+        Executions.step(store, "execution-unregistered", machine, Event.external("go"),
+          executor: RecordingExecutor
+        )
+
+      refute Enum.any?(RecordingExecutor.effects(), &match?({:send, _}, &1))
+      assert active_ids(unregistered) == ["rejected"]
+
+      # Stamped: the same chart emits the :send, target unparsed.
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-registered", machine, executor: RecordingExecutor)
+
+      RecordingExecutor.reset()
+
+      {:ok, _execution, registered} =
+        Executions.step(store, "execution-registered", machine, Event.external("go"),
+          executor: RecordingExecutor,
+          send_types: send_types
+        )
+
+      assert Enum.any?(
+               RecordingExecutor.effects(),
+               &match?(
+                 {:send,
+                  %{event: "impression.joined", type: "myapp:sink", target: "sink://impressions"}},
+                 &1
+               )
+             )
+
+      assert active_ids(registered) == ["delivered"]
+    end
+
+    # sabotage: drop `:send_types` from both `Map.drop/2` lists in the
+    # dependency's `Statifier.Position` (encode and decode) -> red: the
+    # snapshot survives the round trip, and the tripwire match in
+    # step_loaded/6 stops proving anything
+    test "the loaded position carries send_types nil, which is what the tripwire asserts",
+         %{store: store} do
+      machine = compile!(@send_type_chart_source)
+      send_types = SendTypes.from_send_types(%{"myapp:sink" => SinkProcessor})
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine,
+          executor: RecordingExecutor,
+          initialize: [send_types: send_types]
+        )
+
+      assert {:ok, %MachineState{routes: nil, invoke_types: nil, send_types: nil}} =
+               Storage.load_execution_position(store, "execution-1", machine)
     end
 
     # sabotage: step/5's fetch error arm rewrites the reason -> red
