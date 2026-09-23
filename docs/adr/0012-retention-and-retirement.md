@@ -482,3 +482,42 @@ own sources hold counts retires a chart its own sources would have blocked. That
 designed and not a hole in it - the facade is documented for a host that
 keeps its own pin accounting and has already done the outside half itself -
 and it is recorded here because it was unrecorded, not because it changes.
+
+## Note (2026-09-23, sp-6pa): the sp-brx Note's closing clause names one refusal where there are several, and its heading leaves out the capability widening
+
+Pure addition: nothing above is edited, and this record is read at the date
+its sections were decided. This Note decides nothing; it qualifies two
+places in the sp-brx Note whose wording is looser than what they record.
+
+**"Only the retirement refuses on the absence" is inexact about which
+functions refuse.** The sp-brx Note's last paragraph says that an adapter
+written before this record exports none of the new callbacks, the facade
+finds none, "and only the retirement refuses on the absence". Every facade
+function that needs the drained query answers
+`{:error, :content_hash_query_unsupported}` when the adapter does not
+declare it, without calling the adapter's query callback:
+`Storage.count_executions_by_content_hash/2`
+(`lib/statifier_persistence/storage.ex`, `count_executions_by_content_hash/2`,
+read at `fb1bae9`), `Storage.list_active_execution_ids_by_content_hash/2`
+(same file, `list_active_execution_ids_by_content_hash/2`, read at
+`fb1bae9`) and `Storage.retire_chart/3` (same file, `retire_chart/3`, read
+at `fb1bae9`), which also answers `{:error, :chart_retirement_unsupported}`
+for a store that cannot carry a tombstone. The host-facing doors above them
+answer the same arms: `Executions.executions_on/2`
+(`lib/statifier_persistence/executions.ex`, `executions_on/2`, read at
+`fb1bae9`) and `Executions.retire_chart/4` (same file, `retire_chart/4`,
+read at `fb1bae9`). The sentence's substance is unchanged: an adapter
+written before this record stays conformant without a line of change,
+because each of those answers is a refusal at open and none of them is a
+conformance failure. The looseness is inherited from the Consequences
+paragraph "The adapter behaviour grows one callback and one predicate",
+whose "only `Storage.retire_chart/3` refuses on the absence" the sp-brx
+Note repeated rather than qualified.
+
+**The sp-brx Note's heading names two of its topics and leaves out a
+third.** The heading names the nullable chart blobs and the source that
+could not answer. The third topic is in the Note's closing paragraphs: that
+decision 3's capability covers two callbacks rather than one, why widening
+it was safe before `0.13.0` and would not be again, and the corrected totals
+of callbacks and predicates. A reader scanning the headings for where the
+capability's scope was settled finds it under the sp-brx Note.

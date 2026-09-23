@@ -50,7 +50,7 @@ if Code.ensure_loaded?(Ecto) do
 
     @behaviour StatifierPersistence.Storage.Adapter
 
-    import Ecto.Query, only: [from: 2, subquery: 1]
+    import Ecto.Query, only: [exclude: 2, from: 2, subquery: 1]
 
     alias Ecto.Adapters.SQL.Sandbox
     alias Ecto.Changeset
@@ -110,10 +110,18 @@ if Code.ensure_loaded?(Ecto) do
 
     A tombstoned hash is refused with
     `{:error, {:chart_retired, info}}` and not revived (ADR-0012
-    decision 6). The read of the tombstone and the insert are one
-    transaction, so the refusal is not a check a concurrent retirement
-    can slip past; the transaction joins a caller's own when there is
-    one, which is what keeps the README's "Writing inside a caller's
+    decision 6). What keeps a tombstoned row from being revived is the
+    unique index, not the read: the insert never rewrites an existing
+    row, so no interleaving puts the bytes back. The read is what turns
+    a save of a retired hash into the retired arm rather than a silent
+    `:ok`, and it answers for the row as it stood when it ran. The read
+    and the insert are one transaction, but under Postgres's default
+    READ COMMITTED each statement reads its own snapshot, so a
+    retirement committing between the two leaves this save answering
+    `:ok` - which is the answer the save would have had in the order it
+    was read in, a save followed by a retirement, and the row stays
+    tombstoned. The transaction joins a caller's own when there is one,
+    which is what keeps the README's "Writing inside a caller's
     transaction" contract intact.
     """
     @impl Adapter
@@ -578,23 +586,8 @@ if Code.ensure_loaded?(Ecto) do
     @spec children_pin_count(Adapter.opts(), Adapter.content_hash()) :: non_neg_integer()
     defp children_pin_count(opts, content_hash) do
       if supports_metadata?(opts) do
-        reserved = Linkage.reserved_key()
-        pin_match = %{reserved => %{"content_hash" => content_hash}}
-        executions = execution_schema(opts)
-
         repo(opts).one(
-          from(child in executions,
-            join: parent in ^executions,
-            on:
-              parent.execution_id ==
-                fragment(
-                  "?->?->>?",
-                  child.metadata,
-                  type(^reserved, :string),
-                  type(^"parent_execution_id", :string)
-                ),
-            where: fragment("? @> ?", child.metadata, type(^pin_match, :map)),
-            where: parent.status == ^encode_status(:active),
+          from([child] in exclude(child_pins(opts, content_hash), :select),
             select: count(child.execution_id)
           )
         )
@@ -648,6 +641,14 @@ if Code.ensure_loaded?(Ecto) do
     is not Postgres, has a store that can be retired against and this
     predicate says so. One query, on a call a host makes once per
     retirement.
+
+    The probe reads the columns' presence and the two blobs'
+    nullability, not their types. A host that adds the tombstone
+    columns itself with types other than V07's - `retired_at` as text,
+    say - is answered `true` here, and the retirement's `UPDATE` then
+    raises the database's own error rather than refusing at open. V07
+    writes the types this adapter writes; a hand-built store has to
+    match them.
     """
     @impl Adapter
     @spec supports_chart_retirement?(Adapter.opts()) :: boolean()
@@ -767,7 +768,13 @@ if Code.ensure_loaded?(Ecto) do
     # A conditional UPDATE that matched nothing means something arrived
     # between the counts above and the statement itself: either a pin,
     # or another retirement. Which one it was is read back rather than
-    # guessed, so a host is never told "pinned" with a map of zeros.
+    # guessed. The read-back is a fresh count, and under READ COMMITTED
+    # it sees what has committed since the UPDATE ran, so a pin that won
+    # the race and has already gone again - an execution that reached a
+    # terminal arm, a position row deleted - is not in it: the refusal
+    # then carries a map of zeros. It is still a refusal and still wrote
+    # nothing, and the next retirement of the same hash is decided
+    # afresh; what the zeros cannot do is name the pin that refused.
     @spec written(
             Adapter.opts(),
             Adapter.content_hash(),
@@ -874,6 +881,11 @@ if Code.ensure_loaded?(Ecto) do
       end
     end
 
+    # The one reading of decision 1's child clause, as a query over the
+    # child rows: `children_pin_count/2` counts it and
+    # `without_child_pins/3` asks that it is empty, so the pin a refusal
+    # reports and the pin the tombstone's statement guards are one pin
+    # by construction.
     @spec child_pins(Adapter.opts(), Adapter.content_hash()) :: Ecto.Query.t()
     defp child_pins(opts, content_hash) do
       reserved = Linkage.reserved_key()
