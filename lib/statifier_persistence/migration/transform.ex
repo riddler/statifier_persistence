@@ -5,9 +5,13 @@ defmodule StatifierPersistence.Migration.Transform do
   # (ADR-0013 decisions 2, 3 and 6). It reads a position export, a plan and
   # the two machines, and writes nothing: every check and the whole
   # transform complete here, before `migrate/4` makes its one write
-  # (decision 4).
+  # (decision 4). It also answers decision 6's static question - which
+  # states of the from chart could own a timer, and which of those a plan
+  # leaves unmapped or drops - which `migrate/4` asks before it reads the
+  # execution.
 
   alias Statifier.{Machine, MachineState, Position}
+  alias Statifier.Machine.Content.{Foreach, If, Send}
   alias StatifierPersistence.Executions
   alias StatifierPersistence.Migration.Plan
 
@@ -17,19 +21,33 @@ defmodule StatifierPersistence.Migration.Transform do
   # and the dropped states that were in the execution's configuration.
   @typep applied :: %{machine_state: MachineState.t(), dropped: [Plan.state_id()]}
 
+  # A state of the from chart named in a timer refusal: its id, or its
+  # index when the chart gives it none.
+  @typep timer_state :: Plan.state_id() | non_neg_integer()
+
+  # What the host's pin sources counted for the one execution, under each
+  # source module; `%{}` when they were not asked.
+  @typep source_counts :: %{module() => %{atom() => non_neg_integer()}}
+
   @doc false
-  @spec transform(MachineState.t(), Plan.t(), Machine.t(), Machine.t()) ::
+  @spec transform(MachineState.t(), Plan.t(), Machine.t(), Machine.t(), source_counts()) ::
           {:ok, applied()} | {:error, [Executions.migration_finding()]}
-  def transform(%MachineState{} = machine_state, %Plan{} = plan, from_machine, to_machine) do
+  def transform(
+        %MachineState{} = machine_state,
+        %Plan{} = plan,
+        from_machine,
+        to_machine,
+        source_counts
+      ) do
     case Position.export(machine_state) do
-      {:ok, exported} -> transform_export(exported, plan, from_machine, to_machine)
+      {:ok, exported} -> transform_export(exported, plan, from_machine, to_machine, source_counts)
       {:error, reason} -> {:error, [{:not_exportable, reason}]}
     end
   end
 
-  @spec transform_export(Position.exported(), Plan.t(), Machine.t(), Machine.t()) ::
+  @spec transform_export(Position.exported(), Plan.t(), Machine.t(), Machine.t(), source_counts()) ::
           {:ok, applied()} | {:error, [Executions.migration_finding()]}
-  defp transform_export(exported, plan, from_machine, to_machine) do
+  defp transform_export(exported, plan, from_machine, to_machine, source_counts) do
     mapping = Map.merge(plan.states, plan.history)
     map_id = &map_state(&1, mapping, plan.drop, to_machine)
 
@@ -45,7 +63,8 @@ defmodule StatifierPersistence.Migration.Transform do
       set_findings ++
         history_findings ++
         invocation_findings ++
-        datamodel_findings ++ timer_findings(from_machine, map_id)
+        datamodel_findings ++
+        pending_timer_findings(plan, from_machine, to_machine, source_counts)
 
     case findings do
       [] ->
@@ -234,22 +253,93 @@ defmodule StatifierPersistence.Migration.Transform do
     if Map.has_key?(model, key), do: {:ok, Map.delete(model, key)}, else: {:error, :key_absent}
   end
 
-  # ADR-0013 decision 6 fails closed: with no pin source, a plan that leaves
-  # unmapped or drops a state that could own a timer is refused, naming the
-  # missing source. No pin source can be supplied to `migrate/4` yet, so
-  # every state of the from chart the plan leaves unmapped or drops is
-  # treated as one that could own a timer, and the rule refuses them all.
-  @spec timer_findings(Machine.t(), (Plan.state_id() -> mapped())) ::
+  # ADR-0013 decision 6, the half that depends on the execution: a plan
+  # that leaves a state that could own a timer unmapped, while any source
+  # counts a pending timer for the execution, is refused unless the plan
+  # drops that state. A count names no state and no send id, so any
+  # non-zero count from any source is a pending timer the unmapped states
+  # could own.
+  @spec pending_timer_findings(Plan.t(), Machine.t(), Machine.t(), source_counts()) ::
           [Executions.migration_finding()]
-  defp timer_findings(from_machine, map_id) do
-    from_machine.id_to_index
-    |> Map.keys()
-    |> Enum.filter(&(map_id.(&1) in [:dropped, :unmapped]))
+  defp pending_timer_findings(plan, from_machine, to_machine, source_counts) do
+    %{unmapped: unmapped} = timer_states(plan, from_machine, to_machine)
+
+    if unmapped != [] and pending?(source_counts),
+      do: [{:pending_timers, unmapped, source_counts}],
+      else: []
+  end
+
+  defp pending?(source_counts) do
+    Enum.any?(source_counts, fn {_source, counts} ->
+      Enum.any?(counts, fn {_name, count} -> count > 0 end)
+    end)
+  end
+
+  @doc false
+  # ADR-0013 decision 6's static question, answered over the plan and the
+  # two machines alone: the states of the from chart that could own a
+  # timer and that the plan leaves unmapped, and those it drops. A state
+  # with no id cannot be named by a plan and has no same-id counterpart, so
+  # decision 1 leaves it unmapped; it is named by its index.
+  @spec timer_states(Plan.t(), Machine.t(), Machine.t()) :: %{
+          unmapped: [timer_state()],
+          dropped: [timer_state()]
+        }
+  def timer_states(%Plan{} = plan, %Machine{} = from_machine, %Machine{} = to_machine) do
+    mapping = Map.merge(plan.states, plan.history)
+
+    grouped =
+      from_machine
+      |> timer_owners()
+      |> Enum.group_by(fn
+        index when is_integer(index) -> :unmapped
+        id -> map_state(id, mapping, plan.drop, to_machine)
+      end)
+
+    %{unmapped: Map.get(grouped, :unmapped, []), dropped: Map.get(grouped, :dropped, [])}
+  end
+
+  @doc false
+  # ADR-0013 decision 6's definition, static over the from chart: a state
+  # could own a timer when a `<send>` with a `delay` or a `delayexpr` - both
+  # compile to a non-nil `delay` - appears in its `onentry`, its `onexit`,
+  # the content of a transition it owns (its `<initial>` element's and a
+  # history state's default transition included), or the `<finalize>` of
+  # any of its `<invoke>`s, the bodies of nested `<if>` and `<foreach>`
+  # included. Answers the ids of those states, and the indexes of any that
+  # have no id, sorted.
+  @spec timer_owners(Machine.t()) :: [timer_state()]
+  def timer_owners(%Machine{states: states} = machine) do
+    states
+    |> Tuple.to_list()
+    |> Enum.filter(&owns_delayed_send?(machine, &1))
+    |> Enum.map(fn state -> state.id || state.index end)
     |> Enum.sort()
-    |> case do
-      [] -> []
-      states -> [{:no_pin_source, states}]
-    end
+  end
+
+  defp owns_delayed_send?(machine, state) do
+    transitions =
+      [state.initial_transition, state.history_default | state.transitions]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+      |> Enum.map(&Machine.transition(machine, &1).content)
+
+    blocks =
+      Enum.map(state.onentry ++ state.onexit, & &1.content) ++
+        for(%{finalize: %{content: content}} <- state.invoke, do: content)
+
+    Enum.any?(transitions ++ blocks, &delayed_send_in?(machine, &1))
+  end
+
+  defp delayed_send_in?(machine, c_indexes) do
+    Enum.any?(c_indexes, fn c_index ->
+      case Machine.content(machine, c_index) do
+        %Send{delay: delay} -> delay != nil
+        %If{branches: branches} -> Enum.any?(branches, &delayed_send_in?(machine, &1.content))
+        %Foreach{content: content} -> delayed_send_in?(machine, content)
+        _other -> false
+      end
+    end)
   end
 
   defp dropped(configuration, map_id) do

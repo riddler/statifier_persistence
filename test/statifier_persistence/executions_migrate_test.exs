@@ -10,6 +10,11 @@ defmodule StatifierPersistence.ExecutionsMigrateTest do
   Every refusal case re-reads the stored record and compares it whole with
   the one read before the call: a migration either re-pins the execution
   or leaves it as it was, the park's status write the one exception.
+
+  `awaiting_pickup` is the one state of the from chart that could own a
+  timer (its entry schedules `pickup`), so a plan that leaves it unmapped or
+  drops it needs a pin source (ADR-0013 decision 6). The sources here are
+  fakes standing in for the host's timer queue.
   """
 
   use ExUnit.Case,
@@ -20,6 +25,7 @@ defmodule StatifierPersistence.ExecutionsMigrateTest do
   alias Statifier.Invoke.Types, as: InvokeTypes
   alias StatifierPersistence.{EctoHosts, Execution, Executions, Storage}
   alias StatifierPersistence.Migration.Plan
+  alias StatifierPersistence.Test.{RefusingPinSource, TimerQueuePinSource}
 
   @hold_before """
   <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="hold">
@@ -92,6 +98,29 @@ defmodule StatifierPersistence.ExecutionsMigrateTest do
     end
   end
 
+  defmodule QuietTimerQueue do
+    @moduledoc false
+    # A timer queue with nothing pending for any execution.
+    @behaviour StatifierPersistence.PinSource
+
+    @impl StatifierPersistence.PinSource
+    def pins(_content_hash, _context), do: %{pending_timers: 0}
+  end
+
+  defmodule AskedTimerQueue do
+    @moduledoc false
+    # A timer queue that tells the calling process what it was asked, and
+    # counts one pending timer. The sources are asked in the caller's
+    # process, under the execution's lock.
+    @behaviour StatifierPersistence.PinSource
+
+    @impl StatifierPersistence.PinSource
+    def pins(content_hash, context) do
+      send(self(), {:asked, content_hash, context})
+      %{pending_timers: 1}
+    end
+  end
+
   # Module capture rather than an anonymous fun: :telemetry logs a
   # performance warning for a local handler.
   @spec forward([atom()], map(), map(), %{pid: pid()}) :: :ok
@@ -149,6 +178,25 @@ defmodule StatifierPersistence.ExecutionsMigrateTest do
 
     {:ok, record} = Storage.fetch_execution(ctx.store, execution_id)
     record
+  end
+
+  # A hold whose copy is available and on its way to the patron's branch:
+  # it waits in `routing`, before `awaiting_pickup` has scheduled anything
+  # for it.
+  defp routing_hold(ctx, execution_id) do
+    {:ok, _execution, _ms} =
+      Executions.create(ctx.store, execution_id, ctx.from_machine, executor: &quiet/2)
+
+    {:ok, _execution, _ms} =
+      Executions.step(
+        ctx.store,
+        execution_id,
+        ctx.from_machine,
+        Event.external("copy.available"),
+        step_opts()
+      )
+
+    stored(ctx, execution_id)
   end
 
   defp plan!(ctx, fields) do
@@ -307,12 +355,14 @@ defmodule StatifierPersistence.ExecutionsMigrateTest do
       before = waiting_hold(ctx, "hold-unmapped")
 
       assert {:error, {:migration_refused, findings}} =
-               migrate(ctx, "hold-unmapped", plan!(ctx, []))
+               migrate(ctx, "hold-unmapped", plan!(ctx, []), pin_sources: [QuietTimerQueue])
 
-      assert {:unmapped_state, :configuration, "awaiting_pickup"} in findings
-      assert {:unmapped_state, :entered_states, "awaiting_pickup"} in findings
-      assert {:invocation_unmapped, {"awaiting_pickup", 0}} in findings
-      assert {:no_pin_source, ["awaiting_pickup"]} in findings
+      assert findings == [
+               {:unmapped_state, :configuration, "awaiting_pickup"},
+               {:unmapped_state, :entered_states, "awaiting_pickup"},
+               {:invocation_unmapped, {"awaiting_pickup", 0}}
+             ]
+
       assert stored(ctx, "hold-unmapped") == before
     end
 
@@ -351,19 +401,6 @@ defmodule StatifierPersistence.ExecutionsMigrateTest do
              ]
 
       assert stored(ctx, "hold-datamodel") == before
-    end
-
-    # sabotage: made timer_findings/2 answer [] -> red over both adapters: the
-    # plan that drops `placed`, a state the hold has left, migrated with no
-    # pin source. Verified red, reverted from a copy.
-    test "a plan that drops a state is refused without a pin source", ctx do
-      before = waiting_hold(ctx, "hold-drop")
-      plan = rename_plan!(ctx, drop: ["placed"])
-
-      assert {:error, {:migration_refused, [{:no_pin_source, ["placed"]}]}} =
-               migrate(ctx, "hold-drop", plan)
-
-      assert stored(ctx, "hold-drop") == before
     end
 
     # sabotage: dropped static_check/3 from migrate/4 -> red over both
@@ -431,13 +468,190 @@ defmodule StatifierPersistence.ExecutionsMigrateTest do
       attach([:statifier_persistence, :execution, :terminated])
 
       assert {:parked, {:migration_refused, findings}} =
-               migrate(ctx, execution_id, plan!(ctx, []), on_failure: :park)
+               migrate(ctx, execution_id, plan!(ctx, []),
+                 on_failure: :park,
+                 pin_sources: [QuietTimerQueue]
+               )
 
       assert {:unmapped_state, :configuration, "awaiting_pickup"} in findings
       assert stored(ctx, execution_id) == %{before | status: :needs_migration, failure: nil}
       refute_received {:telemetry, _name, %{execution_id: ^execution_id}}
 
       assert {:ok, %{needs_migration: 1}} = Executions.executions_on(ctx.store, ctx.from_hash)
+    end
+  end
+
+  describe "timers across a migration" do
+    # sabotage: made timer_check/4 answer {:ok, {:ask, sources}} for a plan
+    # that maps every timer-owning state -> red over both adapters: the
+    # raising source was asked and refused the rename. Verified red,
+    # reverted from a copy.
+    test "the pickup timer is kept when awaiting_pickup maps, and no source is asked", ctx do
+      waiting_hold(ctx, "hold-kept")
+      {:ok, old_state} = Storage.load_execution_position(ctx.store, "hold-kept", ctx.from_machine)
+
+      assert {:ok, %Execution{status: :active}, %{dropped: []}} =
+               migrate(ctx, "hold-kept", rename_plan!(ctx), pin_sources: [RefusingPinSource])
+
+      {:ok, new_state} = Storage.load_execution_position(ctx.store, "hold-kept", ctx.to_machine)
+      assert active_ids(new_state) == ["hold", "ready_for_pickup"]
+      assert new_state.send_counter == old_state.send_counter
+      assert new_state.timer_counter == old_state.timer_counter
+
+      # The pending pickup timer's event is one the new chart's
+      # `ready_for_pickup` handles.
+      assert {:ok, %Execution{status: :completed}, _ms} =
+               Executions.step(
+                 ctx.store,
+                 "hold-kept",
+                 ctx.to_machine,
+                 Event.external("pickup.expired"),
+                 step_opts()
+               )
+    end
+
+    # sabotage: made timer_check/4 answer {:ok, :none} with no sources -> red
+    # over both adapters: the hold migrated with awaiting_pickup unmapped
+    # and nothing counting its timer. Verified red, reverted from a copy.
+    test "without a pin source, a plan that leaves a timer owner unmapped is refused whole",
+         ctx do
+      before = routing_hold(ctx, "hold-blind")
+
+      for on_failure <- [:refuse, :park] do
+        assert {:error, {:no_pin_source, ["awaiting_pickup"]}} =
+                 migrate(ctx, "hold-blind", plan!(ctx, []), on_failure: on_failure)
+
+        assert stored(ctx, "hold-blind") == before
+      end
+    end
+
+    # sabotage: made timer_check/4 consider only the unmapped states -> red
+    # over both adapters: the drop migrated with no source. Verified red,
+    # reverted from a copy.
+    test "without a pin source, a plan that drops a timer owner is refused whole", ctx do
+      before = routing_hold(ctx, "hold-blind-drop")
+      plan = plan!(ctx, drop: ["awaiting_pickup"])
+
+      for on_failure <- [:refuse, :park] do
+        assert {:error, {:no_pin_source, ["awaiting_pickup"]}} =
+                 migrate(ctx, "hold-blind-drop", plan, on_failure: on_failure)
+
+        assert stored(ctx, "hold-blind-drop") == before
+      end
+    end
+
+    # sabotage: made timer_states/3 count every state the plan leaves
+    # unmapped or drops, as the stand-in did -> red over both adapters:
+    # dropping `placed` was refused with :no_pin_source. Verified red,
+    # reverted from a copy.
+    test "a plan that drops a state that could own no timer needs no pin source", ctx do
+      waiting_hold(ctx, "hold-drop")
+      plan = rename_plan!(ctx, drop: ["placed"])
+
+      assert {:ok, %Execution{status: :active}, %{dropped: []}} =
+               migrate(ctx, "hold-drop", plan)
+    end
+
+    # sabotage: made pending_timer_findings/4 answer [] -> red over both
+    # adapters: the hold migrated with awaiting_pickup unmapped while the
+    # queue counted a pending timer. Verified red, reverted from a copy.
+    test "an unmapped timer owner with a counted timer is refused, and parks under :park",
+         ctx do
+      execution_id = "hold-pending-#{ctx.adapter}"
+      before = routing_hold(ctx, execution_id)
+
+      finding =
+        {:pending_timers, ["awaiting_pickup"], %{TimerQueuePinSource => %{pending_timers: 1}}}
+
+      assert {:error, {:migration_refused, [^finding]}} =
+               migrate(ctx, execution_id, plan!(ctx, []), pin_sources: [TimerQueuePinSource])
+
+      assert stored(ctx, execution_id) == before
+
+      assert {:parked, {:migration_refused, [^finding]}} =
+               migrate(ctx, execution_id, plan!(ctx, []),
+                 pin_sources: [TimerQueuePinSource],
+                 on_failure: :park
+               )
+
+      assert stored(ctx, execution_id) == %{before | status: :needs_migration, failure: nil}
+    end
+
+    # sabotage: made pending?/1 answer true for any answer, zero included ->
+    # red over both adapters: the hold was refused with :pending_timers
+    # though the queue counted none. Verified red, reverted from a copy.
+    test "an unmapped timer owner with nothing counted migrates", ctx do
+      routing_hold(ctx, "hold-quiet")
+
+      assert {:ok, %Execution{status: :active}, %{dropped: []}} =
+               migrate(ctx, "hold-quiet", plan!(ctx, []), pin_sources: [QuietTimerQueue])
+
+      {:ok, state} = Storage.load_execution_position(ctx.store, "hold-quiet", ctx.to_machine)
+      assert active_ids(state) == ["hold", "routing"]
+    end
+
+    # sabotage: made pending_timer_findings/4 read the dropped states as well
+    # as the unmapped ones -> red over both adapters: the drop was refused
+    # with :pending_timers. Verified red, reverted from a copy.
+    test "a timer owner the plan drops migrates though a timer is counted", ctx do
+      routing_hold(ctx, "hold-drop-counted")
+
+      {:ok, old_state} =
+        Storage.load_execution_position(ctx.store, "hold-drop-counted", ctx.from_machine)
+
+      plan = plan!(ctx, drop: ["awaiting_pickup"])
+
+      assert {:ok, %Execution{status: :active}, %{dropped: []}} =
+               migrate(ctx, "hold-drop-counted", plan, pin_sources: [TimerQueuePinSource])
+
+      {:ok, new_state} =
+        Storage.load_execution_position(ctx.store, "hold-drop-counted", ctx.to_machine)
+
+      assert new_state.send_counter == old_state.send_counter
+      assert new_state.timer_counter == old_state.timer_counter
+    end
+
+    # sabotage: made ask_timer_sources/3 answer {:ok, %{}} whatever the
+    # sources said -> red over both adapters: the raising source was read as
+    # nothing pending and the hold migrated. Verified red, reverted from a
+    # copy.
+    test "a source that cannot answer refuses, and parks nothing", ctx do
+      before = routing_hold(ctx, "hold-unreachable")
+
+      for on_failure <- [:refuse, :park] do
+        assert {:error, {:pin_source_failed, {RefusingPinSource, {:raised, %RuntimeError{}}}}} =
+                 migrate(ctx, "hold-unreachable", plan!(ctx, []),
+                   pin_sources: [RefusingPinSource],
+                   on_failure: on_failure
+                 )
+
+        assert stored(ctx, "hold-unreachable") == before
+      end
+    end
+
+    # sabotage: made ask_timer_sources/3 hand the sources an empty
+    # :execution_ids list -> red over both adapters: the source was asked
+    # for no execution. Verified red, reverted from a copy.
+    test "the sources are asked with the from hash and the one execution's id", ctx do
+      execution_id = "hold-asked-#{ctx.adapter}"
+      routing_hold(ctx, execution_id)
+      from_hash = ctx.from_hash
+
+      assert {:error, {:migration_refused, [{:pending_timers, ["awaiting_pickup"], _counts}]}} =
+               migrate(ctx, execution_id, plan!(ctx, []), pin_sources: [AskedTimerQueue])
+
+      assert_received {:asked, ^from_hash, %{execution_ids: [^execution_id]}}
+    end
+
+    # sabotage: made migrate/4 skip its is_list check -> red over both
+    # adapters: a FunctionClauseError from PinSource.collect/3 instead of
+    # the ArgumentError. Verified red, reverted from a copy.
+    test "a pin_sources option that is not a list raises", ctx do
+      routing_hold(ctx, "hold-bad-option")
+
+      assert_raise ArgumentError, ~r/:pin_sources option must be a list/, fn ->
+        migrate(ctx, "hold-bad-option", plan!(ctx, []), pin_sources: TimerQueuePinSource)
+      end
     end
   end
 end

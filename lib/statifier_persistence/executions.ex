@@ -748,11 +748,13 @@ defmodule StatifierPersistence.Executions do
     active invocations would land on one key.
   - `{:datamodel_refused, index, operation, :key_present | :key_absent}` -
     a datamodel operation that does not apply at its place in the order.
-  - `{:no_pin_source, state_ids}` - the plan leaves unmapped or drops a
-    state that could own a timer, and no pin source was supplied (ADR-0013
-    decision 6, fail closed). `migrate/4` reads no pin source yet, so every
-    state of the from chart the plan leaves unmapped or drops is counted as
-    one that could own a timer.
+  - `{:pending_timers, states, source_counts}` - the plan leaves unmapped
+    `states`, each a state of the from chart that could own a timer, while
+    a pin source counted a pending timer for the execution (ADR-0013
+    decision 6). `source_counts` is every source's answer under its module.
+    A count names no state, so any non-zero count refuses; a plan that
+    drops those states instead is not refused. A state the chart gives no
+    id is named by its index.
   - `{:import_refused, reason}` - `Statifier.Position.import/2` on the to
     machine refused the transformed export.
   """
@@ -769,7 +771,8 @@ defmodule StatifierPersistence.Executions do
              [{Plan.state_id(), non_neg_integer()}]}
           | {:datamodel_refused, non_neg_integer(), Plan.datamodel_op(),
              :key_present | :key_absent}
-          | {:no_pin_source, [Plan.state_id()]}
+          | {:pending_timers, [Plan.state_id() | non_neg_integer()],
+             %{module() => PinSource.counts()}}
           | {:import_refused, term()}
 
   @typedoc """
@@ -793,6 +796,13 @@ defmodule StatifierPersistence.Executions do
     finding at once.
   - `{:chart_retired, info}` - the plan's `to` hash is tombstoned
     (ADR-0012 decision 6).
+  - `{:no_pin_source, states}` - the plan leaves unmapped or drops `states`,
+    each a state of the from chart that could own a timer, and `opts`
+    supplied no pin source (ADR-0013 decision 6, fail closed). A state the
+    chart gives no id is named by its index.
+  - `{:pin_source_failed, {module, reason}}` - a pin source did not answer
+    (`t:StatifierPersistence.PinSource.reason/0`), the same arm
+    `retire_chart/4` answers.
   - `{:terminal_execution, execution}` - the execution is `:completed`,
     `:failed` or `:cancelled`.
   - `{:not_on_from_chart, stored_content_hash, plan_from}` - the execution
@@ -804,6 +814,7 @@ defmodule StatifierPersistence.Executions do
   """
   @type migrate_error ::
           {:invalid_plan, [Plan.finding()]}
+          | {:no_pin_source, [Plan.state_id() | non_neg_integer()]}
           | {:terminal_execution, Execution.t()}
           | {:not_on_from_chart, Adapter.content_hash(), Adapter.content_hash()}
           | {:migration_refused, [migration_finding()]}
@@ -824,18 +835,53 @@ defmodule StatifierPersistence.Executions do
     `to`. The host saves this chart with
     `StatifierPersistence.Storage.save_chart/3` before it migrates, as it
     does before `create/4` (decision 4).
+  - `pin_sources:` - the host's list of `StatifierPersistence.PinSource`
+    modules, default `[]`, asked for pending timers (decision 6). They
+    arrive here in `opts`, where `retire_chart/4` takes the same list as a
+    positional argument.
   - `on_failure:` - `:refuse` (the default) or `:park` (decision 4).
   - `serialization:` - the `{module, config}` strategy every entry point
     takes, with the same default. Its `with_execution/3` is called directly;
     a migration is not a step and takes no step span (decisions 4 and 5).
 
+  ## Timers
+
+  This package stores no timer and changes none: a pending delayed send
+  stays in the host's queue with its deadline, and a plan that maps the
+  state around it keeps it (`keep_mapped`). The counters cross verbatim, so
+  a send id or a timer ordinal the migrated execution mints cannot collide
+  with one a surviving timer holds (decisions 2 and 6).
+
+  A state *could own a timer* when, in the from chart, a `<send>` with a
+  `delay` or a `delayexpr` appears in its `onentry`, its `onexit`, a
+  transition it owns (its `<initial>` and a history default included) or
+  the `<finalize>` of one of its `<invoke>`s, nested `<if>` and `<foreach>`
+  bodies included. The rule is static because a pin source answers counts,
+  which name no state:
+
+  - a plan that maps every such state needs no pin source, and none is
+    asked;
+  - otherwise, with no `pin_sources:`, the migration is refused with
+    `{:no_pin_source, states}` before the execution is read - it fails
+    closed, never blind to timers;
+  - otherwise the sources are asked, through
+    `StatifierPersistence.PinSource.collect/3`, with the plan's `from`
+    hash and the one execution's id in `:execution_ids`. A source that does
+    not answer refuses with `{:pin_source_failed, {module, reason}}`; a
+    non-zero count refuses with a `{:pending_timers, states, source_counts}`
+    finding when the plan leaves any such state unmapped, and never when it
+    drops them all.
+
   ## What it does
 
   In this order, and every check and the whole transform come before the
   one write (decision 4): the plan is validated against the two machines
-  (decision 3, static); a tombstoned `to` hash is refused; then, under the
-  execution's serialization, the execution is read and refused if terminal
-  or stored on another chart than the plan's `from`; its position is loaded
+  (decision 3, static); a tombstoned `to` hash is refused; a plan that
+  leaves unmapped or drops a state that could own a timer is refused when
+  no pin source is supplied; then, under the execution's serialization,
+  the execution is read and refused if terminal or stored on another chart
+  than the plan's `from`; the pin sources are asked when the plan puts a
+  state that could own a timer at risk; its position is loaded
   with the from machine through `StatifierPersistence.Storage.load_execution_position/3`;
   `Statifier.Position.export/1` translates it; the export is checked
   against the plan and transformed (decisions 2 and 3); and
@@ -863,8 +909,11 @@ defmodule StatifierPersistence.Executions do
     its position, content hash, identity, metadata and input log stay as
     they were, on the from chart (ADR-0014 decision 1). Every other refusal
     writes nothing under either value: a static one, a tombstoned `to`
-    hash, a lock that could not be taken, a terminal execution, and one
-    stored on another chart.
+    hash, a missing pin source, a lock that could not be taken, a terminal
+    execution, one stored on another chart, and a pin source that did not
+    answer. The first three concern the plan and not the execution, and a
+    source that did not answer has said nothing about the execution
+    (ADR-0013's 2026-09-23 Note).
 
   A `:needs_migration` execution is migrated as an `:active` one is, and a
   successful migration writes it back at `:active` (ADR-0014 decision 3).
@@ -885,25 +934,50 @@ defmodule StatifierPersistence.Executions do
     %Machine{} = from_machine = Keyword.fetch!(opts, :from_machine)
     %Machine{} = to_machine = Keyword.fetch!(opts, :to_machine)
     on_failure = Keyword.get(opts, :on_failure, :refuse)
+    pin_sources = Keyword.get(opts, :pin_sources, [])
 
     unless on_failure in [:refuse, :park] do
       raise ArgumentError,
             "the :on_failure option must be :refuse or :park, got: #{inspect(on_failure)}"
     end
 
-    # ADR-0013 decision 4: a static fault and a tombstoned to hash concern
-    # the plan, not this execution, so both refuse before the execution is
-    # read and write nothing under either `on_failure:`.
+    unless is_list(pin_sources) do
+      raise ArgumentError,
+            "the :pin_sources option must be a list of modules, got: #{inspect(pin_sources)}"
+    end
+
+    # ADR-0013 decision 4: a static fault, a tombstoned to hash and a
+    # missing pin source concern the plan, not this execution, so each
+    # refuses before the execution is read and writes nothing under either
+    # `on_failure:` (ADR-0013's 2026-09-23 Note).
     with :ok <- static_check(plan, from_machine, to_machine),
-         :ok <- Storage.check_chart_retired(store, to_machine) do
+         :ok <- Storage.check_chart_retired(store, to_machine),
+         {:ok, timers} <- timer_check(plan, from_machine, to_machine, pin_sources) do
       {strategy, config} = Keyword.get(opts, :serialization, {AdapterLock, store})
       machines = {from_machine, to_machine}
 
       config
       |> strategy.with_execution(execution_id, fn ->
-        migrate_tail(store, execution_id, plan, machines, on_failure)
+        migrate_tail(store, execution_id, plan, machines, timers, on_failure)
       end)
       |> migrated(execution_id)
+    end
+  end
+
+  # ADR-0013 decision 6 fails closed: a plan that leaves unmapped or drops a
+  # state that could own a timer is refused when no pin source is supplied.
+  # Answers whether the sources must be asked for the execution: `:none`
+  # when the plan maps every such state, which needs no source.
+  @spec timer_check(Plan.t(), Machine.t(), Machine.t(), [module()]) ::
+          {:ok, :none | {:ask, [module()]}} | {:error, migrate_error()}
+  defp timer_check(plan, from_machine, to_machine, pin_sources) do
+    %{unmapped: unmapped, dropped: dropped} =
+      Transform.timer_states(plan, from_machine, to_machine)
+
+    case {Enum.sort(unmapped ++ dropped), pin_sources} do
+      {[], _sources} -> {:ok, :none}
+      {at_risk, []} -> {:error, {:no_pin_source, at_risk}}
+      {_at_risk, sources} -> {:ok, {:ask, sources}}
     end
   end
 
@@ -938,12 +1012,13 @@ defmodule StatifierPersistence.Executions do
           execution_id(),
           Plan.t(),
           {Machine.t(), Machine.t()},
+          :none | {:ask, [module()]},
           :refuse | :park
         ) ::
           {:ok, Execution.t(), migrated()}
           | {:parked, {:migration_refused, [migration_finding()]}}
           | {:error, migrate_error()}
-  defp migrate_tail(store, execution_id, plan, machines, on_failure) do
+  defp migrate_tail(store, execution_id, plan, machines, timers, on_failure) do
     case Storage.fetch_execution(store, execution_id) do
       {:ok, %{status: status} = record} when status in [:completed, :failed, :cancelled] ->
         {:error, {:terminal_execution, Execution.from_record(record)}}
@@ -952,7 +1027,7 @@ defmodule StatifierPersistence.Executions do
         {:error, {:not_on_from_chart, stored, plan.from}}
 
       {:ok, record} ->
-        migrate_loaded(store, record, plan, machines, on_failure)
+        migrate_loaded(store, record, plan, machines, timers, on_failure)
 
       {:error, _reason} = error ->
         error
@@ -960,24 +1035,28 @@ defmodule StatifierPersistence.Executions do
   end
 
   # The execution is on the plan's `from` hash and not terminal, so from
-  # here a refusal of the validation against it is the one `:park` parks.
-  # Nothing is written until `transform/4` has answered a whole position.
+  # here a refusal of the validation against it is the one `:park` parks;
+  # a pin source that does not answer is not one (ADR-0013's 2026-09-23
+  # Note). Nothing is written until `transform/5` has answered a whole
+  # position.
   @spec migrate_loaded(
           Storage.t(),
           Adapter.execution_record(),
           Plan.t(),
           {Machine.t(), Machine.t()},
+          :none | {:ask, [module()]},
           :refuse | :park
         ) ::
           {:ok, Execution.t(), migrated()}
           | {:parked, {:migration_refused, [migration_finding()]}}
           | {:error, migrate_error()}
-  defp migrate_loaded(store, record, plan, {from_machine, to_machine}, on_failure) do
+  defp migrate_loaded(store, record, plan, {from_machine, to_machine}, timers, on_failure) do
     execution_id = record.execution_id
 
-    with {:ok, machine_state} <-
+    with {:ok, source_counts} <- ask_timer_sources(timers, plan.from, execution_id),
+         {:ok, machine_state} <-
            Storage.load_execution_position(store, execution_id, from_machine) do
-      case Transform.transform(machine_state, plan, from_machine, to_machine) do
+      case Transform.transform(machine_state, plan, from_machine, to_machine, source_counts) do
         {:ok, %{machine_state: migrated, dropped: dropped}} ->
           repin(store, record, migrated, plan, dropped)
 
@@ -986,6 +1065,16 @@ defmodule StatifierPersistence.Executions do
       end
     end
   end
+
+  # ADR-0013 decision 6: the sources are asked for the one execution, under
+  # its lock, only when the plan puts a state that could own a timer at
+  # risk. A source that does not answer refuses as it refuses a retirement.
+  @spec ask_timer_sources(:none | {:ask, [module()]}, Adapter.content_hash(), execution_id()) ::
+          {:ok, %{module() => PinSource.counts()}} | {:error, migrate_error()}
+  defp ask_timer_sources(:none, _content_hash, _execution_id), do: {:ok, %{}}
+
+  defp ask_timer_sources({:ask, sources}, content_hash, execution_id),
+    do: ask_pin_sources(sources, content_hash, [execution_id])
 
   # ADR-0013 decisions 4 and 9: the one write that migrates. It derives the
   # identity, the content hash and the position blob from the imported
