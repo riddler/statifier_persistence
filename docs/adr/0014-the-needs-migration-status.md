@@ -1,7 +1,8 @@
 # ADR-0014: The fifth execution status `:needs_migration`: reached only by a parking migration, not terminal, refuses every delivery whole, left by a corrected plan or by `Executions.unpark/3`, counted under its own key and pinning its chart
 
-Status: proposed (2026-09-23, sp-zf8; the code bead sp-3vv builds the arm
-against it at proposed and cites its Decision items)
+Status: accepted (2026-09-23, sp-zf8; proposed the same day and accepted once
+the code bead sp-3vv had built the arm against it and sp-7a9 the parking
+migration)
 
 ## Context
 
