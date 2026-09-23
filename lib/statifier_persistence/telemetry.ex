@@ -118,7 +118,7 @@ defmodule StatifierPersistence.Telemetry do
   | `[:statifier_persistence, :child, :started]` | `system_time` | `parent_execution_id`, `child_execution_id`, `invoke_id`, `child_index`, `content_hash`, `session_id` |
   | `[:statifier_persistence, :child, :refused]` | `system_time` | `parent_execution_id`, `invoke_id`, `reason` |
   | `[:statifier_persistence, :child, :recorded]` | `system_time` | `parent_execution_id`, `child_execution_id`, `invoke_id`, `child_index`, `outcome` |
-  | `[:statifier_persistence, :child, :answered]` | `system_time` | `child_execution_id`, `parent_execution_id`, `invoke_id`, `outcome`, `child_count`, `failed_count` |
+  | `[:statifier_persistence, :child, :answered]` | `system_time` | `child_execution_id`, `parent_execution_id`, `invoke_id`, `outcome`, `child_count`, `failed_count`, `delivery` |
   | `[:statifier_persistence, :child, :settled]` | `system_time`, `child_count`, `completed`, `failed`, `cancelled`, `unstarted` | `parent_execution_id`, `invoke_id`, `policy`, `decision` |
   | `[:statifier_persistence, :child, :cascade_cancelled]` | `system_time`, `count`, `retained` | `parent_execution_id`, `invoke_id` |
 
@@ -135,6 +135,14 @@ defmodule StatifierPersistence.Telemetry do
   even though the parent's door is always `done_invocation/5`; and
   `child_count` and `failed_count` are `nil` on the single-child path,
   which is not an invocation with a width.
+
+  `:answered`'s `delivery` is what the parent's door answered, a closed
+  vocabulary: `:delivered`, `:discarded` (the parent had already left the
+  invocation), `:needs_migration` (the parent is parked and refused the
+  answer whole, ADR-0014 decision 2) or `:error` (any other error). The
+  automatic answer returns the child's own result whatever the door
+  answered, so `:needs_migration` here is how a host learns that an answer
+  it must deliver again was refused.
 
   ## Cardinality and disclosure
 
@@ -156,6 +164,12 @@ defmodule StatifierPersistence.Telemetry do
 
   @typedoc "Any event name this module emits."
   @type event_name :: [atom(), ...]
+
+  @typedoc """
+  What a parent's door answered to a child's answer - the `delivery`
+  metadata of `[:statifier_persistence, :child, :answered]`.
+  """
+  @type delivery :: :delivered | :discarded | :needs_migration | :error
 
   @typedoc """
   A field list for one event: every key the contract names for it, in any
@@ -497,7 +511,8 @@ defmodule StatifierPersistence.Telemetry do
   Emits `[:statifier_persistence, :child, :answered]`.
 
   `child_count` and `failed_count` are the invocation's, and are `nil` for
-  a single-child subchart, which has no invocation to aggregate.
+  a single-child subchart, which has no invocation to aggregate. `delivery`
+  is a `t:delivery/0`: what the parent's door answered.
   """
   @spec child_answered(fields :: fields()) :: :ok
   def child_answered(fields) do
@@ -510,7 +525,8 @@ defmodule StatifierPersistence.Telemetry do
         invoke_id: fields[:invoke_id],
         outcome: fields[:outcome],
         child_count: fields[:child_count],
-        failed_count: fields[:failed_count]
+        failed_count: fields[:failed_count],
+        delivery: fields[:delivery]
       }
     )
   end

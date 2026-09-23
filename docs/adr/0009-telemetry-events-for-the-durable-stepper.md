@@ -666,3 +666,59 @@ and the change that carries this amendment adds the seventeenth,
 `docs/telemetry.md`'s execution lifecycle table carries the new row.
 
 No other decision moves.
+
+## Amendment (2026-09-23, sp-6neq): `:answered` says what the parent's door answered
+
+Status of this amendment: proposed (2026-09-23, sp-6neq). The record above
+stays accepted; this amendment is proposed until the operator accepts it.
+
+ADR-0014 (`docs/adr/0014-the-needs-migration-status.md`, accepted) decides
+that a delivery to a `:needs_migration` execution is refused whole and that
+delivering it again is the host's (its decision 2). Its Consequences name
+one delivery path that does not come back to a host: a durable child's
+automatic answer to a parked parent, because `Driver`'s automatic answer
+returns the child's own result whatever the parent's door answered
+(`lib/statifier_persistence/driver.ex`, `maybe_answer_parent/3`, read at
+`fb1662f`). The one event that fires at that point,
+`[:statifier_persistence, :child, :answered]`, is emitted after the door
+returns and says nothing about what it returned
+(`lib/statifier_persistence/driver.ex`, `report_answered/3`, read at
+`fb1662f`), so a refused answer is reported exactly as a delivered one. The
+step seam's stop does report the refusal as `reason: :needs_migration`
+(`lib/statifier_persistence/executions.ex`, `stop_shape/1`, read at
+`fb1662f`), but on the parent's `execution_id` and without the child's,
+which is the id a redelivery through `Driver.answer_parent/3` needs.
+
+This amendment is additive under decision 8: one new metadata key on an
+existing event, no rename and no removal, and no new event name.
+
+**1. `:answered` gains `delivery`, what the parent's door answered.** A
+closed vocabulary of four: `:delivered` for `{:ok, execution,
+machine_state}`, `:discarded` for `{:discarded, execution}`,
+`:needs_migration` for `{:error, {:needs_migration, execution}}`, and
+`:error` for any other error. It is set on both emit sites, the single
+child's and a fan-out settlement's, because both answer through the same
+door. The event still fires once per answer, after the door returns, and
+`outcome` keeps its meaning: how the child or the invocation came out, not
+what the parent did with it.
+
+**2. The parked parent is named apart from every other error.** It is the
+one refusal ADR-0014 decision 2 tells a host to deliver again, and a
+handler has to be able to recognise it without reading an error term.
+`:discarded` is named apart for the opposite reason: a discard is ADR-0007
+decision 3's mechanism working, not something to retry.
+
+**3. Decision 7 holds.** Neither the parent's execution nor the error's own
+term travels; `delivery` is an atom from the vocabulary above, bounded, and
+fit to be a metric dimension. The answer itself - the donedata - is still
+not on the event. A host that delivers again holds the answer where it
+drove the child: the event is emitted on that process, before the child's
+drive returns.
+
+**4. The change is not queuing.** Nothing in this package holds the refused
+answer or delivers it later; ADR-0014 decision 8 leaves that undecided and
+this amendment does not decide it. `Driver`'s automatic answer still
+returns the child's own result.
+
+No other decision moves, and decision 8's count of event names does not
+change.
