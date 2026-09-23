@@ -415,8 +415,8 @@ is cited by subject.
 
 ## Amendment (2026-09-23, sp-pq4): a missing pin source is refused before the execution is read, and neither it nor a source that cannot answer parks
 
-Status of this amendment: proposed (2026-09-23, sp-pq4). The record above
-stays proposed; this amendment is proposed until the operator accepts it.
+Status of this amendment: accepted (2026-09-23, on the operator's word; proposed
+the same day by sp-pq4 and shipped in 0.14.0). The record above is accepted.
 
 Read as written, decisions 3 and 4 park every refusal decision 6 makes:
 decision 3 places decision 6's timer rule inside the validation against
@@ -463,9 +463,9 @@ machine (`lib/statifier_persistence/migration/transform.ex`,
 
 ## Amendment (2026-09-23, sp-i5ha): a kept or moved invocation keeps its `<invoke>` element and lands in the transformed configuration, and the transformed configuration must be legal
 
-Status of this amendment: proposed (2026-09-23, sp-i5ha). The record above
-is accepted; this amendment is proposed until the operator accepts it, and
-the 2026-09-23 sp-pq4 Amendment above keeps its own status.
+Status of this amendment: accepted (2026-09-23, on the operator's word; proposed
+the same day by sp-i5ha and shipped in 0.15.0). The record above is accepted,
+and the 2026-09-23 sp-pq4 Amendment above is accepted on the same word.
 
 A migration is whole or it did not happen, and a whole migration must not
 be wrong: `migrate/4` must never answer `:ok` on a transformed position the
