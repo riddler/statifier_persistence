@@ -55,7 +55,13 @@ defmodule StatifierPersistence.Migration.Transform do
     {history, history_findings} = map_history_values(exported.history_values, map_id)
 
     {invocations, invocation_findings} =
-      map_invocations(exported.active_invocations, plan.invocations, map_id, to_machine)
+      map_invocations(
+        exported.active_invocations,
+        plan.invocations,
+        map_id,
+        to_machine,
+        sets.configuration
+      )
 
     {datamodel, datamodel_findings} = apply_datamodel(exported.datamodel, plan.datamodel)
 
@@ -164,13 +170,16 @@ defmodule StatifierPersistence.Migration.Transform do
   # and that is decision 7's child rule: a live child reaches its parent by
   # its invocation id alone, so a transform that answers keeps every child
   # the parent named resolvable, and one that cannot is refused here.
+  # ADR-0013's 2026-09-23 Amendment, finding 2, extends that rule: every
+  # key must also be on a state of the transformed configuration.
   @spec map_invocations(
           %{{Plan.state_id(), non_neg_integer()} => String.t()},
           [Plan.invocation()],
           (Plan.state_id() -> mapped()),
-          Machine.t()
+          Machine.t(),
+          MapSet.t(Plan.state_id())
         ) :: {map(), [Executions.migration_finding()]}
-  defp map_invocations(active_invocations, moved, map_id, to_machine) do
+  defp map_invocations(active_invocations, moved, map_id, to_machine, configuration) do
     named = Map.new(moved, fn {s, o, t, p} -> {{s, o}, {t, p}} end)
 
     {pairs, found} =
@@ -184,7 +193,7 @@ defmodule StatifierPersistence.Migration.Transform do
       end)
 
     {Map.new(pairs, fn {_key, target, invoke_id} -> {target, invoke_id} end),
-     found ++ coinciding(pairs)}
+     found ++ coinciding(pairs) ++ outside_configuration(pairs, configuration)}
   end
 
   @spec map_invocation(
@@ -221,6 +230,17 @@ defmodule StatifierPersistence.Migration.Transform do
     |> Enum.filter(fn {_target, sources} -> length(sources) > 1 end)
     |> Enum.sort()
     |> Enum.map(fn {target, sources} -> {:invocations_coincide, target, Enum.sort(sources)} end)
+  end
+
+  # ADR-0013's 2026-09-23 Amendment, finding 2: an invocation kept or moved
+  # onto a state the transformed configuration does not hold is reached by
+  # neither the engine's finalize and autoforward pass nor the cancel on
+  # its state's exit, so its child would outlive the parent. It reads the
+  # same transformed configuration the legality check reads.
+  defp outside_configuration(pairs, configuration) do
+    for {key, {state_id, _ordinal} = target, _invoke_id} <- pairs,
+        not MapSet.member?(configuration, state_id),
+        do: {:invocation_outside_configuration, key, target}
   end
 
   # ADR-0013 decision 3: the operations apply in order. A refused operation
