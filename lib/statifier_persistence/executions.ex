@@ -201,7 +201,55 @@ defmodule StatifierPersistence.Executions do
           | {:pin_source_failed, {module(), PinSource.reason()}}
 
   @typedoc """
-  Options `create/4` and `step/5` accept:
+  Options `create/4` accepts, and only those: an option `create/4` does
+  not read is not in this type, so Dialyzer reports it rather than the
+  create silently ignoring it. `t:step_opt/0`'s `invoke_id:` and
+  `child_count:` are left out too, although the create's telemetry would
+  carry them: they name the invocation a step answers, and a create
+  answers none.
+
+  - `executor:` (required) - the `t:StatifierPersistence.Executor.t/0`
+    every non-lifecycle effect is handed to, in list order.
+  - `initialize:` - passed to `Statifier.Interpreter.initialize/2`
+    unchanged. A create has no stored position to stamp, so the host's
+    snapshots reach a new execution here and nowhere else: `routes:`,
+    `invoke_types:` and `send_types:` (`t:step_opt/0` says what each
+    one is) go inside this list, not beside it. For `send_types:` that
+    is also the only way to get it right at all, because
+    `Statifier.MachineState.new/2` is the one writer of the
+    `_ioprocessors` entry each registered type gets and
+    `Statifier.MachineState.put_send_types/2` does not rewrite it: an
+    execution created without them there lacks the host's own types
+    for its whole life.
+  - `metadata:` - the optional opaque map of host identities stored
+    beside the execution record (ADR-0006 decision 1), defaulting to
+    `%{}`. Identities only, never personal data (decision 2); an adapter
+    that cannot store a non-empty map refuses the create with
+    `{:error, :metadata_unsupported}` (decision 3).
+  - `linkage:` - this package's own, never a host's. Set by the durable
+    subchart `start_child` clause (Phase 3) to record a child's parent
+    under the reserved metadata namespace
+    (`StatifierPersistence.Execution.Linkage`, ADR-0008 decision 2). A
+    host supplies `metadata:` for its own identities; supplying
+    `linkage:` from outside this package is a caller bug the same way a
+    malformed `metadata:` is.
+  - `serialization:` - the `{module, config}` per-execution
+    serialization strategy the persist tail runs inside (ADR-0004
+    decision 5), as on `t:step_opt/0`.
+  - `step_reporter:` - this package's own, never a host's; the same
+    reporter `t:step_opt/0` describes, handed the create's effect list.
+  """
+  @type create_opt ::
+          {:executor, Executor.t()}
+          | {:initialize, keyword()}
+          | {:metadata, Adapter.metadata()}
+          | {:linkage, Linkage.t()}
+          | {:serialization, {module(), term()}}
+          | {:step_reporter, ([Statifier.Effect.t()] -> any())}
+
+  @typedoc """
+  Options `step/5` accepts, and only those: an option `step/5` does not
+  read is not in this type.
 
   - `executor:` (required) - the `t:StatifierPersistence.Executor.t/0`
     every non-lifecycle effect is handed to, in list order.
@@ -215,21 +263,11 @@ defmodule StatifierPersistence.Executions do
     I/O Processor types the host registers, stamped the same way
     (st-ADR-0069). Defaults to `nil`, under which every non-built-in
     `type` on a `<send>` classifies as unsupported and the element is
-    rejected with `error.execution`. On `step/5` it is stamped onto the
-    loaded position; on `create/4` it has to travel inside `initialize:`,
-    because `Statifier.MachineState.new/2` is the one writer of the
-    `_ioprocessors` entry each registered type gets and
-    `Statifier.MachineState.put_send_types/2` does not rewrite it.
-  - `initialize:` (`create/4` only) - passed to
-    `Statifier.Interpreter.initialize/2` unchanged.
-  - `metadata:` (`create/4` only) - the optional opaque map of host
-    identities stored beside the execution record (ADR-0006 decision 1),
-    defaulting to `%{}`. Identities only, never personal data (decision 2);
-    an adapter that cannot store a non-empty map refuses the create with
-    `{:error, :metadata_unsupported}` (decision 3).
+    rejected with `error.execution`. None of these three is a
+    `t:create_opt/0`: a create takes them inside `initialize:`.
   - `serialization:` - the `{module, config}` per-execution serialization
     strategy the fetch-to-persist tail runs inside (ADR-0004 decision 5;
-    `fail/4` accepts it too). Defaults to
+    `create/4` and `fail/4` accept it too). Defaults to
     `{StatifierPersistence.Serialization.AdapterLock, store}`.
   - `entry:` - this package's own, never a host's: the public door this
     drive came through, carried on
@@ -242,13 +280,6 @@ defmodule StatifierPersistence.Executions do
     `:cancel`). It stopped being telemetry-only with ADR-0010: on an
     adapter that keeps an input log, `entry:` also stamps the stored
     entry's `door` (decision 5). It changes nothing else.
-  - `linkage:` (`create/4` only) - this package's own, never a host's. Set
-    by the durable subchart `start_child` clause (Phase 3) to record a
-    child's parent under the reserved metadata namespace
-    (`StatifierPersistence.Execution.Linkage`, ADR-0008 decision 2). A host
-    supplies `metadata:` for its own identities; supplying `linkage:` from
-    outside this package is a caller bug the same way a malformed
-    `metadata:` is.
   - `invoke_id:` and `child_count:` - this package's own, never a host's,
     and telemetry only. Set by `StatifierPersistence.Driver` beside
     `entry: :answer_parent`, they name the invocation the step is
@@ -271,19 +302,23 @@ defmodule StatifierPersistence.Executions do
     should run inside a serialized section this package opened. Its
     return value is discarded and it changes nothing about the step.
   """
-  @type opt ::
+  @type step_opt ::
           {:executor, Executor.t()}
           | {:routes, MachineState.routes()}
           | {:invoke_types, MachineState.invoke_types()}
           | {:send_types, MachineState.send_types()}
-          | {:initialize, keyword()}
           | {:serialization, {module(), term()}}
-          | {:metadata, Adapter.metadata()}
-          | {:linkage, Linkage.t()}
           | {:entry, entry()}
           | {:invoke_id, String.t()}
           | {:child_count, pos_integer()}
           | {:step_reporter, ([Statifier.Effect.t()] -> any())}
+
+  @typedoc """
+  The union of `t:create_opt/0` and `t:step_opt/0`. Neither function's
+  spec names it: each names its own type, so Dialyzer reports an option
+  one of them ignores where it is passed.
+  """
+  @type opt :: create_opt() | step_opt()
 
   @typedoc """
   The fixed vocabulary of public doors `entry` names on this package's own
@@ -342,7 +377,7 @@ defmodule StatifierPersistence.Executions do
           store :: Storage.t(),
           execution_id :: execution_id(),
           machine :: Machine.t(),
-          opts :: [opt()]
+          opts :: [create_opt()]
         ) ::
           {:ok, Execution.t(), MachineState.t()} | {:error, error()}
   def create(%Storage{} = store, execution_id, %Machine{} = machine, opts) do
@@ -355,7 +390,7 @@ defmodule StatifierPersistence.Executions do
     #
     # Only the `metadata:` pair crosses, never the whole list (sp-3kk).
     # `check_metadata/2`'s contract is `[Storage.execution_write_opt()]` -
-    # `:failure`/`:metadata`/`:position` - and this list is `[opt()]`,
+    # `:failure`/`:metadata`/`:position` - and this list is `[create_opt()]`,
     # whose REQUIRED `executor:` is not a member of it. Handing the whole
     # list over made dialyzer intersect the two: the success typing it
     # derived for `create/4` accepted no `executor:` at all, so every
@@ -415,7 +450,7 @@ defmodule StatifierPersistence.Executions do
   # already raises the right `ArgumentError` for that shape downstream -
   # this function's job is only the reserved-key guard and the `linkage:`
   # merge, both of which need an actual map to mean anything.
-  @spec metadata([opt()]) :: Adapter.metadata()
+  @spec metadata([create_opt()]) :: Adapter.metadata()
   defp metadata(opts) do
     case Keyword.get(opts, :metadata, %{}) do
       supplied when is_map(supplied) ->
@@ -461,7 +496,7 @@ defmodule StatifierPersistence.Executions do
           execution_id :: execution_id(),
           machine :: Machine.t(),
           event :: Event.t() | event_builder(),
-          opts :: [opt()]
+          opts :: [step_opt()]
         ) ::
           {:ok, Execution.t(), MachineState.t()} | {:discarded, Execution.t()} | {:error, error()}
   def step(%Storage{} = store, execution_id, %Machine{} = machine, event, opts)
@@ -479,7 +514,7 @@ defmodule StatifierPersistence.Executions do
           execution_id(),
           Machine.t(),
           Event.t() | event_builder(),
-          [opt()],
+          [step_opt()],
           Executor.t(),
           entry()
         ) ::
@@ -1591,7 +1626,7 @@ defmodule StatifierPersistence.Executions do
   @spec session_id(MachineState.t()) :: String.t() | nil
   defp session_id(%MachineState{datamodel: datamodel}), do: Map.get(datamodel, "_sessionid")
 
-  @spec entry([opt()], entry()) :: entry()
+  @spec entry([step_opt()], entry()) :: entry()
   defp entry(opts, default), do: Keyword.get(opts, :entry, default)
 
   # `{:discarded, execution}` with its event: the three ways a delivery becomes
@@ -1629,7 +1664,7 @@ defmodule StatifierPersistence.Executions do
           Adapter.execution_record(),
           MachineState.t(),
           Event.t() | event_builder(),
-          [opt()],
+          [step_opt()],
           Executor.t(),
           entry()
         ) ::
