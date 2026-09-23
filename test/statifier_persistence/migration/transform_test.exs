@@ -6,10 +6,15 @@ defmodule StatifierPersistence.Migration.TransformTest do
 
   The charts are library holds and loans. Each names the state expected
   to own the timer; every other state in it schedules nothing delayed.
+
+  And the legality of the transformed configuration (ADR-0013's
+  2026-09-23 Amendment, finding 3), one configuration per arm of the rule,
+  each carried through `transform/5` by a plan that keeps every id.
   """
 
   use ExUnit.Case, async: true
 
+  alias Statifier.Position
   alias StatifierPersistence.Migration.{Plan, Transform}
 
   defp owners(body) do
@@ -249,6 +254,109 @@ defmodule StatifierPersistence.Migration.TransformTest do
 
       assert Transform.timer_states(plan, from, to) ==
                %{unmapped: ["awaiting_pickup", "in_transit"], dropped: []}
+    end
+  end
+
+  describe "the transformed configuration's legality" do
+    # A branch's desk: a hold (with a history state), a loan, and a pickup
+    # that runs the patron notice and the desk slip as two regions.
+    @desk """
+    <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="hold">
+      <state id="hold" initial="placed">
+        <history id="hold_history" type="shallow">
+          <transition target="placed"/>
+        </history>
+        <state id="placed">
+          <transition event="copy.available" target="routing"/>
+        </state>
+        <state id="routing">
+          <transition event="copy.routed" target="pickup"/>
+        </state>
+      </state>
+      <state id="loan" initial="on_loan">
+        <state id="on_loan">
+          <transition event="copy.returned" target="returned"/>
+        </state>
+      </state>
+      <parallel id="pickup">
+        <state id="notice_region" initial="notice_pending">
+          <state id="notice_pending"/>
+        </state>
+        <state id="slip_region" initial="slip_pending">
+          <state id="slip_pending"/>
+        </state>
+        <transition event="copy.collected" target="loan"/>
+      </parallel>
+      <final id="returned"/>
+    </scxml>
+    """
+
+    # The desk's position with `configuration` in place of its own - an
+    # import checks ids, not legality - carried through a plan that keeps
+    # every id, onto the same chart.
+    defp transform_at(configuration) do
+      {:ok, machine} = Statifier.compile(@desk)
+      {initial, _effects} = Statifier.Interpreter.initialize(machine)
+      {:ok, exported} = Position.export(initial)
+
+      {:ok, machine_state} =
+        Position.import(machine, %{exported | configuration: MapSet.new(configuration)})
+
+      hash = machine.identity.content_hash
+      {:ok, plan} = Plan.new(from: hash, to: hash)
+      Transform.transform(machine_state, plan, machine, machine, %{})
+    end
+
+    # sabotage: made configuration_findings/2 (migration/transform.ex)
+    # answer a finding for every configuration -> red: both legal
+    # configurations were refused. Verified red, reverted from a copy.
+    test "a legal configuration, compound or parallel, transforms" do
+      assert {:ok, _applied} = transform_at(~w(hold placed))
+
+      assert {:ok, _applied} =
+               transform_at(~w(pickup notice_region notice_pending slip_region slip_pending))
+    end
+
+    # sabotage: made legal_at?/3's compound arm (migration/transform.ex)
+    # accept any count below two -> red: the hold with no active child
+    # transformed. Verified red, reverted from a copy.
+    test "a compound state with no child state in the configuration is refused" do
+      assert transform_at(~w(hold)) == {:error, [{:illegal_configuration, ["hold"]}]}
+    end
+
+    # sabotage: made legal_at?/3's compound arm (migration/transform.ex)
+    # accept any count above zero -> red: both configurations transformed.
+    # Verified red, reverted from a copy.
+    test "a compound state, the root included, with two child states in it is refused" do
+      assert transform_at(~w(hold placed routing)) ==
+               {:error, [{:illegal_configuration, ["hold", "placed", "routing"]}]}
+
+      assert transform_at(~w(hold placed loan on_loan)) ==
+               {:error, [{:illegal_configuration, ["hold", "loan", "on_loan", "placed"]}]}
+    end
+
+    # sabotage: made legal_at?/3's parallel arm (migration/transform.ex)
+    # answer true -> red: the pickup without its slip region transformed.
+    # Verified red, reverted from a copy.
+    test "a parallel state missing one of its child states is refused" do
+      assert transform_at(~w(pickup notice_region notice_pending)) ==
+               {:error, [{:illegal_configuration, ["notice_pending", "notice_region", "pickup"]}]}
+    end
+
+    # sabotage: made legal_at?/3's atomic arm (migration/transform.ex)
+    # answer true -> red: on_loan transformed without its parent. Verified
+    # red, reverted from a copy.
+    test "an atomic state missing a proper ancestor is refused" do
+      assert transform_at(~w(hold placed on_loan)) ==
+               {:error, [{:illegal_configuration, ["hold", "on_loan", "placed"]}]}
+    end
+
+    # sabotage: made legal_at?/3's history arm (migration/transform.ex)
+    # answer true -> red: the history state transformed as a member of the
+    # configuration. Verified red, reverted from a copy.
+    test "a history pseudo-state in the configuration is refused" do
+      assert transform_at(~w(hold placed hold_history)) ==
+               {:error, [{:illegal_configuration, ["hold", "hold_history", "placed"]}]}
     end
   end
 end

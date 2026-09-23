@@ -64,7 +64,8 @@ defmodule StatifierPersistence.Migration.Transform do
         history_findings ++
         invocation_findings ++
         datamodel_findings ++
-        pending_timer_findings(plan, from_machine, to_machine, source_counts)
+        pending_timer_findings(plan, from_machine, to_machine, source_counts) ++
+        configuration_findings(sets.configuration, to_machine)
 
     case findings do
       [] ->
@@ -343,6 +344,55 @@ defmodule StatifierPersistence.Migration.Transform do
         _other -> false
       end
     end)
+  end
+
+  # ADR-0013's 2026-09-23 Amendment, finding 3: the transformed
+  # configuration, resolved in the to machine with the root added, must be
+  # a legal configuration (SCXML 3.11). Resolving every id is not enough: a
+  # dropped active leaf leaves its compound parent with no active child,
+  # which `Position.import/2` accepts. The finding names the transformed
+  # configuration, sorted, whatever else the pass found beside it.
+  @spec configuration_findings(MapSet.t(Plan.state_id()), Machine.t()) ::
+          [Executions.migration_finding()]
+  defp configuration_findings(configuration, to_machine) do
+    if legal_configuration?(configuration, to_machine),
+      do: [],
+      else: [{:illegal_configuration, Enum.sort(configuration)}]
+  end
+
+  # The legality rule, and no further: every compound state in the set
+  # (the root included) has exactly one child state in it, every parallel
+  # state has every child state in it, every atomic state has every proper
+  # ancestor in it, and no history pseudo-state is in it. It uses only
+  # public `Statifier.Machine` functions and never the engine's position
+  # predicate. An id that does not resolve is left to `Position.import/2`,
+  # which names it.
+  @spec legal_configuration?(MapSet.t(Plan.state_id()), Machine.t()) :: boolean()
+  defp legal_configuration?(configuration, machine) do
+    indexes =
+      for id <- configuration,
+          {:ok, index} <- [Machine.index(machine, id)],
+          into: MapSet.new([0]) do
+        index
+      end
+
+    Enum.all?(indexes, &legal_at?(machine, &1, indexes))
+  end
+
+  defp legal_at?(machine, index, indexes) do
+    cond do
+      Machine.history?(machine, index) ->
+        false
+
+      Machine.atomic?(machine, index) ->
+        machine |> Machine.proper_ancestors(index) |> Enum.all?(&MapSet.member?(indexes, &1))
+
+      Machine.parallel?(machine, index) ->
+        machine |> Machine.child_states(index) |> Enum.all?(&MapSet.member?(indexes, &1))
+
+      true ->
+        machine |> Machine.child_states(index) |> Enum.count(&MapSet.member?(indexes, &1)) == 1
+    end
   end
 
   defp dropped(configuration, map_id) do

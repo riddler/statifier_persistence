@@ -790,6 +790,15 @@ defmodule StatifierPersistence.Executions do
     A count names no state, so any non-zero count refuses; a plan that
     drops those states instead is not refused. A state the chart gives no
     id is named by its index.
+  - `{:illegal_configuration, state_ids}` - the transformed configuration
+    is not a legal configuration of the to chart (SCXML 3.11, with the
+    root added): a compound state in it without exactly one child state in
+    it, a parallel state without every child state, an atomic state
+    without every proper ancestor, or a history pseudo-state in it
+    (ADR-0013's 2026-09-23 Amendment, finding 3). `state_ids` is the
+    transformed configuration, sorted. A plan that drops an active leaf
+    and not its whole region is refused this way; a plan that leaves a
+    state unmapped may answer this beside `:unmapped_state`.
   - `{:import_refused, reason}` - `Statifier.Position.import/2` on the to
     machine refused the transformed export.
   """
@@ -808,6 +817,7 @@ defmodule StatifierPersistence.Executions do
              :key_present | :key_absent}
           | {:pending_timers, [Plan.state_id() | non_neg_integer()],
              %{module() => PinSource.counts()}}
+          | {:illegal_configuration, [Plan.state_id()]}
           | {:import_refused, term()}
 
   @typedoc """

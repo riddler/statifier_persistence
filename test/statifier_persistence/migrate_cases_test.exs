@@ -41,6 +41,11 @@ defmodule StatifierPersistence.MigrateCasesTest do
   - unmapped timer refused - a plan that leaves the timer's state unmapped
     is refused without a pin source, and refused with a finding when a
     source counts a pending timer (decision 6 and the Amendment).
+  - dropped active leaf refused - a plan that drops the state the hold
+    waits in, and not its whole region, leaves `hold` with no active
+    child; it is refused as an illegal configuration, nothing written, and
+    parks under `:park` (ADR-0013's invocation and legality Amendment,
+    finding 3). The drop case above is the legal drop that still migrates.
 
   And the paths the invocation, history and lock rules add: an invocation
   whose same-ordinal default is out of range, two invocations that would
@@ -625,7 +630,10 @@ defmodule StatifierPersistence.MigrateCasesTest do
 
     # sabotage: had dropped/2 (migration/transform.ex) answer [] -> red over
     # both adapters: the answer's dropped list was empty. Verified red,
-    # reverted from a copy.
+    # reverted from a copy. And: had configuration_findings/2 refuse every
+    # configuration -> red over both adapters: the legal region drop was
+    # refused as an illegal configuration. Verified red, reverted from a
+    # copy.
     test "drop: a dropped region leaves the position, reported as an operator exit", ctx do
       execution_id = "hold-dropped-#{ctx.adapter}"
       before = drive(ctx, execution_id, :two_regions_before, [])
@@ -1013,6 +1021,26 @@ defmodule StatifierPersistence.MigrateCasesTest do
                migrate(ctx, "hold-reparked", plan, :after, pin_sources: [QuietTimerQueue])
 
       assert snapshot(ctx, "hold-reparked") == parked(before)
+    end
+  end
+
+  describe "the transformed configuration's legality" do
+    # sabotage: had configuration_findings/2 (migration/transform.ex)
+    # answer [] -> red over both adapters: the hold migrated with `hold`
+    # and no active child. Verified red, reverted from a copy.
+    test "dropped active leaf: an illegal configuration is refused, nothing written", ctx do
+      before = routing_hold(ctx, "hold-dropped-leaf")
+      plan = plan!(ctx, :after, rename(drop: ["routing"]))
+
+      assert {:error, {:migration_refused, [{:illegal_configuration, ["hold"]}]}} =
+               migrate(ctx, "hold-dropped-leaf", plan, :after)
+
+      assert snapshot(ctx, "hold-dropped-leaf") == before
+
+      assert {:parked, {:migration_refused, [{:illegal_configuration, ["hold"]}]}} =
+               migrate(ctx, "hold-dropped-leaf", plan, :after, on_failure: :park)
+
+      assert snapshot(ctx, "hold-dropped-leaf") == parked(before)
     end
   end
 end
