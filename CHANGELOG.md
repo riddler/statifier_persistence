@@ -10,6 +10,69 @@ fragment in [`changelog.d/`](changelog.d/README.md); the fragments are assembled
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
 
+## [0.14.0] 2026-09-23
+
+Feature release: an execution can now be moved onto another chart, on
+purpose and whole. `StatifierPersistence.Migration.Plan` is the plan as
+data, checked against the two machines; `StatifierPersistence.Executions.migrate/4`
+applies one to a single execution and either re-pins it to the new chart
+or writes nothing, refusing a plan that could strand a pending timer
+unless the host supplies a pin source. A refusal can instead park the
+execution in a fifth status, `:needs_migration`, until a corrected plan
+or `StatifierPersistence.Executions.unpark/3` puts it back. Nothing
+migrates an execution because a chart was saved or published. The release
+also adds a `leading_columns:` option for host-owned columns at a fixed
+position, and a create's retired-chart check that no longer reads the
+chart's bytes.
+
+**Breaking for a host that matches the execution status exhaustively**:
+`:needs_migration` is a fifth value of
+`t:StatifierPersistence.Storage.Adapter.execution_status/0`, and the
+drained query's answer gains a sixth key; a storage adapter outside this
+package must store, count and refuse on the new status, as Changed below
+lists. **Breaking for a host that runs Dialyzer**: `create/4` and
+`step/5` each name their own option type, so an option the called
+function does not act on is reported. **Breaking for a telemetry handler
+that matches the adapter-call `callback` exhaustively**: a create's
+retired-chart check reports two new callback names in place of
+`:fetch_chart`.
+
+Upgrading: no schema migration - the status column has no constraint
+through V07, so `:needs_migration` is a new stored string and nothing
+more. Move every node to 0.14.0 before any execution is parked, since an
+older node does not read the new status. `leading_columns:` defaults to
+`[]` and reaches a table only as V01 or V05 creates it, so an existing
+install is unchanged. The `statifier` floor stays `~> 2.6`.
+
+### Added
+
+- A fifth execution status, `:needs_migration`: an execution parked on the chart it was already pinned to. It is not terminal, it takes no event, `fail/4` and `cancel/3` end it as they end an `:active` one, and it pins its chart against a retirement as an `:active` one does. `StatifierPersistence.Executions.migrate/4` under `on_failure: :park` is the one thing that parks an execution.
+- `StatifierPersistence.Executions.unpark/3` puts a `:needs_migration` execution back to `:active` at the position it was parked at, on its own chart, writing its status and nothing else; an `:active` execution answers `{:ok, execution}` unchanged and a terminal one is discarded.
+- `StatifierPersistence.Testing.StorageConformance` gains a retirement case for a durable child's pin: an adapter that exports `retire_chart/3` and `supports_metadata?/1` must refuse to retire a chart named by a terminal child's linkage pin while that child's parent is `:active`, and keep the chart's bytes.
+- `StatifierPersistence.Executions.migrate/4` moves one execution onto another chart by a `StatifierPersistence.Migration.Plan`, whole or not at all (ADR-0013): it takes the two machines in `from_machine:` and `to_machine:`, re-pins the position, content hash and identity in one write at `:active` and answers `{:ok, execution, migrated}`, or refuses with `{:error, reason}` and writes nothing. Under `on_failure: :park` a refusal of the check against the execution instead writes `:needs_migration` and answers `{:parked, reason}`. A plan that leaves unmapped or drops a state that could own a timer is refused with `{:error, {:no_pin_source, states}}` unless the call supplies `pin_sources:`, and writes nothing under either `on_failure:`.
+- A telemetry event, `[:statifier_persistence, :execution, :migrated]`, once per successful migration, carrying `execution_id`, `from_content_hash`, `to_content_hash` and `dropped`; `StatifierPersistence.Telemetry.events/0` returns seventeen names.
+- `StatifierPersistence.Migration`, a documentation module for the namespace: what moving an execution onto another chart is, which module holds the plan and which function applies it, and that it is not `StatifierPersistence.Ecto.Migrations`, the schema-migration helper.
+- `StatifierPersistence.Telemetry.execution_migrated/1`, the emitter of `[:statifier_persistence, :execution, :migrated]`, beside the package's other documented emitters.
+- `StatifierPersistence.Migration.Plan`: the plan that moves an execution from one chart to another, as data (ADR-0013). `new/1` builds one and refuses a malformed plan naming the field; `to_map/1` and `from_map/1` are its one JSON-safe encoding, string keys only; `validate/3` checks a plan against the from and to machines and answers every finding at once. `StatifierPersistence.Executions.migrate/4` applies one to an execution.
+- `StatifierPersistence.Executions.migrate/4` reads pending timers through a `pin_sources:` option, a list of `StatifierPersistence.PinSource` modules asked for the one execution (ADR-0013 decision 6): a state could own a timer when a `<send>` with `delay` or `delayexpr` sits in its `onentry`, `onexit`, a transition it owns or an `<invoke>`'s `<finalize>`, and a plan that maps every such state needs no source. With no source, a plan that leaves one unmapped or drops one is refused with `{:error, {:no_pin_source, states}}`; a source that cannot answer refuses with `{:error, {:pin_source_failed, {module, reason}}}`, as `retire_chart/4` does; neither writes anything under `on_failure: :park`. A non-zero count while the plan leaves such a state unmapped is the `{:pending_timers, states, source_counts}` finding of `{:migration_refused, findings}`, which parks under `:park`; a plan that drops the state instead migrates. The send and timer counters are carried, so an id the migrated execution mints cannot collide with a surviving timer's.
+- `use StatifierPersistence.Ecto` accepts `leading_columns: [name: {type, opts}]`: the migrations helper places those host-owned columns immediately after `id`, in the order given, in every table V01 and V05 create; it only places them, so a default or a `NOT NULL` belongs to a later migration of the host's own.
+- Two optional `StatifierPersistence.Storage.Adapter` callbacks, `supports_retired_info?/1` and `fetch_retired_info/2`: an adapter that exports both answers whether a content hash is retired without reading the chart's bytes. `StatifierPersistence.Storage.Ecto` and `StatifierPersistence.Storage.InMemory` implement them; an adapter that does not export them stays conformant and is read through `fetch_chart/2` as before, and the conformance suite checks whichever path the adapter declares.
+
+### Changed
+
+- **Breaking for a host that runs Dialyzer.** `StatifierPersistence.Executions.create/4` and `step/5` now each name their own option type, `t:StatifierPersistence.Executions.create_opt/0` and `t:StatifierPersistence.Executions.step_opt/0`, instead of sharing `t:StatifierPersistence.Executions.opt/0`, so Dialyzer reports an option the called function does not act on: `routes:`, `invoke_types:`, `send_types:`, `entry:`, `invoke_id:` or `child_count:` on `create/4`, and `initialize:`, `metadata:` or `linkage:` on `step/5`. Nothing changes at runtime: none of those options changed what the call did, `invoke_id:` and `child_count:` on a create reaching only its step telemetry's metadata, as they still do, and a top-level `send_types:` on `create/4` left the execution without the host's own types for its whole life. Pass `routes:`, `invoke_types:` and `send_types:` to `create/4` inside `initialize:` instead. `t:StatifierPersistence.Executions.opt/0` remains, as the union of the two.
+- **Breaking** for a host that matches `t:StatifierPersistence.Storage.Adapter.execution_status/0` exhaustively: add a clause for `:needs_migration`, or a catch-all, to every `case` over an execution's status.
+- **Breaking** for a host that matches the drained query's answer as a closed map: `StatifierPersistence.Executions.executions_on/2` and `StatifierPersistence.Storage.count_executions_by_content_hash/2` answer a sixth key, `needs_migration`, and a `{:pinned, counts}` refusal carries it under `executions`.
+- **Breaking** for a storage adapter outside this package that stores the status or implements `count_executions_by_content_hash/2` or `retire_chart/3`: store and read back `:needs_migration`, count it under its own key, count a durable child's pin while its parent is `:active` or `:needs_migration`, and refuse to retire a chart a `:needs_migration` execution is on, or one a durable child's pin names while its parent is `:needs_migration`, as for an `:active` one. The conformance suite checks each.
+- A delivery to a `:needs_migration` execution through `StatifierPersistence.Executions.step/5` or any `StatifierPersistence.Driver` door answers `{:error, {:needs_migration, execution}}`: nothing is appended, executed or written, and retrying the delivery after the execution leaves the arm is the host's. Only `StatifierPersistence.Executions.migrate/4` under `on_failure: :park` parks an execution, so a host that never parks never sees this arm.
+- A durable child's linkage pin counts toward `children`, and refuses a retirement, while its parent is `:needs_migration` as well as `:active`.
+- **Breaking** for a host whose telemetry handler matches the `callback` of `[:statifier_persistence, :adapter, :call]` exhaustively: `StatifierPersistence.Storage.check_chart_retired/2`, and `StatifierPersistence.Executions.create/4` through it, report `:supports_retired_info?` and `:fetch_retired_info` in place of `:fetch_chart` on an adapter that declares the narrow read, as both bundled adapters do. A handler with no clause for the two new names raises, and `:telemetry` detaches it; add them, or a catch-all.
+- `StatifierPersistence.Executions.create/4`'s check for a retired chart no longer transfers the chart's stored bytes on an adapter that declares the narrow read, so its cost stays flat as charts grow; the `[:statifier_persistence, :adapter, :call]` event for that check names `:supports_retired_info?` and `:fetch_retired_info` instead of `:fetch_chart` on such an adapter.
+
+### Fixed
+
+- `StatifierPersistence.PinSource.collect/3`, and `StatifierPersistence.Executions.retire_chart/4` through it, refuse a pin source that throws or exits - a `GenServer.call/3` timing out inside `pins/2` - under the reasons `{:thrown, value}` and `{:exited, reason}`, instead of letting the throw or exit escape the call; a host that matches `t:StatifierPersistence.PinSource.reason/0` exhaustively adds those two arms.
+
 ## [0.13.0] 2026-09-20
 
 Feature release: a chart can now be retired. `StatifierPersistence.Executions.retire_chart/4`
