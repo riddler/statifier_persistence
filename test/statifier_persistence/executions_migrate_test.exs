@@ -366,10 +366,13 @@ defmodule StatifierPersistence.ExecutionsMigrateTest do
       assert {:error, {:migration_refused, findings}} =
                migrate(ctx, "hold-unmapped", plan!(ctx, []), pin_sources: [QuietTimerQueue])
 
+      # The unmapped leaf also leaves `hold` with no active child, which the
+      # same pass names as the configuration the plan would have produced.
       assert findings == [
                {:unmapped_state, :configuration, "awaiting_pickup"},
                {:unmapped_state, :entered_states, "awaiting_pickup"},
-               {:invocation_unmapped, {"awaiting_pickup", 0}}
+               {:invocation_unmapped, {"awaiting_pickup", 0}},
+               {:illegal_configuration, ["hold"]}
              ]
 
       assert stored(ctx, "hold-unmapped") == before
