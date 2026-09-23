@@ -833,8 +833,9 @@ defmodule StatifierPersistence.Executions do
   ## A source that could not answer refuses on its own, and carries no counts
 
   `{:error, {:pin_source_failed, {module, reason}}}`, where `reason` is
-  `StatifierPersistence.PinSource`'s own `{:raised, exception}` or
-  `{:invalid_return, value}`. It is a different arm from
+  `t:StatifierPersistence.PinSource.reason/0`: `{:raised, exception}`,
+  `{:thrown, value}`, `{:exited, reason}` or `{:invalid_return, value}`.
+  It is a different arm from
   `{:pinned, counts}` and it carries no count map at all, deliberately:
   the walk stops at the first source that could not answer, so no
   complete count exists to report, and a refusal shaped like a count
