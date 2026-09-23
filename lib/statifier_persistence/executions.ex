@@ -911,9 +911,8 @@ defmodule StatifierPersistence.Executions do
     writes nothing under either value: a static one, a tombstoned `to`
     hash, a missing pin source, a lock that could not be taken, a terminal
     execution, one stored on another chart, and a pin source that did not
-    answer. The first three concern the plan and not the execution, and a
-    source that did not answer has said nothing about the execution
-    (ADR-0013's 2026-09-23 Note).
+    answer. The missing pin source and the source that did not answer are
+    ADR-0013's 2026-09-23 Amendment to decisions 3 and 4.
 
   A `:needs_migration` execution is migrated as an `:active` one is, and a
   successful migration writes it back at `:active` (ADR-0014 decision 3).
@@ -946,10 +945,9 @@ defmodule StatifierPersistence.Executions do
             "the :pin_sources option must be a list of modules, got: #{inspect(pin_sources)}"
     end
 
-    # ADR-0013 decision 4: a static fault, a tombstoned to hash and a
-    # missing pin source concern the plan, not this execution, so each
-    # refuses before the execution is read and writes nothing under either
-    # `on_failure:` (ADR-0013's 2026-09-23 Note).
+    # ADR-0013 decision 4: a static fault and a tombstoned to hash refuse
+    # before the execution is read and write nothing under either
+    # `on_failure:`; the 2026-09-23 Amendment adds a missing pin source.
     with :ok <- static_check(plan, from_machine, to_machine),
          :ok <- Storage.check_chart_retired(store, to_machine),
          {:ok, timers} <- timer_check(plan, from_machine, to_machine, pin_sources) do
@@ -1037,7 +1035,7 @@ defmodule StatifierPersistence.Executions do
   # The execution is on the plan's `from` hash and not terminal, so from
   # here a refusal of the validation against it is the one `:park` parks;
   # a pin source that does not answer is not one (ADR-0013's 2026-09-23
-  # Note). Nothing is written until `transform/5` has answered a whole
+  # Amendment). Nothing is written until `transform/5` has answered a whole
   # position.
   @spec migrate_loaded(
           Storage.t(),
