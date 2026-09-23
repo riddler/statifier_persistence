@@ -45,6 +45,15 @@ defmodule StatifierPersistence.PinSource do
   no dependency for one. A host passes the list of source modules in at the
   retire call, and each module is one the host owns.
 
+  ## A migration asks too
+
+  `StatifierPersistence.Executions.migrate/4` asks the sources a host passes
+  in its `pin_sources:` option whether the one execution it migrates has a
+  pending timer (ADR-0013 decision 6). It hands over the plan's `from` hash
+  and that execution's id, alone, in `:execution_ids`; the execution may be
+  `:active` or parked in `:needs_migration`. A source that cannot answer
+  refuses the migration exactly as it refuses a retirement.
+
   ## Two hosts
 
   A durable timer queue, over an advertising chart that waits for a click
@@ -78,7 +87,8 @@ defmodule StatifierPersistence.PinSource do
   @typedoc """
   What a source is told besides the content hash.
 
-  `:execution_ids` holds the ids of the `:active` executions on the hash.
+  `:execution_ids` holds the ids of the `:active` executions on the hash,
+  or, when a migration asks, the id of the one execution it migrates.
   """
   @type context :: %{execution_ids: [String.t()]}
 

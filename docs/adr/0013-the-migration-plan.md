@@ -409,3 +409,46 @@ is cited by subject.
 - Telemetry for a refused or parked migration, and how a replay of the input
   log (ADR-0010 decision 8, built nowhere) treats an execution whose chart
   changed partway through its log.
+
+## Note (2026-09-23, sp-pq4): which of decision 6's refusals park, and a state with no id
+
+Pure addition: nothing above is edited. Decision 3 lists decision 6's timer
+rule inside the validation against the execution, and decision 4 parks a
+refusal of that validation under `on_failure: :park`; decision 4 also says
+a refusal that "concerns the plan and not this execution" writes nothing.
+Decision 6 has three refusals, and this note says which side of that line
+each falls on, because the answer decides whether a host's sweep over a
+hash can park every execution it touches.
+
+**A missing pin source concerns the plan.** Whether a plan leaves unmapped
+or drops a state that could own a timer is a question about the plan and
+the two machines alone: the definition is static, over the from chart. So
+with no source supplied the refusal comes before the execution is read and
+writes nothing under either `on_failure:`, as a tombstoned `to` hash does.
+It is `{:error, {:no_pin_source, states}}`, not a finding of
+`{:migration_refused, findings}`
+(`lib/statifier_persistence/executions.ex`, `timer_check/4`, landed with
+this Note).
+
+**A source that cannot answer has said nothing about the execution.** It
+refuses the migration as it refuses a retirement, with the same top-level
+arm, `{:error, {:pin_source_failed, {module, reason}}}`
+(`lib/statifier_persistence/executions.ex`, `ask_pin_sources/3`, read at
+`e998c95`), and writes nothing under either value, as a lock that could not
+be taken writes nothing.
+
+**A counted timer while the plan leaves such a state unmapped concerns this
+execution.** The count is the execution's own, so this is the one timer
+refusal that is a finding of the validation against the execution, and the
+one that parks under `:park`. ADR-0014's "A parked hold" walk reads with a
+pin source supplied; with none, the host's first plan is refused before the
+execution is read and parks nothing.
+
+**A state with no id is unmapped by every plan.** Decision 1 maps a state
+the plan does not name to the state of the same id in the to chart; a state
+compiled without an author-written id has no id to match and cannot be
+named in `states` or `drop`. When such a state could own a timer, decision
+6 counts it as unmapped, and a refusal names it by its index in the from
+machine
+(`lib/statifier_persistence/migration/transform.ex`, `timer_states/3`,
+landed with this Note).
