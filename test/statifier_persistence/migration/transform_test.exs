@@ -10,6 +10,12 @@ defmodule StatifierPersistence.Migration.TransformTest do
   And the legality of the transformed configuration (ADR-0013's
   2026-09-23 Amendment, finding 3), one configuration per arm of the rule,
   each carried through `transform/5` by a plan that keeps every id.
+
+  And the identity of a live invocation's `<invoke>` element (the same
+  Amendment, finding 1): one pair of elements per arm of the rule - the
+  authored id where the source element has one, otherwise no id on either
+  side and byte-equal source slices - each carried through `transform/5`
+  by a plan that keeps every id.
   """
 
   use ExUnit.Case, async: true
@@ -357,6 +363,108 @@ defmodule StatifierPersistence.Migration.TransformTest do
     test "a history pseudo-state in the configuration is refused" do
       assert transform_at(~w(hold placed hold_history)) ==
                {:error, [{:illegal_configuration, ["hold", "hold_history", "placed"]}]}
+    end
+  end
+
+  describe "an invocation keeps its <invoke> element" do
+    # A hold waiting at the desk. `from` and `to` are the `<invoke>`
+    # children of `awaiting_pickup` in the two revisions; everything else
+    # in the chart is the same.
+    defp desk_hold(invokes) do
+      {:ok, machine} =
+        Statifier.compile("""
+        <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="awaiting_pickup">
+          <state id="awaiting_pickup">
+            #{invokes}
+            <transition event="copy.collected" target="fulfilled"/>
+          </state>
+          <final id="fulfilled"/>
+        </scxml>
+        """)
+
+      machine
+    end
+
+    # The hold's position on `from`, with `active` as its live
+    # invocations, carried through a plan that keeps every id onto `to`.
+    defp transform_invocations(from, to, active) do
+      from_machine = desk_hold(from)
+      to_machine = desk_hold(to)
+      {initial, _effects} = Statifier.Interpreter.initialize(from_machine)
+      {:ok, exported} = Position.export(initial)
+
+      {:ok, machine_state} =
+        Position.import(from_machine, %{exported | active_invocations: active})
+
+      {:ok, plan} =
+        Plan.new(from: from_machine.identity.content_hash, to: to_machine.identity.content_hash)
+
+      Transform.transform(machine_state, plan, from_machine, to_machine, %{})
+    end
+
+    @notice ~s(<invoke id="notice" type="library:notify_patron"/>)
+    @slip ~s(<invoke id="slip" type="library:print_slip"/>)
+    @unnamed_notice ~s(<invoke type="library:notify_patron"/>)
+
+    # sabotage: made same_element?/2's authored-id clause
+    # (migration/transform.ex) compare the two source slices instead -> red:
+    # the notice whose parameters changed was refused. Verified red,
+    # reverted from a copy.
+    test "an authored id kept on the target element transforms, its content changed" do
+      changed = """
+      <invoke id="notice" type="library:notify_patron">
+        <param name="branch" expr="'central'"/>
+      </invoke>
+      """
+
+      assert {:ok, _applied} =
+               transform_invocations(@notice, changed, %{{"awaiting_pickup", 0} => "notice"})
+    end
+
+    # sabotage: made element_findings/3 (migration/transform.ex) answer []
+    # -> red: the notice transformed onto the slip's element. Verified red,
+    # reverted from a copy.
+    test "an authored id the target element does not author is refused" do
+      finding = {:invocation_element_changed, {"awaiting_pickup", 0}, {"awaiting_pickup", 0}}
+      active = %{{"awaiting_pickup", 0} => "notice"}
+
+      assert transform_invocations(@notice, @slip, active) == {:error, [finding]}
+      assert transform_invocations(@notice, @unnamed_notice, active) == {:error, [finding]}
+    end
+
+    # sabotage: made same_element?/2's last clause (migration/transform.ex)
+    # answer true -> red: the unnamed notice transformed onto an element
+    # authoring an id. Verified red, reverted from a copy.
+    test "an unnamed source element onto an element authoring an id is refused" do
+      assert transform_invocations(@unnamed_notice, @notice, %{
+               {"awaiting_pickup", 0} => "awaiting_pickup.notice-0"
+             }) ==
+               {:error,
+                [{:invocation_element_changed, {"awaiting_pickup", 0}, {"awaiting_pickup", 0}}]}
+    end
+
+    # sabotage: made same_element?/2's no-id clause (migration/transform.ex)
+    # compare the two locations instead of the two slices -> red: the
+    # unnamed notice moved down a line was refused. Verified red, reverted
+    # from a copy.
+    test "unnamed elements with byte-equal source slices transform, wherever they sit" do
+      active = %{{"awaiting_pickup", 0} => "awaiting_pickup.notice-0"}
+
+      assert {:ok, _applied} =
+               transform_invocations(@unnamed_notice, "\n\n  " <> @unnamed_notice, active)
+    end
+
+    # sabotage: made same_element?/2's no-id clause (migration/transform.ex)
+    # answer true for any two unnamed elements -> red: the notice whose text
+    # changed transformed. Verified red, reverted from a copy.
+    test "unnamed elements whose source slices differ are refused" do
+      changed = ~s(<invoke type="library:notify_patron" autoforward="true"/>)
+
+      assert transform_invocations(@unnamed_notice, changed, %{
+               {"awaiting_pickup", 0} => "awaiting_pickup.notice-0"
+             }) ==
+               {:error,
+                [{:invocation_element_changed, {"awaiting_pickup", 0}, {"awaiting_pickup", 0}}]}
     end
   end
 end

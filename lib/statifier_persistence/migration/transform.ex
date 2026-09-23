@@ -12,6 +12,8 @@ defmodule StatifierPersistence.Migration.Transform do
 
   alias Statifier.{Machine, MachineState, Position}
   alias Statifier.Machine.Content.{Foreach, If, Send}
+  alias Statifier.Machine.Invoke
+  alias Statifier.Parser.Location
   alias StatifierPersistence.Executions
   alias StatifierPersistence.Migration.Plan
 
@@ -59,7 +61,7 @@ defmodule StatifierPersistence.Migration.Transform do
         exported.active_invocations,
         plan.invocations,
         map_id,
-        to_machine,
+        {from_machine, to_machine},
         sets.configuration
       )
 
@@ -171,15 +173,23 @@ defmodule StatifierPersistence.Migration.Transform do
   # its invocation id alone, so a transform that answers keeps every child
   # the parent named resolvable, and one that cannot is refused here.
   # ADR-0013's 2026-09-23 Amendment, finding 2, extends that rule: every
-  # key must also be on a state of the transformed configuration.
+  # key must also be on a state of the transformed configuration. Its
+  # finding 1 adds that every key must name the `<invoke>` element the
+  # invocation was started from.
   @spec map_invocations(
           %{{Plan.state_id(), non_neg_integer()} => String.t()},
           [Plan.invocation()],
           (Plan.state_id() -> mapped()),
-          Machine.t(),
+          {Machine.t(), Machine.t()},
           MapSet.t(Plan.state_id())
         ) :: {map(), [Executions.migration_finding()]}
-  defp map_invocations(active_invocations, moved, map_id, to_machine, configuration) do
+  defp map_invocations(
+         active_invocations,
+         moved,
+         map_id,
+         {from_machine, to_machine},
+         configuration
+       ) do
     named = Map.new(moved, fn {s, o, t, p} -> {{s, o}, {t, p}} end)
 
     {pairs, found} =
@@ -193,7 +203,9 @@ defmodule StatifierPersistence.Migration.Transform do
       end)
 
     {Map.new(pairs, fn {_key, target, invoke_id} -> {target, invoke_id} end),
-     found ++ coinciding(pairs) ++ outside_configuration(pairs, configuration)}
+     found ++
+       element_findings(pairs, from_machine, to_machine) ++
+       coinciding(pairs) ++ outside_configuration(pairs, configuration)}
   end
 
   @spec map_invocation(
@@ -222,6 +234,54 @@ defmodule StatifierPersistence.Migration.Transform do
     if ordinal < invoke_count,
       do: {:ok, {target_id, ordinal}},
       else: {:error, {:invocation_out_of_range, key, {target_id, ordinal}, invoke_count}}
+  end
+
+  # ADR-0013's 2026-09-23 Amendment, finding 1: an invocation kept by the
+  # same-ordinal default or moved through `:invocations` must land on the
+  # `<invoke>` element it was started from. Position is never the rule: the
+  # default trusts it, so a reordered or replaced element would otherwise
+  # take the live invocation's finalize and autoforward. Only a key whose
+  # target is in range reaches here; an out-of-range default is named by
+  # `invocation_out_of_range` alone.
+  defp element_findings(pairs, from_machine, to_machine) do
+    for {key, target, _invoke_id} <- pairs,
+        %Invoke{} = source <- [invoke_at(from_machine, key)],
+        %Invoke{} = element <- [invoke_at(to_machine, target)],
+        not same_element?({from_machine, source}, {to_machine, element}),
+        do: {:invocation_element_changed, key, target}
+  end
+
+  defp invoke_at(machine, {state_id, ordinal}) do
+    case Machine.index(machine, state_id) do
+      {:ok, index} -> machine |> Machine.at(index) |> Map.fetch!(:invoke) |> Enum.at(ordinal)
+      :error -> nil
+    end
+  end
+
+  # The identity rule. An authored id is the invocation id the live child
+  # was started under, so the target must author the same one, and the
+  # element's content may change with the revision. An element with no id
+  # has no name but its text: the target must author none either, and the
+  # two elements' source slices must be byte-equal. A machine carrying no
+  # source cannot be sliced, so an unnamed element on it is never the same.
+  defp same_element?({_from, %Invoke{id: id}}, {_to, %Invoke{id: target_id}})
+       when is_binary(id),
+       do: id == target_id
+
+  defp same_element?({from_machine, %Invoke{} = source}, {to_machine, %Invoke{id: nil} = element}) do
+    case {slice(from_machine, source), slice(to_machine, element)} do
+      {nil, _to} -> false
+      {from, to} -> from == to
+    end
+  end
+
+  defp same_element?(_source, _element), do: false
+
+  defp slice(machine, %Invoke{location: location}) do
+    case Machine.source(machine) do
+      nil -> nil
+      source -> Location.slice(location, source)
+    end
   end
 
   defp coinciding(pairs) do

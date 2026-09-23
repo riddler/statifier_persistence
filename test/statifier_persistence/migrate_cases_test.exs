@@ -50,6 +50,12 @@ defmodule StatifierPersistence.MigrateCasesTest do
     state and moves the notice onto a state the hold is not in is refused,
     nothing written, and parks under `:park` (the same Amendment, finding
     2).
+  - kept notice on the slip's element refused - a rename onto the
+    revision that prints the slip first, naming no `invocations`, would
+    keep each invocation at its ordinal on the other's element; it is
+    refused for each of the two, nothing written, and parks under
+    `:park` (the same Amendment, finding 1). The plan that names both
+    moves migrates.
 
   And the paths the invocation, history and lock rules add: an invocation
   whose same-ordinal default is out of range, two invocations that would
@@ -908,12 +914,14 @@ defmodule StatifierPersistence.MigrateCasesTest do
     end
 
     # sabotage: had coinciding/1 (migration/transform.ex) answer [] -> red
-    # over both adapters: one invocation overwrote the other and the hold
-    # migrated. Verified red, reverted from a copy.
+    # over both adapters: the findings named the moved notice's element and
+    # not the two invocations sharing a key. Verified red, reverted from a
+    # copy.
     test "two invocations that would share a key are refused", ctx do
       before = waiting_hold(ctx, "hold-coincide")
       # The notice is moved onto the slip's key, and the slip keeps its
-      # ordinal by default.
+      # ordinal by default. That key is the slip's element, so the moved
+      # notice is also named as landing on an element that is not its own.
       plan =
         plan!(ctx, :after, rename(invocations: [{"awaiting_pickup", 0, "ready_for_pickup", 1}]))
 
@@ -921,6 +929,7 @@ defmodule StatifierPersistence.MigrateCasesTest do
                migrate(ctx, "hold-coincide", plan, :after)
 
       assert findings == [
+               {:invocation_element_changed, {"awaiting_pickup", 0}, {"ready_for_pickup", 1}},
                {:invocations_coincide, {"ready_for_pickup", 1},
                 [{"awaiting_pickup", 0}, {"awaiting_pickup", 1}]}
              ]
@@ -1102,6 +1111,33 @@ defmodule StatifierPersistence.MigrateCasesTest do
                migrate(ctx, "hold-stashed", plan, :stash, on_failure: :park)
 
       assert snapshot(ctx, "hold-stashed") == parked(before)
+    end
+  end
+
+  describe "an invocation keeps its <invoke> element" do
+    # sabotage: had element_findings/3 (migration/transform.ex) answer []
+    # -> red over both adapters: the hold migrated with the notice's id on
+    # the slip's element and the slip's on the notice's. Verified red,
+    # reverted from a copy.
+    test "kept notice on the slip's element: refused for each, nothing written", ctx do
+      before = waiting_hold(ctx, "hold-slip-first")
+      # The rename names no invocations, so each keeps its ordinal.
+      plan = plan!(ctx, :slip_first, rename())
+
+      findings = [
+        {:invocation_element_changed, {"awaiting_pickup", 0}, {"ready_for_pickup", 0}},
+        {:invocation_element_changed, {"awaiting_pickup", 1}, {"ready_for_pickup", 1}}
+      ]
+
+      assert {:error, {:migration_refused, ^findings}} =
+               migrate(ctx, "hold-slip-first", plan, :slip_first)
+
+      assert snapshot(ctx, "hold-slip-first") == before
+
+      assert {:parked, {:migration_refused, ^findings}} =
+               migrate(ctx, "hold-slip-first", plan, :slip_first, on_failure: :park)
+
+      assert snapshot(ctx, "hold-slip-first") == parked(before)
     end
   end
 end
