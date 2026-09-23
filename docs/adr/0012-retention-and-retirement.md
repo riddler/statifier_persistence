@@ -544,3 +544,46 @@ pins it, and a durable child's linkage pin counts while its parent is in
 either arm (ADR-0014 decision 4). The listing handed to a pin source
 (`list_active_execution_ids_by_content_hash/2`) stays `:active` only; the
 three terminal arms still pin nothing.
+
+## Note (2026-09-23, sp-x3d): a create's tombstone check now has a read that leaves the chart's bytes behind
+
+Pure addition: nothing above is edited, and this record is read at the date
+its sections were decided. This Note decides nothing new about retirement;
+it records that the cost the sp-7av Note named has a narrower read, and
+under what capability.
+
+**The narrower read the sp-7av Note anticipated exists.** That Note says
+the refusal costs each create one read of the chart row, that the read
+transfers the chart's stored bytes, and that its cost "scales with the size
+of the chart until a narrower read exists". The adapter behaviour now has
+an optional `fetch_retired_info/2` that answers a hash's tombstone, or
+`nil` for a hash that has none, without reading `identity_blob` or
+`chart_blob` (`lib/statifier_persistence/storage/adapter.ex`,
+`fetch_retired_info/2`, read at `d61ac4d`). The Ecto adapter answers it
+with one select of `retired_at` and `retired_by`
+(`lib/statifier_persistence/storage/ecto.ex`, `fetch_retired_info/2`, read
+at `d61ac4d`), and the in-memory adapter with the tombstone alone
+(`lib/statifier_persistence/storage/in_memory.ex`, `fetch_retired_info/2`,
+read at `d61ac4d`). `Storage.check_chart_retired/2` asks it when the
+adapter declares it and reads the whole row through `fetch_chart/2`
+otherwise (`lib/statifier_persistence/storage.ex`, `chart_retired/2`, read
+at `d61ac4d`), so the sp-7av cost sentence still describes an adapter that
+does not declare the read, and no longer describes either shipped adapter.
+The check's answer is the same on both paths.
+
+**The read sits under a predicate of its own, as the sp-brx Note requires
+after a release.** `supports_chart_retirement?/1` shipped in `0.13.0`, and
+the sp-brx Note rules that a callback added after a release goes under a
+second predicate rather than widening what a released one promises. The
+read's predicate is `supports_retired_info?/1`
+(`lib/statifier_persistence/storage/adapter.ex`,
+`supports_retired_info?/1`, read at `d61ac4d`). It is independent of the
+retirement predicate in both directions: a store that can never carry a
+tombstone can still answer "none" cheaply, and every create on such a
+store needs exactly that answer.
+
+**The migration's refusal of a tombstoned target reads the same way.**
+`Executions.migrate/4` refuses a plan whose `to` hash is tombstoned
+through the same `Storage.check_chart_retired/2`
+(`lib/statifier_persistence/executions.ex`, `migrate/4`, read at
+`d61ac4d`), so it takes the narrow read wherever `create/4` does.
