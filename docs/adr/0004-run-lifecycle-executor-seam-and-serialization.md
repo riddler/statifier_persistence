@@ -379,3 +379,104 @@ only writer of the `_ioprocessors` entry a registered type gets, and
 2.6.0, that module's moduledoc), so a create that stamped outside
 `initialize:` would leave `_ioprocessors` short of the host's own types for
 the life of the execution.
+
+## Note (2026-09-23, sp-g7q): a nested transaction takes no savepoint, and a host callback inside the lock must not raise
+
+Pure addition: nothing above is edited. Decision 5's Ecto lock is a
+transaction that spans `fun` (the 2026-08-22 Amendment), and `fun` is
+the whole tail `StatifierPersistence.Executions` runs inside its own
+`serialized/5` (`lib/statifier_persistence/executions.ex:1554`, read at
+`af0cb5c`). Everything that tail reaches through the same repo from the
+same process is therefore a nested transaction. This note records what
+nesting does and does not give, the rule it puts on a host callback, and
+where this package stands against it.
+
+**The cause: a nested transaction drops its options.** This repository's
+`mix.lock` resolves db_connection 2.10.2. `DBConnection.transaction/3`'s
+clause for a connection that is already in a transaction is
+`def transaction(%DBConnection{conn_mode: :transaction} = conn, fun, _opts)`
+(`lib/db_connection.ex:1082` in that release): it runs `fun` on the open
+connection and ignores every option. ecto_sql 3.14.0 hands a
+`Repo.transaction/2` call's options to that function unchanged
+(`Ecto.Adapters.SQL`, `checkout_or_transaction/4`), so
+`mode: :savepoint` on a nested `Repo.transaction/2` is dropped without a
+word and no `SAVEPOINT` is issued. The same clause marks the transaction
+failed when the nested `fun` raises or calls `rollback/1`, and the
+outermost call then rolls back: it re-raises a raise that reaches it,
+and answers `{:error, :rollback}` when the nested failure was returned or
+rescued on the way out. Either way a failure inside a nested
+`Repo.transaction/2` is never contained to that call, it is the
+enclosing transaction's.
+
+**The remedy: an explicit SQL savepoint bracket.** Work that must be able
+to fail without taking the enclosing transaction down issues
+`SAVEPOINT <name>` itself, runs its statements, and ends with
+`RELEASE SAVEPOINT <name>` on success or `ROLLBACK TO SAVEPOINT <name>`
+on failure, each through `Repo.query!/2`. That is what statifier_router
+does at its executor seam (`StatifierRouter.Delivery.deliver_event/4`,
+that repository's `docs/adr/0005-routes.md`). The bracketed work must
+not itself call `Repo.transaction/2` and fail: that failure goes through
+the clause above and marks the enclosing transaction failed whatever the
+SQL savepoint has restored.
+
+**The boundary: a host callback reached inside `serialized/5` must not
+raise.** The host code that runs inside the lock is the executor, handed
+every executable effect (`execute_effects/3`,
+`lib/statifier_persistence/executions.ex:2361`, through
+`StatifierPersistence.Executor.run/3`, `lib/statifier_persistence/executor.ex:50`,
+both read at `af0cb5c`), and an event builder, handed the loaded
+position (`resolve_event/2`, `lib/statifier_persistence/executions.ex:1745`,
+read at `af0cb5c`). A failure it can report it returns: an executor's
+`{:error, reason}` re-enters the chart as decision 4 says, and a builder
+declines with `:discard`. If one raises instead, the raise propagates
+out of `serialized/5` and out of the door the host called. On the Ecto
+adapter the lock's transaction is lost with it: rolled back when the
+lock's transaction is the outermost, and marked failed by the clause
+above when it is nested in a caller's own, so that the caller's
+transaction is rolled back as well, re-raising or, if the caller
+rescued the raise, answering `{:error, :rollback}`. The same is true of a
+callback that runs a nested `Repo.transaction/2` which rolls back and
+then returns normally: the step goes on, and its own next write raises
+on the failed transaction, which db_connection's documentation for
+`transaction/3` says every query does until the outermost call returns.
+This package does not convert such a raise into an error: by the time
+it could, the transaction it would be
+reporting on is already gone, and an error answer would suggest a step
+that could be retried or committed when neither is so. The contract the
+README's "Writing inside a caller's transaction" section states is
+unchanged; this is the part of it a callback author owns.
+
+**The audit: nothing here relies on `mode: :savepoint`.** At `af0cb5c`
+no file under `lib/` passes `mode:` to a transaction and none calls
+`rollback/1`. The Ecto adapter opens exactly three transactions, each of
+which can nest:
+
+- `lock_execution/3` (`lib/statifier_persistence/storage/ecto.ex:1075`,
+  read at `af0cb5c`) is decision 5's lock. It joins a caller's
+  transaction by design, and that is the README contract above.
+- `save_chart/2` (`lib/statifier_persistence/storage/ecto.ex:144`, read
+  at `af0cb5c`) reads the tombstone and inserts with
+  `on_conflict: :nothing`. Its refusal is a returned value and writes
+  nothing, so it never needs to undo anything.
+- `retire_chart/3` (`lib/statifier_persistence/storage/ecto.ex:774`,
+  read at `af0cb5c`) keeps every refusal a returned value for the same
+  reason, and its own comment says why it calls no `rollback/1`.
+
+None of the three needs a savepoint, because none of them has a failure
+it means to contain: each either succeeds, answers a refusal that wrote
+nothing, or raises into its caller under the boundary above. Two
+failures that are not contained are already documented as such: an
+`:execution_exists` refusal inside a caller's transaction is a failed
+`INSERT` that Postgres itself aborts the transaction over (the README
+section above, pinned by
+`test/statifier_persistence/ecto/caller_transaction_test.exs`), and
+ADR-0015's `c:write_tree_migration/2` decides that an adapter reached
+inside an enclosing transaction rolls that transaction back on purpose,
+because a returned error would commit a partial write. Outside
+`serialized/5`, `StatifierPersistence.PinSource`'s private `ask/3`
+(`lib/statifier_persistence/pin_source.ex:146`, read at `af0cb5c`)
+rescues a raising pin source into a `{:raised, exception}` refusal. That
+conversion is sound for the retirement it refuses, but it cannot restore
+a caller's transaction that a source's own nested repo work has already
+marked failed; a host that calls `Executions.retire_chart/4` inside its
+own transaction gets the refusal and a failed transaction together.
