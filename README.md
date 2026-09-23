@@ -48,6 +48,7 @@ process holds the chart between them.
 ```elixir
 alias Statifier.{Chart, Event, Machine, MachineState}
 alias Statifier.Invoke.Types, as: InvokeTypes
+alias Statifier.Send.Types, as: SendTypes
 alias StatifierPersistence.{Executions, Storage}
 
 source = """
@@ -95,15 +96,33 @@ executor = fn
     :ok
 end
 
-opts = [executor: executor, invoke_types: InvokeTypes.new(types: ["myapp:authorize"])]
+stamps = [
+  invoke_types: InvokeTypes.new(types: ["myapp:authorize"]),
+  send_types: SendTypes.from_send_types(%{"myapp:notify" => MyApp.Notifier})
+]
+
+opts = [executor: executor] ++ stamps
 ```
+
+`invoke_types:` and `send_types:` are your host's registrations: the
+`<invoke>` and `<send>` types it implements beyond the built-in ones. They
+are stamped onto the position rather than stored with it, so every call
+carries them, and a `<send>` whose type is not registered is rejected with
+`error.execution`. The third stamp, `routes:`, is a per-step claim about
+which `<send>` targets are live; this chart sends nothing, so it is left
+unset, which means "no determination made".
 
 `create/4` initializes the chart, hands the resulting effects to the
 executor, and persists the quiescent position under an execution id you choose
-- here the transaction's own key:
+- here the transaction's own key. A create has no stored position to stamp,
+so it reads the registrations only from inside `initialize:`; passed beside
+`executor:` on this call they would be ignored, and the `<invoke>` in the
+initial configuration would go out unregistered:
 
 ```elixir
-{:ok, execution, state} = Executions.create(store, "txn_01H8", machine, opts)
+{:ok, execution, state} =
+  Executions.create(store, "txn_01H8", machine, executor: executor, initialize: stamps)
+
 #=> execution.status == :active, active leaf state "authorizing"
 ```
 
@@ -208,6 +227,7 @@ driver =
     dispatch: fn type, params, _context -> MyApp.perform(type, params) end,
     effects: fn effect, _context -> MyApp.Timers.consume(effect) end,
     invoke_types: Statifier.Invoke.Types.new(types: ["myapp:authorize"]),
+    send_types: Statifier.Send.Types.from_send_types(%{"myapp:notify" => MyApp.Notifier}),
     serialization: {MyApp.ExecutionLock, MyApp.ExecutionLock}
   )
 
@@ -216,6 +236,9 @@ driver =
 {:ok, execution, state} =
   StatifierPersistence.Driver.send_event(driver, execution_id, Statifier.Event.external("go"))
 ```
+
+The two registrations are given once, to `new/3`: the driver carries them
+inside `initialize:` on the create and stamps them on every step after it.
 
 One call is one durable step, every effect through your `effects:`
 executor, every `<invoke>` through your `dispatch:` fun inside that same

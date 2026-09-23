@@ -13,6 +13,7 @@ defmodule StatifierPersistence.ReadmeExampleTest do
 
   alias Statifier.{Chart, Event, Machine, MachineState}
   alias Statifier.Invoke.Types, as: InvokeTypes
+  alias Statifier.Send.Types, as: SendTypes
   alias StatifierPersistence.{Executions, Storage}
 
   @source """
@@ -34,6 +35,11 @@ defmodule StatifierPersistence.ReadmeExampleTest do
   # sabotage: made `execution_status/2` return `:active` where it returns `:completed`
   # for a `:done` machine state (executions.ex) - the final `execution.status == :completed`
   # assertion went red, and reverting brought it back.
+  #
+  # sabotage: passed the create `opts` (the registrations beside `executor:`)
+  # in place of `initialize: stamps` - `state.invoke_types` on the created
+  # position came back `nil` and its assertion went red, because `create/4`
+  # reads only `initialize:`; restoring the README's placement brought it back.
   test "the README's worked execution drives a transaction to settled across a restart" do
     {:ok, machine} = Statifier.compile(@source)
     {:ok, chart_blob} = Chart.to_binary(machine)
@@ -52,12 +58,26 @@ defmodule StatifierPersistence.ReadmeExampleTest do
         :ok
     end
 
-    opts = [executor: executor, invoke_types: InvokeTypes.new(types: ["myapp:authorize"])]
+    stamps = [
+      invoke_types: InvokeTypes.new(types: ["myapp:authorize"]),
+      send_types: SendTypes.from_send_types(%{"myapp:notify" => MyApp.Notifier})
+    ]
 
-    {:ok, execution, state} = Executions.create(store, "txn_01H8", machine, opts)
+    opts = [executor: executor] ++ stamps
+
+    {:ok, execution, state} =
+      Executions.create(store, "txn_01H8", machine, executor: executor, initialize: stamps)
+
     assert execution.status == :active
     assert config(state) == ["authorizing"]
     assert_received {:authorized, "txn_01H8", "authorize"}
+
+    # The registrations reached the created position, which is what the
+    # README's `initialize:` placement is for: `_ioprocessors` is written
+    # once, at the create, and never rewritten by a later stamp.
+    assert state.invoke_types == stamps[:invoke_types]
+    assert state.send_types == stamps[:send_types]
+    assert Map.has_key?(state.datamodel["_ioprocessors"], "myapp:notify")
 
     {:ok, execution, state} =
       Executions.step(
@@ -70,6 +90,7 @@ defmodule StatifierPersistence.ReadmeExampleTest do
 
     assert execution.status == :active
     assert config(state) == ["awaiting_capture"]
+    assert state.send_types == stamps[:send_types]
 
     # The restart: only the execution id survives.
     {:ok, record} = Storage.fetch_execution(store, "txn_01H8")
