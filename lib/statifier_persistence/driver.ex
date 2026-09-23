@@ -646,6 +646,14 @@ defmodule StatifierPersistence.Driver do
   under the parent's own exclusion: a parent that has already cancelled the
   invocation answers `{:discarded, _}` here, which is ADR-0007 decision 3's
   mechanism doing its job, not an error.
+
+  A parked parent (`:needs_migration`, ADR-0014) refuses the answer whole
+  and this answers `{:error, {:needs_migration, parent}}`. The automatic
+  path returns the child's own result whatever the parent's door answered,
+  so there the refusal reaches the host only through
+  `[:statifier_persistence, :child, :answered]`, whose `delivery` says what
+  the door answered (`docs/telemetry.md`). Delivering the answer again
+  after the parent leaves the arm is the host's, through this function.
   """
   @spec answer_parent(
           driver :: t(),
@@ -657,7 +665,7 @@ defmodule StatifierPersistence.Driver do
     case parent_link(driver.store, child_execution_id) do
       {:ok, %Linkage{child_count: nil} = linkage} ->
         result = respond_to_parent(driver, linkage, donedata_or_failure)
-        report_answered(child_execution_id, linkage, donedata_or_failure)
+        report_answered(child_execution_id, linkage, donedata_or_failure, result)
         result
 
       {:ok, %Linkage{} = linkage} ->
@@ -868,16 +876,18 @@ defmodule StatifierPersistence.Driver do
   @spec report_answered(
           Executions.execution_id(),
           Linkage.t(),
-          {:done, term()} | {:failed, keyword()}
+          {:done, term()} | {:failed, keyword()},
+          result()
         ) :: :ok
-  defp report_answered(child_execution_id, %Linkage{} = linkage, {outcome, _payload}) do
+  defp report_answered(child_execution_id, %Linkage{} = linkage, {outcome, _payload}, result) do
     Telemetry.child_answered(
       child_execution_id: child_execution_id,
       parent_execution_id: linkage.parent_execution_id,
       invoke_id: linkage.invoke_id,
       outcome: outcome,
       child_count: linkage.child_count,
-      failed_count: nil
+      failed_count: nil,
+      delivery: delivery(result)
     )
   end
 
@@ -889,8 +899,8 @@ defmodule StatifierPersistence.Driver do
   # for a settlement that failed, which is the one thing a consumer counts
   # this event to learn. The entries are what the parent is about to be
   # answered with, so they are what the report reads.
-  @spec report_settled_answer(Executions.execution_id(), Linkage.t(), [map()]) :: :ok
-  defp report_settled_answer(child_execution_id, %Linkage{} = linkage, entries) do
+  @spec report_settled_answer(Executions.execution_id(), Linkage.t(), [map()], result()) :: :ok
+  defp report_settled_answer(child_execution_id, %Linkage{} = linkage, entries, result) do
     failed_count = Enum.count(entries, &(&1["status"] == "failed"))
 
     Telemetry.child_answered(
@@ -899,9 +909,21 @@ defmodule StatifierPersistence.Driver do
       invoke_id: linkage.invoke_id,
       outcome: if(failed_count > 0, do: :failed, else: :done),
       child_count: linkage.child_count,
-      failed_count: failed_count
+      failed_count: failed_count,
+      delivery: delivery(result)
     )
   end
+
+  # What the parent's door answered, as `:answered`'s `delivery`: a closed
+  # vocabulary, so a host can act on it and a bridge can group by it. A
+  # parked parent is named apart from every other error because it is the
+  # one refusal a host is expected to deliver again (ADR-0014 decision 2);
+  # nothing of the parent's execution or of the error's own term travels.
+  @spec delivery(result()) :: Telemetry.delivery()
+  defp delivery({:ok, _execution, _machine_state}), do: :delivered
+  defp delivery({:discarded, _execution}), do: :discarded
+  defp delivery({:error, {:needs_migration, _execution}}), do: :needs_migration
+  defp delivery({:error, _reason}), do: :error
 
   # `entry: :answer_parent` names the door the parent's step came through
   # (`docs/telemetry.md`): the parent's own door is `done_invocation/5` or
@@ -953,7 +975,9 @@ defmodule StatifierPersistence.Driver do
   # execution with a `chart_resolver:` and linkage answers its parent; anything
   # else - active, no linkage, no resolver - leaves the drive's own result
   # unchanged, which is always what this function returns regardless of
-  # what the answer attempt does.
+  # what the answer attempt does. A parent's door that refused the answer
+  # is reported, not returned: `[:statifier_persistence, :child, :answered]`
+  # carries it as `delivery` (`answer_parent/3`'s doc).
   @spec maybe_answer_parent(t(), Executions.execution_id(), result()) :: result()
   defp maybe_answer_parent(
          driver,
@@ -1040,8 +1064,8 @@ defmodule StatifierPersistence.Driver do
   defp settle_child(driver, %Linkage{} = linkage, child_execution_id, payload) do
     case decide(driver, linkage, child_execution_id, payload) do
       {:ok, {:answer, entries}} ->
-        respond_to_parent(driver, linkage, {:done, entries})
-        report_settled_answer(child_execution_id, linkage, entries)
+        result = respond_to_parent(driver, linkage, {:done, entries})
+        report_settled_answer(child_execution_id, linkage, entries, result)
 
       _not_yet_or_error ->
         :ok

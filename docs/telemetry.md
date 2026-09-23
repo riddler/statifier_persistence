@@ -347,7 +347,7 @@ Emitted on the parent's stepping process, at dispatch time.
 | `[:statifier_persistence, :child, :started]` | `Driver.start_child/3`, after `adopt_child/3` | `system_time` | `parent_execution_id`, `child_execution_id`, `invoke_id`, `child_index`, `content_hash`, `session_id` |
 | `[:statifier_persistence, :child, :refused]` | the same chain, on any refusal | `system_time` | `parent_execution_id`, `invoke_id`, `reason` |
 | `[:statifier_persistence, :child, :recorded]` | `Driver.record_and_settle/5`, after the child's own answer is written | `system_time` | `parent_execution_id`, `child_execution_id`, `invoke_id`, `child_index`, `outcome` |
-| `[:statifier_persistence, :child, :answered]` | `Driver.answer_parent/3`, after the parent's door returns | `system_time` | `child_execution_id`, `parent_execution_id`, `invoke_id`, `outcome`, `child_count`, `failed_count` |
+| `[:statifier_persistence, :child, :answered]` | `Driver.answer_parent/3`, after the parent's door returns | `system_time` | `child_execution_id`, `parent_execution_id`, `invoke_id`, `outcome`, `child_count`, `failed_count`, `delivery` |
 | `[:statifier_persistence, :child, :settled]` | `Driver.settle/3`, once per decision | `system_time`, `child_count`, `completed`, `failed`, `cancelled`, `unstarted` | `parent_execution_id`, `invoke_id`, `policy`, `decision` |
 | `[:statifier_persistence, :child, :cascade_cancelled]` | `Executions.cascade_cancel/3`, after the sweep | `system_time`, `count`, `retained` | `parent_execution_id`, `invoke_id` |
 
@@ -376,6 +376,22 @@ is inside the entry rather than around the list. Reporting the door said
 `outcome: :done` for a settlement that failed, which is the one thing a
 consumer counts this event to learn (the ADR-0009 sp-8wv amendment).
 `failed_count` is how many entries in that list failed.
+
+`:answered`'s `delivery` is what the parent's door answered, from a
+closed vocabulary: `:delivered` (the parent took the answer),
+`:discarded` (the parent had already left the invocation, ADR-0007
+decision 3), `:needs_migration` (the parent is parked and refused the
+answer whole, ADR-0014 decision 2) or `:error` (any other error, whose
+term does not travel). The automatic answer - the one a child's own drive
+makes once it is terminal - returns the child's own result whatever the
+parent's door answered, so this key is where a refused answer reaches the
+host. The event is emitted on the process driving the child, before that
+drive returns, so a handler seeing `delivery: :needs_migration` runs
+beside the caller holding the child's result; delivering the answer again
+through `Driver.answer_parent/3` once the parent leaves the arm is the
+host's. For a fan-out the children's recorded answers stay on their own
+executions, and answering again through any one child settles the
+invocation again (the ADR-0009 sp-6neq amendment).
 
 `:recorded` and `:settled` are the fan-out settlement seam, and both are
 emitted **inside the parent's settlement exclusion**, which is what makes

@@ -811,6 +811,7 @@ defmodule StatifierPersistence.TelemetryTest do
       assert Map.keys(meta) |> Enum.sort() == [
                :child_count,
                :child_execution_id,
+               :delivery,
                :failed_count,
                :invoke_id,
                :outcome,
@@ -821,6 +822,7 @@ defmodule StatifierPersistence.TelemetryTest do
       assert meta.parent_execution_id == "execution-1"
       assert meta.invoke_id == "call"
       assert meta.outcome == :done
+      assert meta.delivery == :delivered
 
       # A single-child subchart is not an invocation with a width, so
       # both aggregate counts are nil rather than 1 and 0.
@@ -830,6 +832,71 @@ defmodule StatifierPersistence.TelemetryTest do
       # Nothing settles a single child, so neither settlement event fires.
       refute_received {:telemetry, [:statifier_persistence, :child, :recorded], _m, _meta}
       refute_received {:telemetry, [:statifier_persistence, :child, :settled], _m, _meta}
+    end
+
+    # The automatic answer to a parked parent is refused whole (ADR-0014
+    # decision 2) and the child's own drive still returns its own result, so
+    # this event is the one place the refusal reaches the host.
+    #
+    # Sabotage: made delivery/1 answer :delivered for a parked parent - red at
+    # the first delivery assertion, and the refusal was invisible again.
+    test "reports an automatic answer a parked parent refused, and its redelivery",
+         %{store: store} do
+      driver = subchart_driver(store, @parent_source, @child_done_source)
+      {:ok, _execution, _ms} = Driver.create(driver, "execution-1")
+      child_execution_id = Linkage.child_execution_id("execution-1", "call", 0)
+      :ok = Storage.update_execution_status(store, "execution-1", :needs_migration)
+      drain()
+
+      child_driver = %{driver | machine: compile!(@child_done_source)}
+
+      # The child's own drive is unaffected: it completes and says so.
+      assert {:ok, %Execution{status: :completed, donedata: donedata}, _ms} =
+               Driver.send_event(child_driver, child_execution_id, Event.external("go"))
+
+      assert {_m, meta} = await([:statifier_persistence, :child, :answered])
+      assert meta.child_execution_id == child_execution_id
+      assert meta.parent_execution_id == "execution-1"
+      assert meta.invoke_id == "call"
+      assert meta.outcome == :done
+      assert meta.delivery == :needs_migration
+
+      # Nothing reached the parent: it is still parked, still waiting.
+      assert {:ok, %{status: :needs_migration}} = Storage.fetch_execution(store, "execution-1")
+
+      # The host holds the answer and delivers it again once the parent
+      # leaves the arm, through the public door.
+      assert {:ok, %Execution{status: :active}} = Executions.unpark(store, "execution-1")
+      drain()
+
+      assert {:ok, %Execution{execution_id: "execution-1"}, parent_ms} =
+               Driver.answer_parent(driver, child_execution_id, {:done, donedata})
+
+      assert parent_ms
+             |> Statifier.MachineState.active_leaf_states()
+             |> Enum.map(&Statifier.Machine.id(parent_ms.machine, &1)) == ["approved"]
+
+      assert {_m, meta} = await([:statifier_persistence, :child, :answered])
+      assert meta.delivery == :delivered
+    end
+
+    # Sabotage: made delivery/1 fold {:discarded, _} into :error - red; a
+    # discard is ADR-0007 decision 3's mechanism working and must not read as
+    # a failure a host retries.
+    test "reports an answer the parent discarded as discarded", %{store: store} do
+      driver = subchart_driver(store, @parent_source, @child_done_source)
+      {:ok, _execution, _ms} = Driver.create(driver, "execution-1")
+      child_execution_id = Linkage.child_execution_id("execution-1", "call", 0)
+
+      # The parent leaves the invoking state, so the invocation is gone.
+      {:ok, _execution, _ms} = Driver.send_event(driver, "execution-1", Event.external("timeout"))
+      drain()
+
+      assert {:discarded, _execution} =
+               Driver.answer_parent(driver, child_execution_id, {:done, "late"})
+
+      assert {_m, meta} = await([:statifier_persistence, :child, :answered])
+      assert meta.delivery == :discarded
     end
 
     # Sabotage: made cancel_counted/3 tally an already-terminal execution as
@@ -1002,6 +1069,27 @@ defmodule StatifierPersistence.TelemetryTest do
       assert settle_m.completed == 1
       assert settle_m.failed == 1
       assert settle_m.cancelled == 1
+    end
+
+    # A settlement answers through the same door, so a parked parent refuses
+    # it the same way; the recorded answers stay on the children.
+    #
+    # Sabotage: hardcoded `delivery: :delivered` in report_settled_answer/4
+    # - red; the settling child's answer was reported delivered.
+    test "reports a settled answer a parked parent refused", %{store: store} do
+      driver = fanout_driver(store)
+      start_children(driver, 2)
+      :ok = Storage.update_execution_status(store, "execution-1", :needs_migration)
+      drain()
+
+      finish_child(store, 0)
+      finish_child(store, 1)
+
+      assert {_m, meta} = await([:statifier_persistence, :child, :answered])
+      assert meta.outcome == :done
+      assert meta.child_count == 2
+      assert meta.delivery == :needs_migration
+      assert {:ok, %{status: :needs_migration}} = Storage.fetch_execution(store, "execution-1")
     end
 
     # Sabotage: passed nil for invoke_id and child_count in answer_opts/1
