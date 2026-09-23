@@ -460,3 +460,170 @@ named in `states` or `drop`. When such a state could own a timer, decision
 6 counts it as unmapped, and a refusal names it by its index in the from
 machine (`lib/statifier_persistence/migration/transform.ex`,
 `timer_states/3`, read at `dce34f9`).
+
+## Amendment (2026-09-23, sp-i5ha): a kept or moved invocation keeps its `<invoke>` element and lands in the transformed configuration, and the transformed configuration must be legal
+
+Status of this amendment: proposed (2026-09-23, sp-i5ha). The record above
+is accepted; this amendment is proposed until the operator accepts it, and
+the 2026-09-23 sp-pq4 Amendment above keeps its own status.
+
+A migration is whole or it did not happen, and a whole migration must not
+be wrong: `migrate/4` must never answer `:ok` on a transformed position the
+engine would run incorrectly. Decision 3 checks that every state id and
+every invocation ordinal in the transformed position resolves, and its last
+paragraph and "What this record does not decide" leave the legality of the
+migrated configuration to the engine's position predicate. Resolving is not
+enough. Each of the three worked examples below resolves in full, and
+`migrate/4` answers `:ok` on each today.
+
+**It amends decision 3.** The validation against the execution gains three
+findings. Each is a finding of that validation, so each arrives inside
+`{:migration_refused, findings}` with every other finding in one answer,
+refuses the migration whole before any write, and parks the execution under
+`on_failure: :park` exactly as decision 4 parks decision 3's other findings
+(`lib/statifier_persistence/executions.ex`, `refuse/4`, read at `21519fc`).
+`t:migration_finding/0` gains the three arms named below.
+
+1. **An invocation keeps its `<invoke>` element:
+   `{:invocation_element_changed, {from_state_id, from_ordinal},
+   {to_state_id, to_ordinal}}`.** An active invocation kept by the
+   same-ordinal default, or moved through `invocations`, whose target
+   `<invoke>` element is not the element it was started from, is refused.
+   Today the default checks only that the ordinal is in range of the to
+   state's `<invoke>` children
+   (`lib/statifier_persistence/migration/transform.ex`,
+   `default_invocation/4`, read at `21519fc`), and a named move is taken as
+   written (same file, `map_invocation/4`). The comparison runs only on a
+   target that exists: an ordinal out of range stays decision 3's
+   `invocation_out_of_range` finding alone.
+
+   **The identity rule.** The source element is the from state's `<invoke>`
+   at the from ordinal in the from machine; the target element is the to
+   state's `<invoke>` at the to ordinal in the to machine. When the source
+   element authors an `id`, the target element must author the same `id`.
+   When the source element authors none, the target element must author
+   none, and the two elements' source slices must be byte-equal (each
+   element's `location` sliced over its machine's source, the slice covering
+   the element and everything inside it). The id is the rule where it
+   exists because an authored id IS the invocation id the live child was
+   started under and answers to (`Statifier.Interpreter`,
+   `generate_invoke_id/3`, statifier 2.6.0): the same id on the new side is
+   the same element in the author's own name, and the element's content -
+   its parameters, its `<finalize>` - may change across revisions as the new
+   chart's behaviour, as any other content does. The slice is the rule
+   where there is no id because nothing else names an unnamed element: a
+   byte-equal slice is the only identity a machine carries for it apart
+   from its position, and position is exactly what the default trusts
+   today. The slice rule fails closed - an unnamed element whose text
+   changed cannot be migrated while it is live - and an author who wants
+   that edit to migrate gives the element an `id`. Position alone is never
+   the rule.
+
+2. **An invocation lands in the transformed configuration:
+   `{:invocation_outside_configuration, {from_state_id, from_ordinal},
+   {to_state_id, to_ordinal}}`.** An active invocation kept by the default
+   or moved through `invocations` whose target state is not in the
+   transformed `configuration` is refused. The engine reaches a live
+   invocation only through a state it holds: the finalize and autoforward
+   pass walks the configuration (`Statifier.Interpreter`,
+   `apply_invoke_passes/2`, statifier 2.6.0), and an invocation is
+   cancelled when its state exits
+   (`Statifier.Interpreter.ExitEntry`, `cancel_invocations_for_state/2`,
+   statifier 2.6.0). An invocation left on a state outside the
+   configuration is reached by neither, so its child outlives the parent's
+   completion. This extends decision 7: a live child's invocation id must
+   not only stay named by an active invocation, it must be named on a state
+   the parent holds.
+
+3. **The transformed configuration is legal:
+   `{:illegal_configuration, state_ids}`.** The transformed `configuration`,
+   resolved in the to machine with the root added (the root that
+   `Position.export/1` drops and `Position.import/2` re-adds, statifier
+   2.6.0, `import/2`), must be a legal configuration under SCXML spec 3.11:
+   every compound state in it has exactly one child state in it (the root
+   included, which is the root rule); every parallel state in it has every
+   one of its child states in it; every atomic state in it has every proper
+   ancestor in it; and no history pseudo-state is in it. `state_ids` is the
+   transformed configuration, sorted, so a host sees what the plan would
+   have produced. The check runs in the same pass as the other findings, so
+   a plan that leaves a state unmapped may answer both the
+   `unmapped_state` finding and the illegal configuration it leaves.
+
+   The check is **private to this package**. It needs only public
+   functions of `Statifier.Machine` - `index/2`, `atomic?/2`, `parallel?/2`,
+   `history?/2`, `child_states/2` (history children excluded) and
+   `proper_ancestors/2` (statifier 2.6.0,
+   `deps/statifier/lib/statifier/machine.ex`), and it asks nothing new of
+   the engine. At statifier 2.6.0, the version
+   `mix.lock` resolves, `Statifier.Position` has no legality function,
+   public or private, and no `compatible_at?/3`; `Position.import/2` checks
+   state ids and value shapes and no legality (`import/2`, statifier
+   2.6.0). The `~> 2.6` requirement also admits statifier 2.8.0, where
+   `Position.compatible_at?/3` is public and its legality helper is private
+   (`lib/statifier/position.ex` in statifier-ex, `compatible_at?/3` and
+   `legal_configuration?/2`, at `v2.8.0`, `a16c035`). This package calls
+   neither, as decision 8 says of the predicate; the predicate answers a
+   different question (whether an execution's own surface is unchanged),
+   and legality is the one part of it a migration needs.
+
+**It reverses the record's deferral of legality to the engine, for this
+package.** Two sentences above are superseded by finding 3 and are left
+as written. Decision 3's last paragraph: "They do not check that the
+resulting configuration is a legal configuration of the to chart", with
+its pointer onward. And the bullet under "What this record does not
+decide": "Whether a migrated configuration is a legal configuration of the to chart
+beyond every part of it resolving; that belongs with the engine's position
+predicate, which `migrate/4` does not call." From this amendment the
+validation against the execution checks that the migrated configuration is
+a legal configuration of the to chart, by the rule of finding 3 and no
+further, in this package and not in the engine. Decision 8's sentence
+stands: `migrate/4` does not call the engine's position predicate. What
+remains undecided: the legality of the recorded `history_values`, and
+whether an unchanged surface at the position makes the migration behave as
+the author meant - that is still the predicate's question, and
+`migrate/4` still does not ask it.
+
+**A host can observe each finding as a change.** A plan that answered
+`:ok` before this amendment can now refuse, or park under `:park`, and
+`t:migration_finding/0` gains three arms. Each code change that implements
+a finding carries a changelog fragment written as a breaking change, and
+says what a host does about it: name the invocation's move onto its own
+element, move it onto a state the migrated configuration holds, or plan a
+configuration the to chart can hold (map the dropped state, or drop its
+whole region).
+
+### Worked examples
+
+All three are the library hold of the Context, and each answered
+`:ok` at `21519fc` on statifier 2.6.0 (probed through
+`StatifierPersistence.Migration.Transform`, `transform/5`, read at
+`21519fc`; first found by probe through `migrate/4` on both shipped
+adapters).
+
+- **The kept notice on the slip's element (finding 1).** The hold waits in
+  `awaiting_pickup` with its two invocations, the patron notice
+  (`<invoke id="notice">`, ordinal 0) and the desk slip
+  (`<invoke id="slip">`, ordinal 1). The next revision renames the state
+  `ready_for_pickup` and prints the slip first, so its `<invoke>` children
+  are `slip` then `notice`. The rename plan names no `invocations`. By the
+  default, the invocation `notice` lands at `{ready_for_pickup, 0}`, the
+  element authoring `id="slip"`, and would take that element's finalize
+  and autoforward. Refused with `invocation_element_changed` for each of
+  the two; the plan that names both moves, `awaiting_pickup` 0 onto
+  `ready_for_pickup` 1 and 1 onto 0, migrates, because each lands on the
+  element of its own id.
+- **The notice moved off the configuration (finding 2).** A plan that maps
+  every state to itself and moves the notice through `invocations` onto
+  `stash` 0, a sibling of `awaiting_pickup` the hold is not in, whose one
+  `<invoke>` also authors `id="notice"`, so finding 1 holds and finding 2
+  alone refuses. The configuration stays
+  `{hold, awaiting_pickup}` and the notice sits at `{stash, 0}`. On
+  `hold.cancelled` the parent completes, and nothing cancels the notice:
+  `stash` never exits because it was never entered. Refused with
+  `invocation_outside_configuration`.
+- **The dropped active leaf (finding 3).** The hold waits in `routing`, a
+  child of the compound `hold`. A plan that drops `routing` leaves the
+  configuration `{hold}`: a compound state with no active child, which the
+  engine's import accepts. Refused with `illegal_configuration`. A drop of
+  a whole region of a parallel - the parallel keeping its other regions -
+  still migrates, because that configuration is legal.
