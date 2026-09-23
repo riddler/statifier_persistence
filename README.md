@@ -949,6 +949,47 @@ no DDL change. A `:blob_type` that dumps to a different underlying type
 (text, jsonb, a Postgres domain) needs you to alter those columns
 yourself; the migrations helper does not do it for you.
 
+### Placing a host column at a fixed position
+
+Postgres appends any column an `ALTER TABLE` adds, so a host that wants
+a column of its own at a fixed ordinal position on every table - a
+tenant column at position 2, say - cannot get it by altering the tables
+afterwards. Pass `:leading_columns` and the migrations helper puts the
+columns there when it creates the tables:
+
+    defmodule MyApp.Persistence do
+      use StatifierPersistence.Ecto,
+        repo: MyApp.Repo,
+        leading_columns: [tenant_id: {:text, null: true}]
+    end
+
+Each entry is `name: {type, opts}`, the arguments `Ecto.Migration.add/3`
+takes. V01 and V05 emit the columns immediately after `id`, in the order
+given, in every table they create - `charts`, `positions`, `executions`
+and `inputs` - so `tenant_id` above sits at ordinal position 2 on all
+four. No other version touches them.
+
+The option only places the column:
+
+- **It applies to a fresh create.** The columns exist only in tables V01
+  and V05 create under the option. A table that already exists keeps the
+  columns it has, and adding the option later changes nothing there -
+  including on a database built before `0.12.0`, whose tables V06
+  renamed in place rather than re-creating them.
+- **Defaults and `NOT NULL` belong to a later migration of your own.**
+  This package's inserts never name the column (below), so a `NOT NULL`
+  without a default that holds for every insert fails every write the
+  package makes. Declare the column nullable here, then give it its
+  default and its `NOT NULL` in your next migration with
+  `ALTER COLUMN ... SET DEFAULT` and `ALTER COLUMN ... SET NOT NULL`,
+  which keep it where it is. Re-adding it with `ADD COLUMN` would move it
+  to the end, and evaluate its default there and then to fill the
+  existing rows - an expression such as `current_setting(...)` would
+  have to resolve inside that migration.
+- **The package never reads or writes it.** The generated schemas do not
+  declare the column, so every row this package inserts leaves it to the
+  column's default - `NULL` until you set one.
+
 ### Pin sources
 
 Some of what holds a chart in use is not in this package's tables: a

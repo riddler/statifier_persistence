@@ -35,6 +35,19 @@ defmodule StatifierPersistence.Ecto.Config do
       stored on the struct as `:binary` (bare) or `{module, opts}`
       (normalized, so a bare custom module becomes `{module, []}`) -
       one shape for downstream code to read.
+    * `:leading_columns` - host-owned columns the migrations helper places
+      immediately after `id` in every table V01 and V05 create (`charts`,
+      `positions`, `executions`, `inputs`), in the order given, default
+      `[]`. A keyword list of `name: {type, opts}`, where `type` and `opts`
+      are what `Ecto.Migration.add/3` takes:
+      `leading_columns: [tenant_id: {:text, null: true}]` puts a nullable
+      `tenant_id` at ordinal position 2 on all four tables. The option
+      only places the column: it reaches a table only as V01 or V05
+      creates it, so a table that already exists - one V06 renamed on a
+      database built before `0.12.0` included - keeps the columns it
+      already had; the generated schemas do not declare it, so the
+      package never reads or writes it; and a default or a `NOT NULL`
+      belongs to a later migration of the host's own.
 
   Unknown options and unknown table keys raise `ArgumentError` - at the
   host's compile time when reached through `use`.
@@ -42,11 +55,19 @@ defmodule StatifierPersistence.Ecto.Config do
 
   alias StatifierPersistence.Ecto.KeyGenerator
 
-  @known_options [:repo, :key, :table_prefix, :tables, :prefix, :blob_type]
+  @known_options [
+    :repo,
+    :key,
+    :table_prefix,
+    :tables,
+    :prefix,
+    :blob_type,
+    :leading_columns
+  ]
   @table_keys [:charts, :positions, :executions, :inputs]
 
-  @enforce_keys [:repo, :key, :table_prefix, :tables, :prefix, :blob_type]
-  defstruct [:repo, :key, :table_prefix, :tables, :prefix, :blob_type]
+  @enforce_keys @known_options
+  defstruct @known_options
 
   @typedoc "Resolved configuration for one host module."
   @type t :: %__MODULE__{
@@ -55,7 +76,8 @@ defmodule StatifierPersistence.Ecto.Config do
           table_prefix: String.t(),
           tables: %{optional(KeyGenerator.table()) => String.t()},
           prefix: String.t() | nil,
-          blob_type: :binary | {module(), keyword()}
+          blob_type: :binary | {module(), keyword()},
+          leading_columns: [{atom(), {term(), keyword()}}]
         }
 
   @doc """
@@ -72,7 +94,8 @@ defmodule StatifierPersistence.Ecto.Config do
       table_prefix: validate_table_prefix!(Keyword.get(opts, :table_prefix, "statifier_")),
       tables: validate_tables!(Keyword.get(opts, :tables, %{})),
       prefix: validate_prefix!(Keyword.get(opts, :prefix)),
-      blob_type: validate_blob_type!(Keyword.get(opts, :blob_type, :binary))
+      blob_type: validate_blob_type!(Keyword.get(opts, :blob_type, :binary)),
+      leading_columns: validate_leading_columns!(Keyword.get(opts, :leading_columns, []))
     }
   end
 
@@ -195,6 +218,46 @@ defmodule StatifierPersistence.Ecto.Config do
               "the :blob_type option module #{inspect(module)} could not be loaded: " <>
                 inspect(reason)
     end
+  end
+
+  defp validate_leading_columns!(columns) when is_list(columns) do
+    if not Keyword.keyword?(columns) do
+      raise ArgumentError,
+            "the :leading_columns option must be a keyword list of name: {type, opts}, " <>
+              "got: #{inspect(columns)}"
+    end
+
+    Enum.each(columns, &validate_leading_column!/1)
+
+    case Keyword.keys(columns) -- Enum.uniq(Keyword.keys(columns)) do
+      [] ->
+        columns
+
+      duplicated ->
+        raise ArgumentError,
+              "the :leading_columns option names #{inspect(Enum.uniq(duplicated))} " <>
+                "more than once"
+    end
+  end
+
+  defp validate_leading_columns!(other) do
+    raise ArgumentError,
+          "the :leading_columns option must be a keyword list of name: {type, opts}, " <>
+            "got: #{inspect(other)}"
+  end
+
+  defp validate_leading_column!({name, {_type, opts}}) when is_list(opts) do
+    if not Keyword.keyword?(opts) do
+      raise ArgumentError,
+            "the :leading_columns opts for #{inspect(name)} must be a keyword list, " <>
+              "got: #{inspect(opts)}"
+    end
+  end
+
+  defp validate_leading_column!({name, other}) do
+    raise ArgumentError,
+          "the :leading_columns entry for #{inspect(name)} must be {type, opts}, " <>
+            "got: #{inspect(other)}"
   end
 
   defp ecto_type?(module), do: function_exported?(module, :type, 0)
