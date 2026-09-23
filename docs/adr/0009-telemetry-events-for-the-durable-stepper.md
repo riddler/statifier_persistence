@@ -602,3 +602,67 @@ The event names this record freezes move with the noun and with no dual emit
 reads `execution_id`, both at `lib/statifier_persistence/telemetry.ex:60-62`,
 read at `71537dc`. Decision 8's freeze is unchanged: the count and the
 structure of the table are what it fixes, not the spelling of the noun.
+
+## Amendment (2026-09-23, sp-7a9): a migration is this package's verdict on an execution, and it gets one event of its own
+
+Status of this amendment: proposed (2026-09-23, sp-7a9). The record above
+stays accepted; this amendment is proposed until the operator accepts it.
+
+ADR-0013 (`docs/adr/0013-the-migration-plan.md`, proposed) decides that
+`StatifierPersistence.Executions.migrate/4` re-pins an execution onto
+another chart, and its decision 5 decides that a successful migration emits
+one event, `[:statifier_persistence, :execution, :migrated]`, with
+`system_time` as its measurement and `execution_id`, `from_content_hash`,
+`to_content_hash` and `dropped` as its metadata. Decision 3 above lists this
+family's events and says they cover "exactly four things and nothing else",
+and none of the four names a migration. This amendment adds the event to the
+catalogue. It is additive under decision 8: one new name, no rename and no
+removal.
+
+**1. The event belongs to decision 3's third thing, this package's own
+verdicts on an execution.** A migration is a verdict this package reaches
+about an execution - moved onto another chart - that no interpreter reaches:
+the migration delivers no event and takes no transition (ADR-0013 decision
+5), so family one reports nothing about it, which is the same reason decision
+3 gives for reporting `fail/4` and `cancel/3` here. The four things are
+still four; the third now includes a migration. The event is a
+point-in-time event under decision 5, not a pair: a migration is not a step,
+it opens no step span, and ADR-0010's door vocabulary, which is also the
+`entry` vocabulary on the step seam, does not grow (ADR-0013 decisions 4 and
+5). It is emitted once per successful `migrate/4`, after the execution's
+serialization section returns; a refused or parked migration emits nothing,
+and whether it should is one of the things ADR-0013 leaves undecided.
+
+**2. Two content hashes under two names, reconciled with decision 4.**
+Decision 4 says `content_hash` rides where a chart identity is in hand. A
+migration has two in hand, and a single `content_hash` key would have to
+choose one and drop the other. The event follows the precedent this family
+already has for an event that holds two identities: the identity guard's
+refusal names its two hashes `stored_content_hash` and
+`supplied_content_hash` rather than choosing
+(`lib/statifier_persistence/telemetry.ex`, `identity_refused/1`, read at
+`8692aac`). So decision 4 is read as: one identity in hand rides as
+`content_hash`, and two ride under a name each, here `from_content_hash` (the
+chart the execution was pinned to) and `to_content_hash` (the chart it is
+pinned to now). `session_id` is not on the event: decision 4 lets it ride
+only where a position has been decoded, and ADR-0013 decision 5 names the
+four keys above; adding it later is an amendment under decision 8.
+
+Decision 7 holds. `dropped` is a list of state ids the plan dropped that
+were in the execution's configuration: author-written ids of a chart,
+bounded by the chart, and nothing from the datamodel, the position blob or
+the metadata map.
+
+**3. The count is seventeen.** Decision 8's frozen list grows from sixteen
+event names to **seventeen**. The sixteen stated in decision 3's inventory
+line (as the sp-74k Note above reads it), in the sp-8wv amendment's
+consequences and in `docs/adr/README.md`'s index row are corrected by this
+addition; this amendment edits none of them in place. The count is
+checkable against the code: `@events` in
+`lib/statifier_persistence/telemetry.ex` holds sixteen names at `8692aac`,
+and the change that carries this amendment adds the seventeenth,
+`@execution_migrated`, with its emitter `execution_migrated/1`;
+`StatifierPersistence.Telemetry.events/0` returns all seventeen, and
+`docs/telemetry.md`'s execution lifecycle table carries the new row.
+
+No other decision moves.

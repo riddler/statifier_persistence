@@ -32,7 +32,8 @@ defmodule StatifierPersistence.Executions do
   delivery and retrying it after the execution leaves the arm is the
   host's. `fail/4` and `cancel/3` proceed on a parked execution as they do
   on an `:active` one, and `unpark/3` puts it back to `:active` on its own
-  chart (decision 3).
+  chart, as a corrected `migrate/4` puts it back on the plan's `to` chart
+  (decision 3).
 
   ## A chart says its own execution failed
 
@@ -126,6 +127,7 @@ defmodule StatifierPersistence.Executions do
 
   alias StatifierPersistence.{Driver, Execution, Executor, PinSource, Storage, Telemetry}
   alias StatifierPersistence.Execution.Linkage
+  alias StatifierPersistence.Migration.{Plan, Transform}
   alias StatifierPersistence.Serialization.AdapterLock
   alias StatifierPersistence.Storage.Adapter
 
@@ -720,6 +722,310 @@ defmodule StatifierPersistence.Executions do
 
       {:error, _reason} = error ->
         error
+    end
+  end
+
+  @typedoc """
+  One finding of `migrate/4`'s validation against the execution (ADR-0013
+  decision 3, its second half). Each names what it is about.
+
+  - `{:not_exportable, reason}` - `Statifier.Position.export/1` refused the
+    position: `:internal_queue_not_empty` for a position that is not
+    quiescent, or `{:unnameable_states, indexes}`. It is the only finding
+    when it occurs, because there is no export to check further.
+  - `{:unmapped_state, field, state_id}` - a state in the exported
+    `configuration`, `entered_states`, `states_to_invoke` or
+    `history_values` that the plan neither maps (by name or by the same-id
+    default) nor drops.
+  - `{:invocation_dropped, {state_id, ordinal}}` and
+    `{:invocation_unmapped, {state_id, ordinal}}` - an active invocation the
+    plan does not move whose state the plan drops, or leaves unmapped.
+  - `{:invocation_out_of_range, {state_id, ordinal}, {to_state_id,
+    ordinal}, invoke_count}` - an active invocation kept by the
+    same-ordinal default whose ordinal is not one of the to state's
+    `<invoke>` children.
+  - `{:invocations_coincide, {to_state_id, ordinal}, sources}` - two or more
+    active invocations would land on one key.
+  - `{:datamodel_refused, index, operation, :key_present | :key_absent}` -
+    a datamodel operation that does not apply at its place in the order.
+  - `{:no_pin_source, state_ids}` - the plan leaves unmapped or drops a
+    state that could own a timer, and no pin source was supplied (ADR-0013
+    decision 6, fail closed). `migrate/4` reads no pin source yet, so every
+    state of the from chart the plan leaves unmapped or drops is counted as
+    one that could own a timer.
+  - `{:import_refused, reason}` - `Statifier.Position.import/2` on the to
+    machine refused the transformed export.
+  """
+  @type migration_finding ::
+          {:not_exportable, :internal_queue_not_empty | {:unnameable_states, [non_neg_integer()]}}
+          | {:unmapped_state,
+             :configuration | :entered_states | :states_to_invoke | :history_values,
+             Plan.state_id()}
+          | {:invocation_dropped, {Plan.state_id(), non_neg_integer()}}
+          | {:invocation_unmapped, {Plan.state_id(), non_neg_integer()}}
+          | {:invocation_out_of_range, {Plan.state_id(), non_neg_integer()},
+             {Plan.state_id(), non_neg_integer()}, non_neg_integer()}
+          | {:invocations_coincide, {Plan.state_id(), non_neg_integer()},
+             [{Plan.state_id(), non_neg_integer()}]}
+          | {:datamodel_refused, non_neg_integer(), Plan.datamodel_op(),
+             :key_present | :key_absent}
+          | {:no_pin_source, [Plan.state_id()]}
+          | {:import_refused, term()}
+
+  @typedoc """
+  What a successful migration reports beside the migrated execution
+  (ADR-0013 decision 5): the two content hashes, and the dropped states that
+  were in the execution's configuration. The
+  `[:statifier_persistence, :execution, :migrated]` event carries the same
+  facts.
+  """
+  @type migrated :: %{
+          from_content_hash: Adapter.content_hash(),
+          to_content_hash: Adapter.content_hash(),
+          dropped: [Plan.state_id()]
+        }
+
+  @typedoc """
+  Why `migrate/4` refused.
+
+  - `{:invalid_plan, findings}` - the static validation against the two
+    machines (`StatifierPersistence.Migration.Plan.validate/3`), every
+    finding at once.
+  - `{:chart_retired, info}` - the plan's `to` hash is tombstoned
+    (ADR-0012 decision 6).
+  - `{:terminal_execution, execution}` - the execution is `:completed`,
+    `:failed` or `:cancelled`.
+  - `{:not_on_from_chart, stored_content_hash, plan_from}` - the execution
+    is stored on another chart than the plan's `from`.
+  - `{:migration_refused, findings}` - the validation against the
+    execution, every finding at once (`t:migration_finding/0`).
+  - anything `t:error/0` names - a lock that could not be taken, an
+    execution that does not exist, a position that could not be loaded.
+  """
+  @type migrate_error ::
+          {:invalid_plan, [Plan.finding()]}
+          | {:terminal_execution, Execution.t()}
+          | {:not_on_from_chart, Adapter.content_hash(), Adapter.content_hash()}
+          | {:migration_refused, [migration_finding()]}
+          | error()
+
+  @doc """
+  Moves one execution from the chart it is pinned to onto another, whole or
+  not at all (ADR-0013; the park is ADR-0014's).
+
+  `plan` is a `StatifierPersistence.Migration.Plan`. The two compiled
+  machines arrive in `opts`, because a stored chart is opaque to this
+  package (ADR-0013 decision 9):
+
+  - `from_machine:` (required) - the machine whose content hash is the
+    plan's `from`; the position is loaded with it, through the identity
+    guard, exactly as a step loads it.
+  - `to_machine:` (required) - the machine whose content hash is the plan's
+    `to`. The host saves this chart with
+    `StatifierPersistence.Storage.save_chart/3` before it migrates, as it
+    does before `create/4` (decision 4).
+  - `on_failure:` - `:refuse` (the default) or `:park` (decision 4).
+  - `serialization:` - the `{module, config}` strategy every entry point
+    takes, with the same default. Its `with_execution/3` is called directly;
+    a migration is not a step and takes no step span (decisions 4 and 5).
+
+  ## What it does
+
+  In this order, and every check and the whole transform come before the
+  one write (decision 4): the plan is validated against the two machines
+  (decision 3, static); a tombstoned `to` hash is refused; then, under the
+  execution's serialization, the execution is read and refused if terminal
+  or stored on another chart than the plan's `from`; its position is loaded
+  with the from machine through `StatifierPersistence.Storage.load_execution_position/3`;
+  `Statifier.Position.export/1` translates it; the export is checked
+  against the plan and transformed (decisions 2 and 3); and
+  `Statifier.Position.import/2` rebuilds it on the to machine. Then one
+  `StatifierPersistence.Storage.update_execution/5` writes the imported
+  position back at `:active`, which replaces the identity, the content hash
+  and the position blob together, and nothing that can fail follows it
+  (decisions 4 and 9). The counters cross verbatim; the metadata, the input
+  log and any durable child are not touched (decisions 2 and 7).
+
+  Afterwards a load with the to machine passes the identity guard and a
+  load with the from machine is refused with its `identity_mismatch` arm.
+  One `[:statifier_persistence, :execution, :migrated]` event is emitted
+  after the serialization section returns, and nothing is stored as a
+  trace (decision 5).
+
+  ## What it answers
+
+  - `{:ok, execution, migrated}` - the execution, now `:active` on the `to`
+    hash, and `t:migrated/0`.
+  - `{:error, reason}` - `t:migrate_error/0`. Nothing is written.
+  - `{:parked, {:migration_refused, findings}}` - under `on_failure: :park`
+    only, when the validation against the execution refused. The one write
+    is the execution's status, `:needs_migration`, with a `nil` failure;
+    its position, content hash, identity, metadata and input log stay as
+    they were, on the from chart (ADR-0014 decision 1). Every other refusal
+    writes nothing under either value: a static one, a tombstoned `to`
+    hash, a lock that could not be taken, a terminal execution, and one
+    stored on another chart.
+
+  A `:needs_migration` execution is migrated as an `:active` one is, and a
+  successful migration writes it back at `:active` (ADR-0014 decision 3).
+
+  Nothing in this package calls this function: saving a chart, creating an
+  execution and stepping one never migrate anything (decision 9).
+  """
+  @spec migrate(
+          store :: Storage.t(),
+          execution_id :: execution_id(),
+          plan :: Plan.t(),
+          opts :: keyword()
+        ) ::
+          {:ok, Execution.t(), migrated()}
+          | {:parked, {:migration_refused, [migration_finding()]}}
+          | {:error, migrate_error()}
+  def migrate(%Storage{} = store, execution_id, %Plan{} = plan, opts) do
+    %Machine{} = from_machine = Keyword.fetch!(opts, :from_machine)
+    %Machine{} = to_machine = Keyword.fetch!(opts, :to_machine)
+    on_failure = Keyword.get(opts, :on_failure, :refuse)
+
+    unless on_failure in [:refuse, :park] do
+      raise ArgumentError,
+            "the :on_failure option must be :refuse or :park, got: #{inspect(on_failure)}"
+    end
+
+    # ADR-0013 decision 4: a static fault and a tombstoned to hash concern
+    # the plan, not this execution, so both refuse before the execution is
+    # read and write nothing under either `on_failure:`.
+    with :ok <- static_check(plan, from_machine, to_machine),
+         :ok <- Storage.check_chart_retired(store, to_machine) do
+      {strategy, config} = Keyword.get(opts, :serialization, {AdapterLock, store})
+      machines = {from_machine, to_machine}
+
+      config
+      |> strategy.with_execution(execution_id, fn ->
+        migrate_tail(store, execution_id, plan, machines, on_failure)
+      end)
+      |> migrated(execution_id)
+    end
+  end
+
+  @spec static_check(Plan.t(), Machine.t(), Machine.t()) :: :ok | {:error, migrate_error()}
+  defp static_check(plan, from_machine, to_machine) do
+    case Plan.validate(plan, from_machine, to_machine) do
+      :ok -> :ok
+      {:error, findings} -> {:error, {:invalid_plan, findings}}
+    end
+  end
+
+  # The serialization strategy's envelope, unwrapped; the one event is
+  # emitted here, after the section has returned (ADR-0013 decision 5).
+  @spec migrated({:ok, result} | {:error, term()}, execution_id()) :: result | {:error, term()}
+        when result: term()
+  defp migrated({:ok, {:ok, %Execution{}, facts} = result}, execution_id) do
+    Telemetry.execution_migrated(
+      execution_id: execution_id,
+      from_content_hash: facts.from_content_hash,
+      to_content_hash: facts.to_content_hash,
+      dropped: facts.dropped
+    )
+
+    result
+  end
+
+  defp migrated({:ok, result}, _execution_id), do: result
+  defp migrated({:error, _reason} = error, _execution_id), do: error
+
+  @spec migrate_tail(
+          Storage.t(),
+          execution_id(),
+          Plan.t(),
+          {Machine.t(), Machine.t()},
+          :refuse | :park
+        ) ::
+          {:ok, Execution.t(), migrated()}
+          | {:parked, {:migration_refused, [migration_finding()]}}
+          | {:error, migrate_error()}
+  defp migrate_tail(store, execution_id, plan, machines, on_failure) do
+    case Storage.fetch_execution(store, execution_id) do
+      {:ok, %{status: status} = record} when status in [:completed, :failed, :cancelled] ->
+        {:error, {:terminal_execution, Execution.from_record(record)}}
+
+      {:ok, %{content_hash: stored}} when stored != plan.from ->
+        {:error, {:not_on_from_chart, stored, plan.from}}
+
+      {:ok, record} ->
+        migrate_loaded(store, record, plan, machines, on_failure)
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  # The execution is on the plan's `from` hash and not terminal, so from
+  # here a refusal of the validation against it is the one `:park` parks.
+  # Nothing is written until `transform/4` has answered a whole position.
+  @spec migrate_loaded(
+          Storage.t(),
+          Adapter.execution_record(),
+          Plan.t(),
+          {Machine.t(), Machine.t()},
+          :refuse | :park
+        ) ::
+          {:ok, Execution.t(), migrated()}
+          | {:parked, {:migration_refused, [migration_finding()]}}
+          | {:error, migrate_error()}
+  defp migrate_loaded(store, record, plan, {from_machine, to_machine}, on_failure) do
+    execution_id = record.execution_id
+
+    with {:ok, machine_state} <-
+           Storage.load_execution_position(store, execution_id, from_machine) do
+      case Transform.transform(machine_state, plan, from_machine, to_machine) do
+        {:ok, %{machine_state: migrated, dropped: dropped}} ->
+          repin(store, record, migrated, plan, dropped)
+
+        {:error, findings} ->
+          refuse(store, execution_id, {:migration_refused, findings}, on_failure)
+      end
+    end
+  end
+
+  # ADR-0013 decisions 4 and 9: the one write that migrates. It derives the
+  # identity, the content hash and the position blob from the imported
+  # position's own machine, the to machine, and writes them with the
+  # `:active` status in one full-record overwrite; nothing follows it.
+  @spec repin(
+          Storage.t(),
+          Adapter.execution_record(),
+          MachineState.t(),
+          Plan.t(),
+          [Plan.state_id()]
+        ) :: {:ok, Execution.t(), migrated()} | {:error, migrate_error()}
+  defp repin(store, record, machine_state, plan, dropped) do
+    with :ok <- Storage.update_execution(store, record.execution_id, machine_state, :active) do
+      execution =
+        Execution.from_record(%{record | status: :active, content_hash: plan.to, failure: nil})
+
+      {:ok, execution,
+       %{from_content_hash: plan.from, to_content_hash: plan.to, dropped: dropped}}
+    end
+  end
+
+  # ADR-0014 decision 1: the park writes the status and a nil failure
+  # through the status-only writer, which carries every other stored field
+  # forward, and emits no event - it is not a termination, so it does not
+  # go through the step's reporters.
+  @spec refuse(
+          Storage.t(),
+          execution_id(),
+          {:migration_refused, [migration_finding()]},
+          :refuse | :park
+        ) ::
+          {:parked, {:migration_refused, [migration_finding()]}}
+          | {:error, migrate_error()}
+  defp refuse(_store, _execution_id, reason, :refuse), do: {:error, reason}
+
+  defp refuse(store, execution_id, reason, :park) do
+    with :ok <-
+           Storage.update_execution_status(store, execution_id, :needs_migration, failure: nil) do
+      {:parked, reason}
     end
   end
 

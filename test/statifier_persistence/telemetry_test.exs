@@ -168,10 +168,10 @@ defmodule StatifierPersistence.TelemetryTest do
   describe "events/0 (ADR-0009 decision 8)" do
     # Sabotage: dropped @execution_lock from @events - the count assertion went
     # red, which is the whole point of a bridge attaching from this list.
-    test "returns all sixteen names, unique, under this package's prefix" do
+    test "returns all seventeen names, unique, under this package's prefix" do
       events = Telemetry.events()
 
-      assert length(events) == 16
+      assert length(events) == 17
       assert Enum.uniq(events) == events
 
       assert Enum.all?(events, fn [prefix | rest] ->
@@ -191,6 +191,7 @@ defmodule StatifierPersistence.TelemetryTest do
                [:statifier_persistence, :execution, :created],
                [:statifier_persistence, :execution, :terminated],
                [:statifier_persistence, :execution, :discarded],
+               [:statifier_persistence, :execution, :migrated],
                [:statifier_persistence, :effect, :failed],
                [:statifier_persistence, :drive, :turns_exhausted],
                [:statifier_persistence, :child, :started],

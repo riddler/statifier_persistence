@@ -277,6 +277,7 @@ through its own span table, with no propagation machinery involved.
 | `[:statifier_persistence, :execution, :created]` | `Executions.create/4`, after the insert | `system_time` | `execution_id`, `session_id`, `content_hash`, `child?`, `metadata?` |
 | `[:statifier_persistence, :execution, :terminated]` | `Executions.create/4`, `Executions.step/5`, `Executions.fail/4`, `Executions.cancel/3`, on any terminal write | `system_time` | `execution_id`, `session_id`, `content_hash`, `status`, `driven_by`, `reason` |
 | `[:statifier_persistence, :execution, :discarded]` | `Executions.step_tail/7`, `step_loaded/8`, `repair_terminal/4`, and `fail`/`cancel`'s terminal arms | `system_time` | `execution_id`, `entry`, `reason`, `repaired?` |
+| `[:statifier_persistence, :execution, :migrated]` | `Executions.migrate/4`, after its serialization section returns | `system_time` | `execution_id`, `from_content_hash`, `to_content_hash`, `dropped` |
 | `[:statifier_persistence, :effect, :failed]` | `execute_effects/3` and `reenter_failures/4` | `system_time` | `execution_id`, `session_id`, `content_hash`, `kind`, `executor`, `reason`, `reentered?` |
 | `[:statifier_persistence, :drive, :turns_exhausted]` | `Driver`'s turn loop, on `{:turns_exhausted, n}` | `system_time`, `turns` | `execution_id`, `entry` |
 
@@ -300,6 +301,19 @@ structural backstop for a record whose `:active` status lied). Only the
 third sets `repaired?: true`, and a host seeing it regularly has a
 durability bug upstream of this package - which is precisely why the
 repair path is worth a countable event rather than a silent fix.
+
+`[:statifier_persistence, :execution, :migrated]` is the one event a
+migration emits, once per execution `Executions.migrate/4` re-pins, and
+nothing is stored as a trace of it (ADR-0013 decision 5). A migration has
+two charts in hand, so the event names both hashes rather than carrying one
+`content_hash`: `from_content_hash` is the chart the execution was pinned
+to and `to_content_hash` the chart it is pinned to now. `dropped` is the
+list of state ids the plan dropped that were in the execution's
+configuration, `[]` when it dropped none; a drop is an operator exit and is
+never an authored transition, so it has no family-one event of its own. A
+migration is not a step: it opens no step span and takes no `entry`. A
+refused or parked migration emits nothing from this family, and whether it
+should is left open by ADR-0013.
 
 `[:statifier_persistence, :effect, :failed]` is where the executor seam's
 verdicts land. `kind` is the effect's kind atom, `executor` is the module
@@ -537,6 +551,9 @@ gets, with no OpenTelemetry anywhere:
 - counters on `[:statifier_persistence, :execution, :terminated]` by
   `driven_by` and `status`, and on `[:statifier_persistence, :execution,
   :discarded]` by `reason`;
+- a counter on `[:statifier_persistence, :execution, :migrated]` by
+  `from_content_hash` and `to_content_hash` - how many executions a sweep
+  over the drained query has moved off a chart;
 - counters and a `count` distribution on the child seam - fan-out,
   refusals, and how much a cascading cancel actually swept.
 
