@@ -35,6 +35,10 @@ if Code.ensure_loaded?(Ecto.Migration) do
 
     `down/1` drops the table, which is the whole of it: V05 adds nothing
     to a table another version owns.
+
+    The table carries the host's `:leading_columns`, if it configured any,
+    immediately after `id` and in the order given, on the same terms as
+    V01's three tables (`StatifierPersistence.Ecto.Migrations.V01`).
     """
 
     use Ecto.Migration
@@ -48,6 +52,9 @@ if Code.ensure_loaded?(Ecto.Migration) do
 
       create table(inputs, primary_key: false, prefix: config.prefix) do
         add(:id, key_mod.migration_type(key_opts), primary_key: true)
+
+        for {name, {type, opts}} <- config.leading_columns, do: add(name, type, opts)
+
         add(:execution_id, :text, null: false)
         add(:seq, :bigint, null: false)
         add(:door, :text, null: false)

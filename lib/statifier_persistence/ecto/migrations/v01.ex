@@ -21,6 +21,13 @@ if Code.ensure_loaded?(Ecto.Migration) do
     dumps to a different underlying type (text, jsonb, a Postgres
     domain) needs the host to alter those three columns itself; this
     helper does not do it for them.
+
+    Each of the three tables carries the host's `:leading_columns`, if it
+    configured any, immediately after `id` and in the order given - the
+    one place a column the host owns can sit at a fixed ordinal position,
+    since a column a later `ALTER TABLE` adds lands at the end. They are
+    added as configured and nothing more: a default or a `NOT NULL` is a
+    later migration of the host's own.
     """
 
     use Ecto.Migration
@@ -40,6 +47,7 @@ if Code.ensure_loaded?(Ecto.Migration) do
 
       create table(charts, primary_key: false, prefix: config.prefix) do
         add(:id, pk_type, primary_key: true)
+        add_leading_columns(config)
         add(:content_hash, :text, null: false)
         add(:identity_blob, :binary, null: false)
         add(:chart_blob, :binary, null: false)
@@ -52,6 +60,7 @@ if Code.ensure_loaded?(Ecto.Migration) do
 
       create table(positions, primary_key: false, prefix: config.prefix) do
         add(:id, pk_type, primary_key: true)
+        add_leading_columns(config)
         add(:session_id, :text, null: false)
         add(:content_hash, :text, null: false)
         add(:identity_blob, :binary, null: false)
@@ -65,6 +74,7 @@ if Code.ensure_loaded?(Ecto.Migration) do
 
       create table(executions, primary_key: false, prefix: config.prefix) do
         add(:id, pk_type, primary_key: true)
+        add_leading_columns(config)
         add(:execution_id, :text, null: false)
         add(:status, :text, null: false)
         add(:content_hash, :text, null: false)
@@ -80,6 +90,12 @@ if Code.ensure_loaded?(Ecto.Migration) do
       create(unique_index(executions, [:execution_id], prefix: config.prefix))
 
       :ok
+    end
+
+    # Called inside each `create table` block, right after `id`: `add/3`
+    # appends to the table being created, so these land at positions 2..n.
+    defp add_leading_columns(%Config{leading_columns: columns}) do
+      for {name, {type, opts}} <- columns, do: add(name, type, opts)
     end
 
     @doc "Drops the V01 tables in reverse creation order."

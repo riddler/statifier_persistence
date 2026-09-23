@@ -23,7 +23,8 @@ if Code.ensure_loaded?(Ecto) do
     (ADR-0002 decision 3), and the migrations helper consumes the same
     resolved configuration so schemas and DDL cannot disagree. See
     `StatifierPersistence.Ecto.Config` for the options (`:key`,
-    `:table_prefix`, `:tables`, `:prefix`, `:blob_type`).
+    `:table_prefix`, `:tables`, `:prefix`, `:blob_type`,
+    `:leading_columns`).
 
     The engine identity columns (`content_hash`, `session_id`, `execution_id`)
     are stored verbatim as strings and are never touched by the
