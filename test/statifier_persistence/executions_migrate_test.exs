@@ -237,14 +237,20 @@ defmodule StatifierPersistence.ExecutionsMigrateTest do
     # stored content hash stayed the from hash. Verified red, reverted from
     # a copy.
     test "resumes in the new state on the new hash, counters and ids carried", ctx do
-      before = waiting_hold(ctx, "hold-1")
-      {:ok, old_state} = Storage.load_execution_position(ctx.store, "hold-1", ctx.from_machine)
+      # Telemetry handlers are global and the two adapters' cases run
+      # together, so the id names the adapter.
+      execution_id = "hold-renamed-#{ctx.adapter}"
+      before = waiting_hold(ctx, execution_id)
+
+      {:ok, old_state} =
+        Storage.load_execution_position(ctx.store, execution_id, ctx.from_machine)
+
       attach([:statifier_persistence, :execution, :migrated])
 
       plan = rename_plan!(ctx, datamodel: [{:add, "transfer_branch", nil}])
 
-      assert {:ok, %Execution{execution_id: "hold-1", status: :active} = execution, migrated} =
-               migrate(ctx, "hold-1", plan)
+      assert {:ok, %Execution{execution_id: ^execution_id, status: :active} = execution, migrated} =
+               migrate(ctx, execution_id, plan)
 
       assert execution.content_hash == ctx.to_hash
 
@@ -254,12 +260,12 @@ defmodule StatifierPersistence.ExecutionsMigrateTest do
                dropped: []
              }
 
-      record = stored(ctx, "hold-1")
+      record = stored(ctx, execution_id)
       assert record.content_hash == ctx.to_hash
       assert record.status == :active
       assert record.metadata == before.metadata
 
-      {:ok, new_state} = Storage.load_execution_position(ctx.store, "hold-1", ctx.to_machine)
+      {:ok, new_state} = Storage.load_execution_position(ctx.store, execution_id, ctx.to_machine)
       assert active_ids(new_state) == ["hold", "ready_for_pickup"]
       assert new_state.send_counter == old_state.send_counter
       assert new_state.invoke_counter == old_state.invoke_counter
@@ -270,23 +276,26 @@ defmodule StatifierPersistence.ExecutionsMigrateTest do
       assert Map.fetch!(new_state.datamodel, "branch") == "central"
 
       assert {:error, {:identity_mismatch, _stored, _supplied}} =
-               Storage.load_execution_position(ctx.store, "hold-1", ctx.from_machine)
+               Storage.load_execution_position(ctx.store, execution_id, ctx.from_machine)
 
       from_hash = ctx.from_hash
       to_hash = ctx.to_hash
 
       assert_received {:telemetry, [:statifier_persistence, :execution, :migrated],
                        %{
-                         execution_id: "hold-1",
+                         execution_id: ^execution_id,
                          from_content_hash: ^from_hash,
                          to_content_hash: ^to_hash,
                          dropped: []
                        }}
 
+      refute_received {:telemetry, [:statifier_persistence, :execution, :migrated],
+                       %{execution_id: ^execution_id}}
+
       assert {:ok, %Execution{status: :completed}, _ms} =
                Executions.step(
                  ctx.store,
-                 "hold-1",
+                 execution_id,
                  ctx.to_machine,
                  Event.external("copy.collected"),
                  step_opts()
