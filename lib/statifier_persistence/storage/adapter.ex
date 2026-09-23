@@ -228,6 +228,29 @@ defmodule StatifierPersistence.Storage.Adapter do
         }
 
   @typedoc """
+  One write of a tree migration's unit (`c:write_tree_migration/2`,
+  ADR-0015 decision 3).
+
+  - `{:repin, execution_record, linkage_content_hash}` - the record the
+    one write of `StatifierPersistence.Executions.migrate/4` would carry
+    for this execution: its identity, content hash and position blob on
+    the chart it moves to, the status `:active` and a `nil` failure. The
+    stored `metadata` and `outcome_blob` are carried forward as
+    `c:update_execution/2` carries them. `linkage_content_hash` is the new
+    `content_hash` of the execution's linkage pin when it carries a
+    linkage (ADR-0008's 2026-09-23 Amendment), and `nil` for an execution
+    that carries none; only that one key under the reserved namespace is
+    rewritten.
+  - `{:park, execution_id}` - the status `:needs_migration` and a `nil`
+    failure, every other stored field carried forward, as
+    `StatifierPersistence.Storage.update_execution_status/4` writes a
+    status (ADR-0014 decision 1).
+  """
+  @type tree_write ::
+          {:repin, execution_record(), content_hash() | nil}
+          | {:park, execution_id()}
+
+  @typedoc """
   An execution's input log ordinal: dense, zero-based, per execution, assigned by the
   adapter. Not a position blob (ADR-0010 decision 3).
   """
@@ -785,6 +808,44 @@ defmodule StatifierPersistence.Storage.Adapter do
               {:ok, retired_info() | nil} | {:error, error()}
 
   @doc """
+  Optional declaration that this adapter can write a tree migration as one
+  unit (ADR-0015 decision 3).
+
+  The same opt-in-by-export shape `c:supports_chart_retirement?/1` uses:
+  an adapter exports it and answers `true`, and
+  `StatifierPersistence.Executions.migrate_tree/4` refuses at open with
+  `{:error, :tree_migration_unsupported}` for an adapter that does not,
+  before any read and before any write. An adapter that does not export
+  it sees no other change.
+  """
+  @callback supports_tree_migration?(opts()) :: boolean()
+
+  @doc """
+  Optional write of a tree migration: every write in `writes`, or none of
+  them (ADR-0015 decision 3).
+
+  The unit is the contract, the one `c:retire_chart/3` already asks for:
+  one transaction on a database, one atomic state transition on an adapter
+  without one. `:ok` means every write in the list landed; `{:error,
+  reason}` means none of them did. An execution the list names that is
+  not stored is `{:error, :execution_not_found}`, and nothing is written.
+
+  Each write is a `t:tree_write/0`. A re-pin overwrites the status, the
+  content hash, the identity blob, the position blob and the failure,
+  rewrites the linkage pin's `content_hash` when the write carries one and
+  the stored metadata holds a linkage, and carries every other metadata
+  key and the `outcome_blob` forward verbatim. A park writes the status
+  and the failure alone.
+
+  An adapter reached inside an enclosing transaction - the Ecto adapter's
+  `c:lock_execution/3` is one - rolls that transaction back on a refusal
+  rather than returning an error that would commit the writes it had
+  already made. Like the other execution callbacks it decodes nothing,
+  validates no status transition and performs no identity check.
+  """
+  @callback write_tree_migration(opts(), [tree_write()]) :: :ok | {:error, error()}
+
+  @doc """
   Optional declaration that this adapter keeps an execution's input log
   (ADR-0010 decision 1).
 
@@ -857,6 +918,8 @@ defmodule StatifierPersistence.Storage.Adapter do
                       retire_chart: 3,
                       supports_retired_info?: 1,
                       fetch_retired_info: 2,
+                      supports_tree_migration?: 1,
+                      write_tree_migration: 2,
                       supports_input_log?: 1,
                       append_input: 3,
                       list_inputs: 2

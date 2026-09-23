@@ -397,7 +397,9 @@ defmodule StatifierPersistence.Telemetry do
   @doc """
   Emits `[:statifier_persistence, :execution, :migrated]`: one execution
   re-pinned from `from_content_hash` to `to_content_hash` by
-  `StatifierPersistence.Executions.migrate/4` (ADR-0013 decision 5).
+  `StatifierPersistence.Executions.migrate/4` (ADR-0013 decision 5), or
+  one node of a tree re-pinned by
+  `StatifierPersistence.Executions.migrate_tree/4` (ADR-0015 decision 5).
   `dropped` lists the dropped state ids that were in its configuration.
   """
   @spec execution_migrated(fields :: fields()) :: :ok

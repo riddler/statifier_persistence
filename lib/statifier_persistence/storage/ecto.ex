@@ -1055,6 +1055,131 @@ if Code.ensure_loaded?(Ecto) do
     end
 
     @doc """
+    Declares the tree migration unit (the optional
+    `c:StatifierPersistence.Storage.Adapter.supports_tree_migration?/1`,
+    ADR-0015 decision 3): its writes are `UPDATE`s of existing columns, and
+    the linkage pin lives in the existing metadata column, so it needs no
+    schema version.
+    """
+    @impl Adapter
+    @spec supports_tree_migration?(Adapter.opts()) :: boolean()
+    def supports_tree_migration?(_opts), do: true
+
+    @doc """
+    Writes a tree migration's re-pins and parks in one transaction (the
+    optional `c:StatifierPersistence.Storage.Adapter.write_tree_migration/2`,
+    ADR-0015 decision 3).
+
+    Each write is one `update_all/3` keyed on `execution_id`, and a write
+    that matches no row is `{:error, :execution_not_found}`. Any refusal
+    rolls the transaction back with `rollback/1`, so the writes before it
+    are undone. Reached inside a caller's own transaction - the per-execution
+    lock's is one - the transaction joins it and the rollback aborts that
+    transaction too: a refusal must not return an error the enclosing
+    transaction would then commit (the callback's contract). The enclosing
+    transaction then answers its own rollback, which is how the lock reports
+    it.
+    """
+    @impl Adapter
+    @spec write_tree_migration(Adapter.opts(), [Adapter.tree_write()]) ::
+            :ok | {:error, Adapter.error()}
+    def write_tree_migration(opts, writes) when is_list(writes) do
+      repo = repo(opts)
+
+      transaction =
+        repo.transaction(fn ->
+          case Enum.reduce_while(writes, :ok, &tree_step(opts, &1, &2)) do
+            :ok -> :ok
+            {:error, reason} -> repo.rollback(reason)
+          end
+        end)
+
+      case transaction do
+        {:ok, :ok} -> :ok
+        {:error, _reason} = error -> error
+      end
+    end
+
+    @spec tree_step(Adapter.opts(), Adapter.tree_write(), :ok) ::
+            {:cont, :ok} | {:halt, {:error, Adapter.error()}}
+    defp tree_step(opts, write, :ok) do
+      case tree_write(opts, write) do
+        {1, _returned} -> {:cont, :ok}
+        {0, _returned} -> {:halt, {:error, :execution_not_found}}
+      end
+    end
+
+    # A re-pin is `update_execution/2`'s statement with the one sanctioned
+    # rewrite of the linkage pin (ADR-0008's 2026-09-23 Amendment); a park is
+    # a status write, as `Storage.update_execution_status/4` makes one.
+    defp tree_write(opts, {:repin, %{execution_id: execution_id} = record, linkage_hash}) do
+      query = from(r in execution_schema(opts), where: r.execution_id == ^execution_id)
+
+      updates =
+        [
+          status: encode_status(record.status),
+          content_hash: record.content_hash,
+          identity_blob: record.identity_blob,
+          position_blob: record.position_blob,
+          failure: record.failure,
+          updated_at: DateTime.utc_now()
+        ] ++
+          outcome_update(Map.get(record, :outcome_blob)) ++
+          linkage_update(opts, execution_id, linkage_hash)
+
+      repo(opts).update_all(query, set: updates)
+    end
+
+    defp tree_write(opts, {:park, execution_id}) do
+      query = from(r in execution_schema(opts), where: r.execution_id == ^execution_id)
+
+      repo(opts).update_all(query,
+        set: [
+          status: encode_status(:needs_migration),
+          failure: nil,
+          updated_at: DateTime.utc_now()
+        ]
+      )
+    end
+
+    # Only the pin's `content_hash` changes; every other key under the
+    # reserved namespace, and every host key, is written back as it was read.
+    @spec linkage_update(Adapter.opts(), Adapter.execution_id(), Adapter.content_hash() | nil) ::
+            keyword()
+    defp linkage_update(_opts, _execution_id, nil), do: []
+
+    defp linkage_update(opts, execution_id, linkage_hash) do
+      stored =
+        repo(opts).one(
+          from(r in execution_schema(opts),
+            where: r.execution_id == ^execution_id,
+            select: r.metadata
+          )
+        )
+
+      case stored do
+        %{} = metadata ->
+          case Map.fetch(metadata, Linkage.reserved_key()) do
+            {:ok, %{} = reserved} ->
+              [
+                metadata:
+                  Map.put(
+                    metadata,
+                    Linkage.reserved_key(),
+                    Map.put(reserved, "content_hash", linkage_hash)
+                  )
+              ]
+
+            _no_linkage ->
+              []
+          end
+
+        nil ->
+          []
+      end
+    end
+
+    @doc """
     Runs `fun` under per-execution mutual exclusion for `execution_id` (the optional
     `c:StatifierPersistence.Storage.Adapter.lock_execution/3`, ADR-0004
     decision 5 as amended 2026-08-22).

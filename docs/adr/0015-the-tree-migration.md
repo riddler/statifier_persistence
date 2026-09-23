@@ -379,3 +379,43 @@ a second emitter, with the code that emits it.
   beyond what ADR-0013 and its Amendments decide for one execution; this
   command adds no check of its own there and calls no engine predicate.
 - Where a host stores its plans, and how it builds one plan per node.
+
+## Note (2026-09-23, sp-y3hj): the spellings the code half gave to shapes the decisions describe, and one reading of decision 1
+
+Pure addition: nothing above is edited, and this Note decides nothing the
+record did not. It names what the code that implements the record
+(`StatifierPersistence.Executions.migrate_tree/4` and the two optional
+callbacks, landed with this Note) answers where a decision describes a
+shape without spelling it. Every cite is by anchor, in that change.
+
+- **A missing machine.** A plan whose `from` or `to` hash has no machine
+  under `machines:` (decision 1) is refused, under that node's id, as
+  `{:machine_missing, content_hash}`; it is a static refusal and parks
+  nothing (decision 4). `t:StatifierPersistence.Executions.tree_refusal/0`.
+- **The resolve rule's refusal.** A live node absent from `plans` that
+  would no longer resolve (decision 1) is refused, under its own id, as
+  `{:child_unresolved, parent_execution_id, invoke_id}`, and it parks the
+  named nodes as decision 4 says. The rule is checked for such a node
+  whose parent `plans` names: a parent that is not moved stands as it
+  stood, and the node resolves against it as it did before the call.
+  `unresolved_children/3` in `executions.ex`.
+- **The tree-level arms.** Decision 5's "the tree-level arm by itself" is
+  answered as `{:error, arm}`, without the `:tree_refused` wrapper, which
+  is decision 3's own spelling for the unsupported adapter:
+  `{:error, :tree_migration_unsupported}`, `{:error, {:not_in_tree,
+  execution_ids}}`, and a listing, lock or unit refusal as the store or
+  the serialization strategy answers it. On the Ecto adapter under the
+  default serialization a unit that rolled back inside the lock's
+  transaction reaches the caller as the lock's own
+  `{:error, {:adapter, :rollback}}`, because decision 3 has the unit roll
+  the enclosing transaction back rather than return an error inside it.
+  `t:StatifierPersistence.Executions.migrate_tree_error/0`.
+- **The unit's writes.** Decision 3's two kinds of write are
+  `t:StatifierPersistence.Storage.Adapter.tree_write/0`:
+  `{:repin, execution_record, linkage_content_hash | nil}` and
+  `{:park, execution_id}`. The facade
+  `StatifierPersistence.Storage.write_tree_migration/2` derives each
+  re-pin's record from the imported machine state as
+  `StatifierPersistence.Storage.update_execution/5` derives one, and
+  `StatifierPersistence.Storage.tree_migration_supported?/1` is the
+  declaration check, in the shape of `chart_retirement_supported?/1`.

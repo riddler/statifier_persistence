@@ -570,6 +570,79 @@ defmodule StatifierPersistence.Storage.InMemory do
   end
 
   @doc """
+  Declares the tree migration unit (the optional
+  `c:StatifierPersistence.Storage.Adapter.supports_tree_migration?/1`,
+  ADR-0015 decision 3).
+  """
+  @impl Adapter
+  @spec supports_tree_migration?(Adapter.opts()) :: boolean()
+  def supports_tree_migration?(_opts), do: true
+
+  @doc """
+  Writes a tree migration's re-pins and parks as one unit (the optional
+  `c:StatifierPersistence.Storage.Adapter.write_tree_migration/2`,
+  ADR-0015 decision 3).
+
+  Every write is applied to one copy of the state inside one
+  `Agent.get_and_update/2`, which is this adapter's transaction: the copy
+  replaces the state only when every write applied, and a write naming an
+  execution that is not stored answers `{:error, :execution_not_found}`
+  with the state unchanged.
+  """
+  @impl Adapter
+  @spec write_tree_migration(Adapter.opts(), [Adapter.tree_write()]) ::
+          :ok | {:error, Adapter.error()}
+  def write_tree_migration(opts, writes) when is_list(writes) do
+    Agent.get_and_update(pid(opts), fn state ->
+      case Enum.reduce_while(writes, {:ok, state.executions}, &tree_write/2) do
+        {:ok, executions} -> {:ok, %{state | executions: executions}}
+        {:error, _reason} = error -> {error, state}
+      end
+    end)
+  end
+
+  @spec tree_write(Adapter.tree_write(), {:ok, map()}) ::
+          {:cont, {:ok, map()}} | {:halt, {:error, Adapter.error()}}
+  defp tree_write(write, {:ok, executions}) do
+    execution_id = tree_write_id(write)
+
+    case executions do
+      %{^execution_id => stored} ->
+        {:cont, {:ok, Map.put(executions, execution_id, tree_written(write, stored))}}
+
+      _absent ->
+        {:halt, {:error, :execution_not_found}}
+    end
+  end
+
+  defp tree_write_id({:repin, %{execution_id: execution_id}, _linkage_hash}), do: execution_id
+  defp tree_write_id({:park, execution_id}), do: execution_id
+
+  # A re-pin is `update_execution/2`'s carry-forward with the one sanctioned
+  # rewrite of the linkage pin (ADR-0008's 2026-09-23 Amendment); a park is
+  # `Storage.update_execution_status/4`'s status write.
+  defp tree_written({:repin, record, linkage_hash}, stored) do
+    record
+    |> carry_forward(stored)
+    |> Map.update!(:metadata, &repin_linkage(&1, linkage_hash))
+  end
+
+  defp tree_written({:park, _execution_id}, stored),
+    do: %{stored | status: :needs_migration, failure: nil}
+
+  defp repin_linkage(metadata, nil), do: metadata
+
+  defp repin_linkage(metadata, linkage_hash) do
+    case Map.fetch(metadata, Linkage.reserved_key()) do
+      {:ok, %{} = reserved} ->
+        Map.put(metadata, Linkage.reserved_key(), Map.put(reserved, "content_hash", linkage_hash))
+
+      _no_linkage ->
+        metadata
+    end
+  end
+
+  @doc """
   Runs `fun` under this adapter's per-execution mutual exclusion for `execution_id`
   (the optional `c:StatifierPersistence.Storage.Adapter.lock_execution/3`).
 
