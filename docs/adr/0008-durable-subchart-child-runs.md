@@ -1110,8 +1110,10 @@ chart, recorded a second time where the parent-child relationship can see
 it. Execution metadata is write-once (ADR-0006 decision 1), so until now
 nothing could change the pin, and nothing needed to: a child's chart never
 changed. ADR-0013 changed that for one execution and left children
-untouched (its decision 7); ADR-0015 moves a tree of executions, a child
-among them, onto new charts
+untouched (its decision 7, `docs/adr/0013-the-migration-plan.md`);
+ADR-0014 gave a refused migration a status to wait in
+(`docs/adr/0014-the-needs-migration-status.md`); ADR-0015 moves a tree of
+executions, a child among them, onto new charts
 (`docs/adr/0015-the-tree-migration.md`).
 
 **It amends decision 2.** The pin pins the child's own chart, so it
