@@ -779,6 +779,16 @@ defmodule StatifierPersistence.Executions do
     ordinal}, invoke_count}` - an active invocation kept by the
     same-ordinal default whose ordinal is not one of the to state's
     `<invoke>` children.
+  - `{:invocation_element_changed, {state_id, ordinal}, {to_state_id,
+    to_ordinal}}` - an active invocation kept by the same-ordinal default,
+    or moved through the plan's `invocations`, onto an `<invoke>` element
+    that is not the one it was started from (ADR-0013's 2026-09-23
+    Amendment, finding 1). When the source element authors an `id`, the
+    target must author the same `id`; when it authors none, the target
+    must author none and the two elements' source text must be
+    byte-equal. Its position is never the rule. Name the invocation's move
+    onto its own element, or give an unnamed element an `id` before
+    editing it.
   - `{:invocations_coincide, {to_state_id, ordinal}, sources}` - two or more
     active invocations would land on one key.
   - `{:invocation_outside_configuration, {state_id, ordinal}, {to_state_id,
@@ -818,6 +828,8 @@ defmodule StatifierPersistence.Executions do
           | {:invocation_unmapped, {Plan.state_id(), non_neg_integer()}}
           | {:invocation_out_of_range, {Plan.state_id(), non_neg_integer()},
              {Plan.state_id(), non_neg_integer()}, non_neg_integer()}
+          | {:invocation_element_changed, {Plan.state_id(), non_neg_integer()},
+             {Plan.state_id(), non_neg_integer()}}
           | {:invocations_coincide, {Plan.state_id(), non_neg_integer()},
              [{Plan.state_id(), non_neg_integer()}]}
           | {:invocation_outside_configuration, {Plan.state_id(), non_neg_integer()},
@@ -934,8 +946,10 @@ defmodule StatifierPersistence.Executions do
   is write-once. A live child reaches its parent by its invocation id
   alone, and the invocation ids in the parent's active invocations cross
   unchanged: every active invocation maps to a key of the to chart, through
-  the plan's `invocations` or by the same-ordinal default, or the migration
-  is refused with an invocation finding (decision 3). So the parent's own
+  the plan's `invocations` or by the same-ordinal default, and that key
+  names the `<invoke>` element the invocation was started from, or the
+  migration is refused with an invocation finding (decision 3; ADR-0013's
+  2026-09-23 Amendment, finding 1). So the parent's own
   position answers whether its children still resolve; no child is read
   and no child's lock is taken. Under `on_failure: :park` a refusal parks
   the parent only.
