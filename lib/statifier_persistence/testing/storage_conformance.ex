@@ -1093,6 +1093,56 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           assert chart.chart_blob == <<4, 5, 6>>
         end
 
+        # The child clause of decision 1 as a refusal rather than as a
+        # count: the child is terminal and holds no :active row of its
+        # own on the hash, so only its linkage pin, read through its
+        # :active parent, can hold the chart. Generated only where the
+        # adapter under test also holds metadata, because a linkage
+        # lives under the reserved metadata key.
+        #
+        # sabotage: drop the adapter under test's guard on the children
+        # pins - the `children > 0` term of
+        # StatifierPersistence.Storage.Adapter.pinned?/1, and the
+        # without_child_pins/3 clause of the Ecto adapter's
+        # unpinned_chart/2 -> red, the chart under a terminal child of
+        # an :active parent was retired instead of refused. Verified red
+        # over the storage suites in one run ("308 tests, 3 failures"):
+        # this case on the in-memory suite and both Ecto suites, and
+        # nothing else. Reverted from the copies.
+        if function_exported?(conformance_adapter, :supports_metadata?, 1) do
+          test "adapter: a terminal child's pin under an :active parent refuses the retirement",
+               %{store: store} do
+            save_retirable_chart(store, @retire_hash)
+            insert_retire_execution(store, "retire-pin-parent", "sha256:retire-parent", :active)
+
+            assert :ok =
+                     @conformance_adapter.insert_execution(store.opts, %{
+                       execution_id: "retire-pin-parent/call/0",
+                       status: :completed,
+                       content_hash: @retire_hash,
+                       identity_blob: <<1, 2, 3>>,
+                       position_blob: <<7, 8, 9>>,
+                       failure: nil,
+                       metadata:
+                         Linkage.to_metadata(
+                           Linkage.new("retire-pin-parent", "call", 0, @retire_hash)
+                         ),
+                       outcome_blob: nil
+                     })
+
+            assert {:error, {:pinned, counts}} =
+                     @conformance_adapter.retire_chart(store.opts, @retire_hash, retirement())
+
+            assert counts.children == 1
+            assert counts.executions.active == 0
+            assert counts.executions.completed == 1
+            assert counts.positions == 0
+
+            assert {:ok, chart} = @conformance_adapter.fetch_chart(store.opts, @retire_hash)
+            assert chart.chart_blob == <<4, 5, 6>>
+          end
+        end
+
         # sabotage: in
         # StatifierPersistence.Storage.Adapter.sources_pinned?/1, answer
         # false unconditionally - the one function both adapters ask
@@ -1315,6 +1365,13 @@ defmodule StatifierPersistence.Testing.StorageConformance do
       # constraint violation surfacing from the database as though the
       # retirement were a defect (ADR-0012 decision 6, and V07's
       # Postgres-guarded `modify/3`).
+      #
+      # The case branches on the same two predicates the facade does, so
+      # what it proves is that each arm is reachable, not that the
+      # adapter's predicate is right. Which arm a named adapter gives is
+      # asserted per adapter, where the adapter is known:
+      # StatifierPersistence.Storage.RetireCapabilityTest for the ones
+      # this package ships and tests against.
 
       # sabotage: in
       # StatifierPersistence.Storage.retire_chart/3, drop the
