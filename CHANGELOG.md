@@ -10,6 +10,51 @@ fragment in [`changelog.d/`](changelog.d/README.md); the fragments are assembled
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
 
+## [0.15.0] 2026-09-23
+
+Feature release: a parent execution and the durable children it invoked
+can now be moved onto newer charts together, whole or not at all.
+`StatifierPersistence.Executions.migrate_tree/4` takes one plan per node,
+checks every node before any is written, and re-pins every named node in
+one store unit or writes nothing; under `on_failure: :park` every named
+node parks instead. A moved child's linkage pin follows it to its new
+chart. The release also reports, on `[:statifier_persistence, :child, :answered]`,
+what a parent's door answered a durable child's automatic answer, so an
+answer a parked parent refused no longer passes unnoticed.
+
+**Breaking for a host whose migration plans `migrate/4` accepted with an
+invocation left off the migrated configuration or moved onto another
+`<invoke>` element, or with an illegal configuration, and for a host that
+matches `t:StatifierPersistence.Executions.migration_finding/0`
+exhaustively**: `StatifierPersistence.Executions.migrate/4` now refuses
+those three kinds of plan under three new findings, as Changed below
+lists; `migrate_tree/4` applies the same checks to every node.
+
+Upgrading: no schema migration. The two tree migration callbacks are
+optional, so a storage adapter outside this package stays conformant
+without them, and `migrate_tree/4` answers
+`{:error, :tree_migration_unsupported}` on it. The `statifier` floor
+stays `~> 2.6`.
+
+### Added
+
+- `[:statifier_persistence, :child, :answered]` carries `delivery`
+  (`:delivered`, `:discarded`, `:needs_migration` or `:error`), so a durable
+  child's automatic answer that a parked parent refused reaches the host
+  instead of passing unnoticed.
+- `StatifierPersistence.Executions.migrate_tree/4` emits `[:statifier_persistence, :execution, :migrated]` once per node it re-pins, the children's before the root's, after its one store unit has returned, with the same keys `migrate/4` emits; a refused or parked tree emits it for no node.
+- `StatifierPersistence.Testing.StorageConformance` gains two tree migration cases for an adapter that exports `write_tree_migration/2`: every re-pin and park in the list lands with only a moved child's linkage pin rewritten in its metadata, and a list that cannot land one write lands none.
+- `StatifierPersistence.Executions.migrate_tree/4` moves a parent execution and its durable children onto newer charts together: one plan per node, every node validated before any is written, children first, all in one store unit or nothing, and under `on_failure: :park` every named node parks.
+- A moved child's linkage pin is rewritten to the chart it now walks, so the old chart is no longer counted as pinned by it.
+- The storage adapter behaviour gains the optional `supports_tree_migration?/1` and `write_tree_migration/2` callbacks, implemented by the in-memory and Ecto adapters; an adapter without them makes `migrate_tree/4` answer `{:error, :tree_migration_unsupported}`.
+- `StatifierPersistence.Storage.tree_migration_supported?/1` and `StatifierPersistence.Storage.write_tree_migration/2`, and `t:StatifierPersistence.Storage.error/0` gains `:tree_migration_unsupported`.
+
+### Changed
+
+- **Breaking** for a host whose migration plans move a live invocation onto a state the migrated execution is not in, or that matches `t:StatifierPersistence.Executions.migration_finding/0` exhaustively: `StatifierPersistence.Executions.migrate/4` now refuses a plan that keeps or moves an active invocation onto a state outside the transformed configuration, answering `{:invocation_outside_configuration, {state_id, ordinal}, {to_state_id, to_ordinal}}` inside `{:migration_refused, findings}` (or parking the execution under `on_failure: :park`) with nothing else written. Before, such a plan answered `:ok`, and the invoked child outlived the parent's completion because nothing cancels an invocation on a state the parent never exits. Move the invocation onto a state the migrated configuration holds instead, and add a clause for the new finding, or a catch-all, to every `case` over the findings.
+- **Breaking** for a host whose migration plans drop an active state without its whole region, or that matches `t:StatifierPersistence.Executions.migration_finding/0` exhaustively: `StatifierPersistence.Executions.migrate/4` now refuses a plan whose transformed configuration is not a legal configuration of the to chart, answering `{:illegal_configuration, state_ids}` inside `{:migration_refused, findings}` (or parking the execution under `on_failure: :park`) with nothing else written. Before, a plan that dropped the state an execution waits in answered `:ok` and left its parent compound state with no active child. Plan a configuration the to chart can hold instead - map the dropped state, or drop its whole region - and add a clause for the new finding, or a catch-all, to every `case` over the findings.
+- **Breaking** for a host whose migration plans keep or move a live invocation onto an `<invoke>` element other than its own, or that matches `t:StatifierPersistence.Executions.migration_finding/0` exhaustively: `StatifierPersistence.Executions.migrate/4` now refuses a plan that keeps an active invocation at its ordinal, or moves it through `invocations`, onto a different `<invoke>` element of the to chart, answering `{:invocation_element_changed, {state_id, ordinal}, {to_state_id, to_ordinal}}` inside `{:migration_refused, findings}` (or parking the execution under `on_failure: :park`) with nothing else written. The element is the same when the source element's authored `id` is the target's, or, when the source element authors none, when the target authors none and the two elements' source text is byte-equal; position alone never is. Before, a revision that reordered or replaced a state's `<invoke>` children migrated with no finding, and the live invocation took another element's finalize and autoforward. Name each invocation's move onto its own element in the plan's `invocations`, give an unnamed `<invoke>` an `id` before editing it, and add a clause for the new finding, or a catch-all, to every `case` over the findings.
+
 ## [0.14.0] 2026-09-23
 
 Feature release: an execution can now be moved onto another chart, on
