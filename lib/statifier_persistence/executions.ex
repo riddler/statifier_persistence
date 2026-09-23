@@ -954,7 +954,8 @@ defmodule StatifierPersistence.Executions do
   and no child's lock is taken. Under `on_failure: :park` a refusal parks
   the parent only.
 
-  Migrating a child, or a tree of executions, is not done here.
+  Migrating a child together with its linkage pin, or a tree of
+  executions together, is `migrate_tree/4`'s (ADR-0015).
 
   ## What it does
 
@@ -1032,9 +1033,7 @@ defmodule StatifierPersistence.Executions do
     # ADR-0013 decision 4: a static fault and a tombstoned to hash refuse
     # before the execution is read and write nothing under either
     # `on_failure:`; the 2026-09-23 Amendment adds a missing pin source.
-    with :ok <- static_check(plan, from_machine, to_machine),
-         :ok <- Storage.check_chart_retired(store, to_machine),
-         {:ok, timers} <- timer_check(plan, from_machine, to_machine, pin_sources) do
+    with {:ok, timers} <- plan_check(store, plan, from_machine, to_machine, pin_sources) do
       {strategy, config} = Keyword.get(opts, :serialization, {AdapterLock, store})
       machines = {from_machine, to_machine}
 
@@ -1043,6 +1042,20 @@ defmodule StatifierPersistence.Executions do
         migrate_tail(store, execution_id, plan, machines, timers, on_failure)
       end)
       |> migrated(execution_id)
+    end
+  end
+
+  # ADR-0013 decision 4: the refusals that come before any execution is
+  # read, and write nothing under either `on_failure:` - a static fault and
+  # a tombstoned to hash - and the 2026-09-23 Amendment's missing pin
+  # source. `migrate/4` asks them of its one plan and `migrate_tree/4` of
+  # every node's (ADR-0015 decision 3).
+  @spec plan_check(Storage.t(), Plan.t(), Machine.t(), Machine.t(), [module()]) ::
+          {:ok, :none | {:ask, [module()]}} | {:error, migrate_error()}
+  defp plan_check(store, plan, from_machine, to_machine, pin_sources) do
+    with :ok <- static_check(plan, from_machine, to_machine),
+         :ok <- Storage.check_chart_retired(store, to_machine) do
+      timer_check(plan, from_machine, to_machine, pin_sources)
     end
   end
 
@@ -1076,18 +1089,22 @@ defmodule StatifierPersistence.Executions do
   @spec migrated({:ok, result} | {:error, term()}, execution_id()) :: result | {:error, term()}
         when result: term()
   defp migrated({:ok, {:ok, %Execution{}, facts} = result}, execution_id) do
+    emit_migrated(execution_id, facts)
+    result
+  end
+
+  defp migrated({:ok, result}, _execution_id), do: result
+  defp migrated({:error, _reason} = error, _execution_id), do: error
+
+  @spec emit_migrated(execution_id(), migrated()) :: :ok
+  defp emit_migrated(execution_id, facts) do
     Telemetry.execution_migrated(
       execution_id: execution_id,
       from_content_hash: facts.from_content_hash,
       to_content_hash: facts.to_content_hash,
       dropped: facts.dropped
     )
-
-    result
   end
-
-  defp migrated({:ok, result}, _execution_id), do: result
-  defp migrated({:error, _reason} = error, _execution_id), do: error
 
   @spec migrate_tail(
           Storage.t(),
@@ -1101,20 +1118,23 @@ defmodule StatifierPersistence.Executions do
           | {:parked, {:migration_refused, [migration_finding()]}}
           | {:error, migrate_error()}
   defp migrate_tail(store, execution_id, plan, machines, timers, on_failure) do
-    case Storage.fetch_execution(store, execution_id) do
-      {:ok, %{status: status} = record} when status in [:completed, :failed, :cancelled] ->
-        {:error, {:terminal_execution, Execution.from_record(record)}}
-
-      {:ok, %{content_hash: stored}} when stored != plan.from ->
-        {:error, {:not_on_from_chart, stored, plan.from}}
-
-      {:ok, record} ->
-        migrate_loaded(store, record, plan, machines, timers, on_failure)
-
-      {:error, _reason} = error ->
-        error
+    with {:ok, record} <- Storage.fetch_execution(store, execution_id),
+         :ok <- check_record(record, plan) do
+      migrate_loaded(store, record, plan, machines, timers, on_failure)
     end
   end
+
+  # ADR-0013 decision 4: a terminal execution, or one stored on another
+  # chart than the plan's `from`, is refused and parks nothing.
+  @spec check_record(Adapter.execution_record(), Plan.t()) :: :ok | {:error, migrate_error()}
+  defp check_record(%{status: status} = record, _plan)
+       when status in [:completed, :failed, :cancelled],
+       do: {:error, {:terminal_execution, Execution.from_record(record)}}
+
+  defp check_record(%{content_hash: stored}, %Plan{from: from}) when stored != from,
+    do: {:error, {:not_on_from_chart, stored, from}}
+
+  defp check_record(_record, _plan), do: :ok
 
   # The execution is on the plan's `from` hash and not terminal, so from
   # here a refusal of the validation against it is the one `:park` parks;
@@ -1132,18 +1152,45 @@ defmodule StatifierPersistence.Executions do
           {:ok, Execution.t(), migrated()}
           | {:parked, {:migration_refused, [migration_finding()]}}
           | {:error, migrate_error()}
-  defp migrate_loaded(store, record, plan, {from_machine, to_machine}, timers, on_failure) do
+  defp migrate_loaded(store, record, plan, machines, timers, on_failure) do
+    case validate_execution(store, record, plan, machines, timers) do
+      {:ok, %{machine_state: migrated, dropped: dropped}} ->
+        repin(store, record, migrated, plan, dropped)
+
+      {:error, {:migration_refused, _findings} = reason} ->
+        refuse(store, record.execution_id, reason, on_failure)
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  # ADR-0013 decision 3's validation against the execution, and the whole
+  # transform: the pin sources asked for this one execution under its
+  # exclusion, its position loaded with the from machine through the
+  # identity guard, and `Transform.transform/5`. It writes nothing. A
+  # refusal of the transform is `{:migration_refused, findings}`, the one
+  # refusal `:park` parks; a source that did not answer and a load that
+  # failed come back as they are. `migrate/4` runs it for its one
+  # execution and `migrate_tree/4` for every node its plans name.
+  @spec validate_execution(
+          Storage.t(),
+          Adapter.execution_record(),
+          Plan.t(),
+          {Machine.t(), Machine.t()},
+          :none | {:ask, [module()]}
+        ) ::
+          {:ok, %{machine_state: MachineState.t(), dropped: [Plan.state_id()]}}
+          | {:error, migrate_error()}
+  defp validate_execution(store, record, plan, {from_machine, to_machine}, timers) do
     execution_id = record.execution_id
 
     with {:ok, source_counts} <- ask_timer_sources(timers, plan.from, execution_id),
          {:ok, machine_state} <-
            Storage.load_execution_position(store, execution_id, from_machine) do
       case Transform.transform(machine_state, plan, from_machine, to_machine, source_counts) do
-        {:ok, %{machine_state: migrated, dropped: dropped}} ->
-          repin(store, record, migrated, plan, dropped)
-
-        {:error, findings} ->
-          refuse(store, execution_id, {:migration_refused, findings}, on_failure)
+        {:ok, applied} -> {:ok, applied}
+        {:error, findings} -> {:error, {:migration_refused, findings}}
       end
     end
   end
@@ -1171,12 +1218,20 @@ defmodule StatifierPersistence.Executions do
         ) :: {:ok, Execution.t(), migrated()} | {:error, migrate_error()}
   defp repin(store, record, machine_state, plan, dropped) do
     with :ok <- Storage.update_execution(store, record.execution_id, machine_state, :active) do
-      execution =
-        Execution.from_record(%{record | status: :active, content_hash: plan.to, failure: nil})
-
-      {:ok, execution,
-       %{from_content_hash: plan.from, to_content_hash: plan.to, dropped: dropped}}
+      {execution, facts} = migrated_answer(record, plan, dropped)
+      {:ok, execution, facts}
     end
+  end
+
+  # What a re-pinned execution answers (ADR-0013 decision 5): the
+  # execution, now `:active` on the plan's `to` hash, and the facts.
+  @spec migrated_answer(Adapter.execution_record(), Plan.t(), [Plan.state_id()]) ::
+          {Execution.t(), migrated()}
+  defp migrated_answer(record, plan, dropped) do
+    execution =
+      Execution.from_record(%{record | status: :active, content_hash: plan.to, failure: nil})
+
+    {execution, %{from_content_hash: plan.from, to_content_hash: plan.to, dropped: dropped}}
   end
 
   # ADR-0014 decision 1: the park writes the status and a nil failure
@@ -1198,6 +1253,435 @@ defmodule StatifierPersistence.Executions do
            Storage.update_execution_status(store, execution_id, :needs_migration, failure: nil) do
       {:parked, reason}
     end
+  end
+
+  @typedoc """
+  One node's refusal inside a refused tree (ADR-0015 decisions 3 and 5):
+  the refusal `migrate/4` would answer for that node, or one of the two
+  arms only a tree has.
+
+  - `{:machine_missing, content_hash}` - the node's plan names a `from` or
+    `to` hash with no compiled machine under it in `machines:`. It is a
+    static refusal and parks nothing.
+  - `{:child_unresolved, parent_execution_id, invoke_id}` - a live node
+    absent from `plans` whose parent is moved by its plan, and whose
+    invocation id the parent's migrated position would no longer name
+    among its active invocations (ADR-0015 decision 1's resolve rule).
+    Under `on_failure: :park` it parks the named nodes, as ADR-0013
+    decision 7's child rule parks the parent.
+  """
+  @type tree_refusal ::
+          migrate_error()
+          | {:machine_missing, Adapter.content_hash()}
+          | {:child_unresolved, execution_id(), String.t()}
+
+  @typedoc """
+  Why `migrate_tree/4` refused.
+
+  - `{:tree_refused, refusals}` - one or more nodes refused, `refusals`
+    every node's refusal at once, keyed by execution id
+    (`t:tree_refusal/0`).
+  - `:tree_migration_unsupported` - the store's adapter does not declare
+    `c:StatifierPersistence.Storage.Adapter.write_tree_migration/2`;
+    nothing was read.
+  - `{:not_in_tree, execution_ids}` - ids in `plans` that are not nodes of
+    the tree rooted at the root, sorted.
+  - `:child_listing_unsupported`, and anything else `t:error/0` names - a
+    tree that could not be listed, a root that does not exist, a lock that
+    could not be taken, a unit write the adapter refused.
+  """
+  @type migrate_tree_error ::
+          {:tree_refused, %{execution_id() => tree_refusal()}}
+          | :tree_migration_unsupported
+          | {:not_in_tree, [execution_id()]}
+          | error()
+
+  # The tree as the command reads it: every node in pre-order from the
+  # root, siblings in ascending id, the stored record of each, and the
+  # linkage of every node that carries one.
+  @typep tree :: %{
+           order: [execution_id()],
+           records: %{execution_id() => Adapter.execution_record()},
+           links: %{execution_id() => Linkage.t()}
+         }
+
+  # One named node, prepared before any execution is read: its plan, its
+  # two machines, and whether its pin sources must be asked.
+  @typep prepared :: %{
+           plan: Plan.t(),
+           machines: {Machine.t(), Machine.t()},
+           timers: :none | {:ask, [module()]}
+         }
+
+  @doc """
+  Moves a tree of executions - a parent and the durable children it
+  invoked - onto newer charts, whole or not at all (ADR-0015; the write of
+  a child's linkage pin is ADR-0008's 2026-09-23 Amendment).
+
+  `plans` maps an execution id to one `StatifierPersistence.Migration.Plan`,
+  one per node the host moves; the same plan may serve several nodes. A
+  node absent from `plans` is left untouched - its row, its linkage and
+  its position - and, when it is live, must still resolve against its
+  parent as that parent will stand after the move (decision 1). A child
+  moved on its own is moved with the child as the root.
+
+  ## Options
+
+  - `machines:` (required) - a map from content hash to compiled machine,
+    holding the `from` and `to` machine of every plan. A plan whose
+    machine is missing is refused with `{:machine_missing, hash}`.
+  - `pin_sources:`, `on_failure:` and `serialization:` - `migrate/4`'s,
+    with its meanings and defaults.
+
+  ## What it does
+
+  Nothing is read or written for an adapter that does not declare the
+  unit: that is `{:error, :tree_migration_unsupported}` (decision 3).
+  Then every node's plan is checked against its two machines exactly as
+  `migrate/4` checks its one plan - the static validation, a tombstoned
+  `to` hash, a missing pin source - before any execution is read.
+
+  The tree is read through the linkage, as `cascade_cancel/3` reads it,
+  through every child whatever its status (decision 2), and an id in
+  `plans` outside it is refused. The exclusion of every named node is
+  taken through the serialization strategy's `with_execution/3`, each
+  ancestor before its descendants and siblings in ascending id, and held
+  until the write has returned; a node absent from `plans` is read and
+  never locked. The tree is read again under the exclusions, and the
+  named nodes are checked against that second read.
+
+  Every named node is then validated as `migrate/4` validates its one
+  execution - the same functions, children first and the root last:
+  refused when terminal or stored on another chart than its plan's
+  `from`, its pin sources asked with its plan's `from` hash and its own
+  id, its position loaded through the identity guard, checked and
+  transformed. Every live node absent from `plans` whose parent is named
+  is checked against the parent's transformed position. Every refusal
+  from every node is collected before anything is written.
+
+  The write is one call to
+  `c:StatifierPersistence.Storage.Adapter.write_tree_migration/2`
+  through `StatifierPersistence.Storage.write_tree_migration/2`: one
+  transaction on a database, one atomic state transition on an adapter
+  without one, so every write in it lands or none does (decision 3). It
+  carries one re-pin per named node, children first: the record
+  `migrate/4`'s one write would carry, and for a node with a linkage its
+  pin's new `content_hash`. Nothing that can fail follows it.
+
+  ## What it answers
+
+  - `{:ok, moved}` - `moved` is one `{execution, migrated}` pair per
+    named node, children first and the root last, each as `migrate/4`
+    answers for one node. One `[:statifier_persistence, :execution,
+    :migrated]` event per pair follows, in that order, once every
+    exclusion is released (decision 5).
+  - `{:error, reason}` - `t:migrate_tree_error/0`. No node was written.
+  - `{:parked, {:tree_refused, refusals}}` - under `on_failure: :park`
+    only, when every refusal is one `migrate/4` parks for its own node
+    (`{:migration_refused, findings}`) or the resolve rule's
+    `{:child_unresolved, _, _}`. Then every named node - including one
+    whose own plan would have applied - is written `:needs_migration`
+    with a `nil` failure, in the same one unit, and nothing else of it
+    changes; no node absent from `plans` is parked (decision 4). Any
+    other refusal parks nothing.
+
+  A refused or parked tree emits no event. Nothing in this package calls
+  this function: saving, publishing and stepping never migrate anything.
+  """
+  @spec migrate_tree(
+          store :: Storage.t(),
+          root_execution_id :: execution_id(),
+          plans :: %{execution_id() => Plan.t()},
+          opts :: keyword()
+        ) ::
+          {:ok, [{Execution.t(), migrated()}]}
+          | {:parked, {:tree_refused, %{execution_id() => tree_refusal()}}}
+          | {:error, migrate_tree_error()}
+  def migrate_tree(%Storage{} = store, root_execution_id, plans, opts)
+      when is_binary(root_execution_id) and is_map(plans) do
+    machines = Keyword.get(opts, :machines, %{})
+    on_failure = Keyword.get(opts, :on_failure, :refuse)
+    pin_sources = Keyword.get(opts, :pin_sources, [])
+    check_tree_opts!(plans, machines, on_failure, pin_sources)
+
+    with :ok <- check_tree_unit(store),
+         {:ok, prepared} <- prepare_tree(store, plans, machines, pin_sources),
+         {:ok, tree} <- read_tree(store, root_execution_id),
+         :ok <- check_named(plans, tree) do
+      {strategy, config} = Keyword.get(opts, :serialization, {AdapterLock, store})
+      named = Enum.filter(tree.order, &Map.has_key?(plans, &1))
+
+      strategy
+      |> with_exclusions(config, named, fn ->
+        migrate_tree_locked(store, root_execution_id, prepared, on_failure)
+      end)
+      |> tree_migrated()
+    end
+  end
+
+  @spec check_tree_opts!(map(), term(), term(), term()) :: :ok
+  defp check_tree_opts!(plans, machines, on_failure, pin_sources) do
+    unless on_failure in [:refuse, :park] do
+      raise ArgumentError,
+            "the :on_failure option must be :refuse or :park, got: #{inspect(on_failure)}"
+    end
+
+    unless is_list(pin_sources) do
+      raise ArgumentError,
+            "the :pin_sources option must be a list of modules, got: #{inspect(pin_sources)}"
+    end
+
+    unless is_map(machines) do
+      raise ArgumentError,
+            "the :machines option must be a map of content hash to machine, " <>
+              "got: #{inspect(machines)}"
+    end
+
+    unless Enum.all?(plans, fn {id, plan} -> is_binary(id) and is_struct(plan, Plan) end) do
+      raise ArgumentError, "plans must map execution ids to StatifierPersistence.Migration.Plan"
+    end
+
+    :ok
+  end
+
+  # ADR-0015 decision 3: an adapter without the unit is refused at open,
+  # before any read and before any write.
+  @spec check_tree_unit(Storage.t()) :: :ok | {:error, migrate_tree_error()}
+  defp check_tree_unit(store) do
+    if Storage.tree_migration_supported?(store),
+      do: :ok,
+      else: {:error, :tree_migration_unsupported}
+  end
+
+  # ADR-0015 decisions 3 and 6: every node's plan meets `migrate/4`'s
+  # checks before any execution is read, through the same `plan_check/5`.
+  @spec prepare_tree(Storage.t(), %{execution_id() => Plan.t()}, map(), [module()]) ::
+          {:ok, %{execution_id() => prepared()}} | {:error, migrate_tree_error()}
+  defp prepare_tree(store, plans, machines, pin_sources) do
+    {prepared, refusals} =
+      plans
+      |> Enum.sort()
+      |> Enum.reduce({%{}, %{}}, fn {id, plan}, {prepared, refusals} ->
+        case prepare_node(store, plan, machines, pin_sources) do
+          {:ok, node} -> {Map.put(prepared, id, node), refusals}
+          {:error, reason} -> {prepared, Map.put(refusals, id, reason)}
+        end
+      end)
+
+    if refusals == %{}, do: {:ok, prepared}, else: {:error, {:tree_refused, refusals}}
+  end
+
+  @spec prepare_node(Storage.t(), Plan.t(), map(), [module()]) ::
+          {:ok, prepared()} | {:error, tree_refusal()}
+  defp prepare_node(store, plan, machines, pin_sources) do
+    with {:ok, from_machine} <- tree_machine(machines, plan.from),
+         {:ok, to_machine} <- tree_machine(machines, plan.to),
+         {:ok, timers} <- plan_check(store, plan, from_machine, to_machine, pin_sources) do
+      {:ok, %{plan: plan, machines: {from_machine, to_machine}, timers: timers}}
+    end
+  end
+
+  @spec tree_machine(map(), Adapter.content_hash()) ::
+          {:ok, Machine.t()} | {:error, tree_refusal()}
+  defp tree_machine(machines, content_hash) do
+    case Map.fetch(machines, content_hash) do
+      {:ok, %Machine{} = machine} -> {:ok, machine}
+      _missing -> {:error, {:machine_missing, content_hash}}
+    end
+  end
+
+  # ADR-0015 decision 2: the tree is the root and every execution whose
+  # linkage names a node of it, listed as `cascade_cancel/3` lists them,
+  # whatever each one's status. It is acyclic by construction, since a
+  # child's id extends its parent's.
+  @spec read_tree(Storage.t(), execution_id()) :: {:ok, tree()} | {:error, error()}
+  defp read_tree(store, root_execution_id) do
+    with {:ok, root} <- Storage.fetch_execution(store, root_execution_id) do
+      descend(store, [root], %{order: [], records: %{}, links: %{}})
+    end
+  end
+
+  @spec descend(Storage.t(), [Adapter.execution_record()], tree()) ::
+          {:ok, tree()} | {:error, error()}
+  defp descend(_store, [], tree), do: {:ok, %{tree | order: Enum.reverse(tree.order)}}
+
+  defp descend(store, [record | rest], tree) do
+    id = record.execution_id
+
+    tree = %{
+      tree
+      | order: [id | tree.order],
+        records: Map.put(tree.records, id, record),
+        links: put_link(tree.links, id, record)
+    }
+
+    with {:ok, children} <- Storage.list_executions_by_metadata(store, Linkage.parent_match(id)) do
+      descend(store, Enum.sort_by(children, & &1.execution_id) ++ rest, tree)
+    end
+  end
+
+  @spec put_link(map(), execution_id(), Adapter.execution_record()) :: map()
+  defp put_link(links, id, record) do
+    case Linkage.from_metadata(record.metadata) do
+      {:ok, linkage} -> Map.put(links, id, linkage)
+      :no_linkage -> links
+    end
+  end
+
+  @spec check_named(map(), tree()) :: :ok | {:error, migrate_tree_error()}
+  defp check_named(plans, tree) do
+    case plans |> Map.keys() |> Enum.reject(&Map.has_key?(tree.records, &1)) do
+      [] -> :ok
+      outside -> {:error, {:not_in_tree, Enum.sort(outside)}}
+    end
+  end
+
+  # ADR-0015 decision 2's lock order: `named` is in pre-order, so each
+  # ancestor's exclusion is taken before its descendants' and siblings'
+  # in ascending id, and every one is held until `fun` returns.
+  @spec with_exclusions(module(), term(), [execution_id()], (-> result)) ::
+          {:ok, result} | {:error, term()}
+        when result: term()
+  defp with_exclusions(_strategy, _config, [], fun), do: {:ok, fun.()}
+
+  defp with_exclusions(strategy, config, [id | rest], fun) do
+    case strategy.with_execution(config, id, fn ->
+           with_exclusions(strategy, config, rest, fun)
+         end) do
+      {:ok, inner} -> inner
+      {:error, _reason} = error -> error
+    end
+  end
+
+  # ADR-0015 decision 5: the events follow the unit, once every exclusion
+  # is released, children first and the root last.
+  @spec tree_migrated({:ok, result} | {:error, term()}) :: result | {:error, term()}
+        when result: term()
+  defp tree_migrated({:ok, {:ok, moved} = result}) do
+    Enum.each(moved, fn {execution, facts} -> emit_migrated(execution.execution_id, facts) end)
+    result
+  end
+
+  defp tree_migrated({:ok, result}), do: result
+  defp tree_migrated({:error, _reason} = error), do: error
+
+  # Under every named node's exclusion: the tree is read again, every
+  # named node validated children first, every live absent child of a
+  # moved parent checked, and one unit written - or nothing.
+  @spec migrate_tree_locked(
+          Storage.t(),
+          execution_id(),
+          %{execution_id() => prepared()},
+          :refuse | :park
+        ) ::
+          {:ok, [{Execution.t(), migrated()}]}
+          | {:parked, {:tree_refused, %{execution_id() => tree_refusal()}}}
+          | {:error, migrate_tree_error()}
+  defp migrate_tree_locked(store, root_execution_id, prepared, on_failure) do
+    with {:ok, tree} <- read_tree(store, root_execution_id),
+         :ok <- check_named(prepared, tree) do
+      leaves_up = tree.order |> Enum.reverse() |> Enum.filter(&Map.has_key?(prepared, &1))
+
+      validated =
+        Map.new(leaves_up, fn id ->
+          node = Map.fetch!(prepared, id)
+          {id, validate_node(store, Map.fetch!(tree.records, id), node)}
+        end)
+
+      refusals =
+        validated
+        |> Enum.flat_map(fn
+          {_id, {:ok, _applied}} -> []
+          {id, {:error, reason}} -> [{id, reason}]
+        end)
+        |> Map.new()
+        |> Map.merge(unresolved_children(tree, prepared, validated))
+
+      decide_tree(store, tree, leaves_up, prepared, validated, refusals, on_failure)
+    end
+  end
+
+  @spec validate_node(Storage.t(), Adapter.execution_record(), prepared()) ::
+          {:ok, %{machine_state: MachineState.t(), dropped: [Plan.state_id()]}}
+          | {:error, migrate_error()}
+  defp validate_node(store, record, %{plan: plan, machines: machines, timers: timers}) do
+    with :ok <- check_record(record, plan) do
+      validate_execution(store, record, plan, machines, timers)
+    end
+  end
+
+  # ADR-0015 decision 1's resolve rule: a live node absent from `plans`
+  # whose parent is moved must still be named by one of the parent's
+  # active invocations in its migrated position. A node whose parent is
+  # not moved keeps the parent it resolved against.
+  @spec unresolved_children(tree(), map(), map()) :: %{execution_id() => tree_refusal()}
+  defp unresolved_children(tree, prepared, validated) do
+    for {id, %Linkage{parent_execution_id: parent_id, invoke_id: invoke_id}} <- tree.links,
+        not Map.has_key?(prepared, id),
+        Map.fetch!(tree.records, id).status not in [:completed, :failed, :cancelled],
+        {:ok, %{machine_state: parent_state}} <- [Map.get(validated, parent_id)],
+        invoke_id not in Map.values(parent_state.active_invocations),
+        into: %{},
+        do: {id, {:child_unresolved, parent_id, invoke_id}}
+  end
+
+  # ADR-0015 decisions 3 and 4: a clean tree re-pins every named node in
+  # one unit; a refused one parks every named node in one unit when every
+  # refusal is one that parks, and otherwise writes nothing.
+  @spec decide_tree(
+          Storage.t(),
+          tree(),
+          [execution_id()],
+          %{execution_id() => prepared()},
+          map(),
+          %{execution_id() => tree_refusal()},
+          :refuse | :park
+        ) ::
+          {:ok, [{Execution.t(), migrated()}]}
+          | {:parked, {:tree_refused, %{execution_id() => tree_refusal()}}}
+          | {:error, migrate_tree_error()}
+  defp decide_tree(store, tree, leaves_up, prepared, validated, refusals, _on_failure)
+       when refusals == %{} do
+    writes =
+      Enum.map(leaves_up, fn id ->
+        {:ok, %{machine_state: machine_state}} = Map.fetch!(validated, id)
+        {:repin, id, machine_state, linkage_pin(tree, id, Map.fetch!(prepared, id).plan)}
+      end)
+
+    with :ok <- Storage.write_tree_migration(store, writes) do
+      {:ok,
+       Enum.map(leaves_up, fn id ->
+         {:ok, %{dropped: dropped}} = Map.fetch!(validated, id)
+         migrated_answer(Map.fetch!(tree.records, id), Map.fetch!(prepared, id).plan, dropped)
+       end)}
+    end
+  end
+
+  defp decide_tree(store, _tree, leaves_up, _prepared, _validated, refusals, :park) do
+    if Enum.all?(refusals, fn {_id, reason} -> parks_tree?(reason) end) do
+      with :ok <- Storage.write_tree_migration(store, Enum.map(leaves_up, &{:park, &1})) do
+        {:parked, {:tree_refused, refusals}}
+      end
+    else
+      {:error, {:tree_refused, refusals}}
+    end
+  end
+
+  defp decide_tree(_store, _tree, _leaves_up, _prepared, _validated, refusals, :refuse),
+    do: {:error, {:tree_refused, refusals}}
+
+  # ADR-0015 decision 4: the refusals that park a tree are the ones
+  # `migrate/4` parks for its own node and the resolve rule's.
+  @spec parks_tree?(tree_refusal()) :: boolean()
+  defp parks_tree?({:migration_refused, _findings}), do: true
+  defp parks_tree?({:child_unresolved, _parent_id, _invoke_id}), do: true
+  defp parks_tree?(_reason), do: false
+
+  # ADR-0008's 2026-09-23 Amendment: a moved node that carries a linkage
+  # has its pin rewritten to the chart it now walks, its plan's `to`.
+  @spec linkage_pin(tree(), execution_id(), Plan.t()) :: Adapter.content_hash() | nil
+  defp linkage_pin(tree, id, plan) do
+    if Map.has_key?(tree.links, id), do: plan.to, else: nil
   end
 
   @doc """

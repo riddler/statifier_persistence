@@ -75,6 +75,7 @@ defmodule StatifierPersistence.Storage do
           | :execution_states_unsupported
           | :content_hash_query_unsupported
           | :chart_retirement_unsupported
+          | :tree_migration_unsupported
           | {:unsupported_format_version, term()}
           | {:identity_mismatch, Identity.t(), Identity.t() | nil}
 
@@ -94,6 +95,16 @@ defmodule StatifierPersistence.Storage do
           door: Adapter.door(),
           event: Event.t() | nil
         }
+
+  @typedoc """
+  One write of a tree migration, as `write_tree_migration/2` takes it
+  (ADR-0015 decision 3): a re-pin of an execution onto the machine state
+  it is handed, with its linkage pin's new `content_hash` or `nil` when it
+  carries no linkage, or a park.
+  """
+  @type tree_write ::
+          {:repin, Adapter.execution_id(), MachineState.t(), Adapter.content_hash() | nil}
+          | {:park, Adapter.execution_id()}
 
   @typedoc """
   Options the execution writers (`insert_execution/5`, `update_execution/5`) accept:
@@ -861,6 +872,91 @@ defmodule StatifierPersistence.Storage do
         raise ArgumentError,
               "retire_chart requires a non-empty `retired_by:` string naming who asked " <>
                 "for the retirement (ADR-0012 decision 6), got: #{inspect(other)}"
+    end
+  end
+
+  @doc """
+  Whether `store`'s adapter can write a tree migration as one unit
+  (ADR-0015 decision 3).
+
+  True when the adapter exports the optional
+  `c:StatifierPersistence.Storage.Adapter.supports_tree_migration?/1` and
+  `c:StatifierPersistence.Storage.Adapter.write_tree_migration/2` and the
+  first answers `true` - the shape `chart_retirement_supported?/1` checks.
+  """
+  @spec tree_migration_supported?(store :: t()) :: boolean()
+  def tree_migration_supported?(%__MODULE__{} = store) do
+    Code.ensure_loaded?(store.adapter) and
+      function_exported?(store.adapter, :supports_tree_migration?, 1) and
+      function_exported?(store.adapter, :write_tree_migration, 2) and
+      adapter_call(store.adapter, :supports_tree_migration?, [], fn ->
+        store.adapter.supports_tree_migration?(store.opts)
+      end) == true
+  end
+
+  @doc """
+  Writes a tree migration's re-pins and parks as one unit: every write
+  lands or none does (ADR-0015 decision 3, the facade half of
+  `c:StatifierPersistence.Storage.Adapter.write_tree_migration/2`).
+
+  A re-pin's record is derived as `update_execution/5` derives one: the
+  identity and content hash from the machine state's own machine, the
+  position blob encoded from it, the status `:active` and a `nil` failure;
+  the stored metadata and answer are carried forward, and the linkage
+  pin's `content_hash` is rewritten when the write names one (ADR-0008's
+  2026-09-23 Amendment). A park writes `:needs_migration` and a `nil`
+  failure and nothing else. Every record is derived before the adapter is
+  called, so an unidentified machine refuses with nothing written.
+
+  `{:error, :tree_migration_unsupported}` for a store whose adapter does
+  not declare the unit, without calling it.
+  `StatifierPersistence.Executions.migrate_tree/4` is the caller; nothing
+  else in this package writes a linkage pin after create.
+  """
+  @spec write_tree_migration(store :: t(), writes :: [tree_write()]) :: :ok | {:error, error()}
+  def write_tree_migration(%__MODULE__{} = store, writes) when is_list(writes) do
+    with :ok <- check_tree_migration(store),
+         {:ok, adapter_writes} <- adapter_tree_writes(writes) do
+      adapter_call(store.adapter, :write_tree_migration, [], fn ->
+        store.adapter.write_tree_migration(store.opts, adapter_writes)
+      end)
+    end
+  end
+
+  @spec check_tree_migration(t()) :: :ok | {:error, error()}
+  defp check_tree_migration(store) do
+    if tree_migration_supported?(store), do: :ok, else: {:error, :tree_migration_unsupported}
+  end
+
+  @spec adapter_tree_writes([tree_write()]) :: {:ok, [Adapter.tree_write()]} | {:error, error()}
+  defp adapter_tree_writes(writes) do
+    writes
+    |> Enum.reduce_while({:ok, []}, fn write, {:ok, acc} ->
+      case adapter_tree_write(write) do
+        {:ok, adapter_write} -> {:cont, {:ok, [adapter_write | acc]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @spec adapter_tree_write(tree_write()) :: {:ok, Adapter.tree_write()} | {:error, error()}
+  defp adapter_tree_write({:park, execution_id}) when is_binary(execution_id),
+    do: {:ok, {:park, execution_id}}
+
+  defp adapter_tree_write({:repin, execution_id, %MachineState{} = machine_state, linkage_hash}) do
+    case Machine.identity(machine_state.machine) do
+      nil ->
+        refuse_unidentified(:execution, execution_id: execution_id)
+
+      identity ->
+        with {:ok, position_blob} <- Position.to_binary(machine_state) do
+          record = execution_record(execution_id, :active, identity, position_blob, %{}, [])
+          {:ok, {:repin, record, linkage_hash}}
+        end
     end
   end
 

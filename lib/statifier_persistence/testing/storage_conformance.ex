@@ -1563,6 +1563,120 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         end
       end
 
+      # -- Adapter level: the optional tree migration unit (ADR-0015) ----
+      #
+      # Generated only when the adapter under test exports the optional
+      # write_tree_migration/2. The unit is the contract: every write in
+      # the list lands, or none does, and a re-pin rewrites the one
+      # linkage key ADR-0008's 2026-09-23 Amendment sanctions and nothing
+      # else of the metadata.
+
+      if Code.ensure_loaded?(conformance_adapter) and
+           function_exported?(conformance_adapter, :write_tree_migration, 2) do
+        # sabotage: in the adapter under test's re-pin, write the given
+        # record's metadata (%{}) instead of carrying the stored map -
+        # the in-memory adapter's tree_written/2 without carry_forward/2,
+        # the Ecto adapter's linkage_update/3 answering [metadata: %{}] ->
+        # red on both conformance suites: the child's metadata did not
+        # come back as stored with only the pin rewritten. Verified red,
+        # reverted from the copies.
+        test "adapter: a tree write lands every re-pin and park, the pin rewritten", %{
+          store: store
+        } do
+          parent = insert_tree_execution(store, "tree-parent", "sha256:tree-parent-old", %{})
+
+          child_metadata =
+            if Storage.metadata_supported?(store) do
+              "tree-parent"
+              |> Linkage.new("pickup", 0, "sha256:tree-child-old")
+              |> Linkage.to_metadata()
+              |> Map.put("branch_id", "central")
+            else
+              %{}
+            end
+
+          child =
+            insert_tree_execution(
+              store,
+              "tree-parent/pickup/0",
+              "sha256:tree-child-old",
+              child_metadata
+            )
+
+          repinned = %{
+            child
+            | content_hash: "sha256:tree-child-new",
+              identity_blob: <<11, 12>>,
+              position_blob: <<13, 14>>,
+              metadata: %{}
+          }
+
+          assert :ok =
+                   @conformance_adapter.write_tree_migration(store.opts, [
+                     {:repin, repinned, "sha256:tree-child-new"},
+                     {:park, "tree-parent"}
+                   ])
+
+          assert {:ok, stored_child} =
+                   @conformance_adapter.fetch_execution(store.opts, "tree-parent/pickup/0")
+
+          assert stored_child.content_hash == "sha256:tree-child-new"
+          assert stored_child.identity_blob == <<11, 12>>
+          assert stored_child.position_blob == <<13, 14>>
+          assert stored_child.status == :active
+
+          if Storage.metadata_supported?(store) do
+            assert stored_child.metadata ==
+                     put_in(
+                       child_metadata,
+                       [Linkage.reserved_key(), "content_hash"],
+                       "sha256:tree-child-new"
+                     )
+          end
+
+          assert {:ok, stored_parent} =
+                   @conformance_adapter.fetch_execution(store.opts, "tree-parent")
+
+          assert stored_parent == %{parent | status: :needs_migration}
+        end
+
+        # sabotage: in the adapter under test's write_tree_migration/2,
+        # keep the writes made before a refusal - the in-memory adapter
+        # replacing the state with the partial map, the Ecto adapter
+        # returning the error without rollback/1 -> red on both
+        # conformance suites: the first execution came back changed.
+        # Verified red, reverted from the copies.
+        test "adapter: a tree write that cannot land one write lands none", %{store: store} do
+          first = insert_tree_execution(store, "tree-first", "sha256:tree-first-old", %{})
+          repinned = %{first | content_hash: "sha256:tree-first-new", position_blob: <<21>>}
+
+          assert {:error, :execution_not_found} =
+                   @conformance_adapter.write_tree_migration(store.opts, [
+                     {:repin, repinned, nil},
+                     {:park, "tree-never-stored"}
+                   ])
+
+          assert {:ok, ^first} = @conformance_adapter.fetch_execution(store.opts, "tree-first")
+        end
+
+        defp insert_tree_execution(store, execution_id, content_hash, metadata) do
+          record = %{
+            execution_id: execution_id,
+            status: :active,
+            content_hash: content_hash,
+            identity_blob: <<1, 2, 3>>,
+            position_blob: <<7, 8, 9>>,
+            failure: nil,
+            metadata: metadata,
+            outcome_blob: nil
+          }
+
+          assert :ok = @conformance_adapter.insert_execution(store.opts, record)
+
+          record
+        end
+      end
+
       # The capability itself is asserted for every adapter, supporting
       # or not. A store that cannot carry a tombstone declines at open
       # and names the backend limit; what neither answer allows is a
