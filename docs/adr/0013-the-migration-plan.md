@@ -34,8 +34,9 @@ there for `copy.collected` or `pickup.expired`. While executions wait in
 renamed `ready_for_pickup`, and the step before it - the one that routes the
 copy to the pickup branch - gains a `transferred` outcome leading to a new
 state. The waiting execution must land in `ready_for_pickup` with its pickup
-deadline unchanged, or the migration is refused and the execution is left
-exactly as it was.
+deadline unchanged, or the migration is refused with its chart, identity and
+position unchanged (under `on_failure: :park` the refusal also writes its
+status, the one exception decision 4 names).
 
 In a chart a host writes by hand, that edit is a rename of a state id. In a
 chart statifier_blocks compiles, the wait block keeps its block id when its
@@ -216,7 +217,10 @@ mapped (by name or by the same-id default) or dropped, and none is unmapped; eve
 maps to a key whose state is not dropped, and whose ordinal - named in
 `invocations` or kept by the same-ordinal default - is in range of that
 to state's `<invoke>` children, because `Position.import/2` checks state ids
-and value shapes and never an ordinal; the datamodel operations apply in
+and value shapes and never an ordinal; no two invocation keys in the
+transformed position coincide, whether named in `invocations` or kept by the
+same-ordinal default, because one `active_invocations` entry would otherwise
+silently overwrite the other; the datamodel operations apply in
 order (an `add` of a key already present, a `rename` from an absent key or
 onto a present one, and a `remove` of an absent key each refuse); decision
 6's timer rule holds; decision 7's child rule holds; and `Position.import/2`
@@ -259,7 +263,9 @@ only an execution that is not in a terminal status and is stored on the
 plan's `from` hash. A refusal because the execution is terminal, or because
 it is stored on another chart than the plan's `from`, writes nothing under
 either value, and so does a refusal that comes before the execution is
-read - a static fault, a lock that could not be taken. A successful migration writes the execution back at
+read - a static fault, a lock that could not be taken - and so does the
+refusal of a to hash ADR-0012 has tombstoned, because that refusal concerns
+the plan and not this execution. A successful migration writes the execution back at
 `:active`.
 
 **5. No stored trace entry: one telemetry event on success, and the answer
@@ -356,8 +362,9 @@ execution.
 decisions 2 through 9 and the plan module implements decisions 1 and 3's
 static half; each cites the decision it implements. The migrate cases prove
 the library hold landing in `ready_for_pickup` on the new hash with its
-counters carried, and each refusal leaving the stored execution unchanged,
-over both shipped adapters. The static definition in decision 6 is a rule;
+counters carried, and each refusal leaving the stored chart, identity and
+position unchanged - with the status write under `on_failure: :park` the one
+exception decision 4 names - over both shipped adapters. The static definition in decision 6 is a rule;
 the test that enumerates it over compiled charts is the timer case's, and
 this record claims no complete list of the family's timer-owning shapes.
 
