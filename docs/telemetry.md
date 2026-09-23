@@ -241,11 +241,23 @@ process.
 | `[:statifier_persistence, :adapter, :call]` | every `Storage` facade function, around the adapter call | `duration`, `system_time` | `adapter`, `callback`, `outcome`, `reason`, `execution_id`, `session_id`, `content_hash` |
 | `[:statifier_persistence, :identity, :refused]` | `Storage`'s own `precheck_identity/4`, every writer's identity arm, and `persist_tail/7` | `system_time` | `execution_id`, `session_id`, `stage`, `reason`, `stored_content_hash`, `supplied_content_hash` |
 
-`callback` is the `Storage.Adapter` callback name - `:init`, `:save_chart`,
-`:fetch_chart`, `:save_position`, `:fetch_position`, `:insert_execution`,
-`:fetch_execution`, `:update_execution`, `:isolate`, `:lock_execution`,
-`:supports_metadata?`, `:list_executions_by_metadata` - a closed vocabulary
-fixed by the behaviour. `adapter` is the module. Between them they answer
+`callback` is the name of the `Storage.Adapter` callback the facade called -
+`:init`, `:save_chart`, `:fetch_chart`, `:save_position`, `:fetch_position`,
+`:insert_execution`, `:fetch_execution`, `:update_execution`,
+`:supports_metadata?`, `:list_executions_by_metadata`,
+`:supports_execution_outcome?`, `:list_execution_states_by_metadata`,
+`:supports_content_hash_query?`, `:count_executions_by_content_hash`,
+`:list_active_execution_ids_by_content_hash`, `:supports_chart_retirement?`,
+`:retire_chart`, `:supports_retired_info?`, `:fetch_retired_info`,
+`:supports_input_log?`, `:append_input`, `:list_inputs` - a closed vocabulary
+fixed by the behaviour. The behaviour's other two callbacks never appear:
+`isolate/1` is called by the conformance suite alone, and
+`lock_execution/3` is taken through the serialization strategy, which
+`[:statifier_persistence, :execution, :lock]` reports. A retired-chart check on an adapter that declares
+`supports_retired_info?/1` reports `:supports_retired_info?` and
+`:fetch_retired_info` where one on any other adapter reports `:fetch_chart`,
+so a handler that matches `callback` exhaustively names all three.
+`adapter` is the module. Between them they answer
 "which storage call is slow" without a host instrumenting its own adapter,
 and they answer it for the in-memory adapter too, which no SQL tracer sees.
 

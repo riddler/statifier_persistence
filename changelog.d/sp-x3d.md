@@ -4,4 +4,5 @@
 
 ### Changed
 
+- **Breaking** for a host whose telemetry handler matches the `callback` of `[:statifier_persistence, :adapter, :call]` exhaustively: `StatifierPersistence.Storage.check_chart_retired/2`, and `StatifierPersistence.Executions.create/4` through it, report `:supports_retired_info?` and `:fetch_retired_info` in place of `:fetch_chart` on an adapter that declares the narrow read, as both bundled adapters do. A handler with no clause for the two new names raises, and `:telemetry` detaches it; add them, or a catch-all.
 - `StatifierPersistence.Executions.create/4`'s check for a retired chart no longer transfers the chart's stored bytes on an adapter that declares the narrow read, so its cost stays flat as charts grow; the `[:statifier_persistence, :adapter, :call]` event for that check names `:supports_retired_info?` and `:fetch_retired_info` instead of `:fetch_chart` on such an adapter.
