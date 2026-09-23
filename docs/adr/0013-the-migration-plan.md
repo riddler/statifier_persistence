@@ -116,11 +116,16 @@ anchor beside it, because line numbers move and anchors do not.
 - **There is no per-execution trace store.** The input log of ADR-0010 is
   a replay log of events the interpreter saw, keyed by a closed door
   vocabulary (ADR-0010 decision 5), and a migration delivers no event.
-- **Nothing moves an execution to another chart today.** `lib/` at
-  `9cd192b` has no function that changes an execution's content hash; its
-  only migrations are the schema migrations under
-  `StatifierPersistence.Ecto.Migrations`, which move tables, not
-  executions.
+- **Nothing moves an execution to another chart today.** No entry point in
+  `lib/` at `9cd192b` moves an execution to another chart.
+  `Storage.update_execution/5` re-derives the content hash from the machine
+  state it is handed, and its callers in `Executions` - the step write and
+  the terminal repair - hand it a position loaded through the guard with the
+  same machine, so nothing calls it with another chart's machine
+  (`lib/statifier_persistence/executions.ex`, `write_execution/6` and
+  `repair_terminal/4`, @9cd192b). The package's only migrations are the
+  schema migrations under `StatifierPersistence.Ecto.Migrations`, which move
+  tables, not executions.
 
 ## Decision
 
@@ -129,8 +134,9 @@ encoding.** A plan names the chart it moves from and the chart it moves to,
 by content hash, and says how every part of an export crosses between them.
 It holds no expression, no function and no reference to IO, so a host can
 store it, review it and hand it to another process. Its map form - the form
-the codec writes, the form statifier_blocks emits, and the only encoding of a
-plan - has string keys only:
+the codec writes and the only encoding of a plan - has string keys only;
+the `states`, `history` and `invocations` fields statifier_blocks emits
+(decision 8) are in this form:
 
 ```json
 {
@@ -207,19 +213,24 @@ a terminal status; `Position.export/1` answers, which means the position is
 quiescent and every state in it is nameable; every state in the exported
 `configuration`, `entered_states`, `states_to_invoke` and `history_values` is
 mapped (by name or by the same-id default) or dropped, and none is unmapped; every active invocation
-maps to a key whose state is not dropped; the datamodel operations apply in
+maps to a key whose state is not dropped, and whose ordinal - named in
+`invocations` or kept by the same-ordinal default - is in range of that
+to state's `<invoke>` children, because `Position.import/2` checks state ids
+and value shapes and never an ordinal; the datamodel operations apply in
 order (an `add` of a key already present, a `rename` from an absent key or
 onto a present one, and a `remove` of an absent key each refuse); decision
 6's timer rule holds; decision 7's child rule holds; and `Position.import/2`
 on the to machine answers a position.
 
-The validations check that every part of the position resolves. They do not
+The validations check that every state id and every invocation ordinal in the
+position resolves. They do not
 check that the resulting configuration is a legal configuration of the to
 chart; see "What this record does not decide".
 
 **4. Whole or nothing, in terms the adapters can meet, and `on_failure:
 :refuse | :park`.** A migration either re-pins the execution completely or
-leaves every stored field of it as it was. The mechanism is ordering, not a
+leaves its chart, its identity and its position as they were; the status
+write under `:park`, below, is the one exception. The mechanism is ordering, not a
 transaction the adapters do not all have: both validations and the full
 transform complete before the first write; the one write that migrates is a
 single `Storage.update_execution/5` with the imported position on the to
@@ -232,16 +243,23 @@ places a write before a step that can still fail, that step's failure rolls
 the write back explicitly, because a returned `{:error, _}` commits inside
 the Ecto adapter's lock (Context). A to hash that ADR-0012 has tombstoned is
 refused with ADR-0012's retired arm, before any write, as `create/4` refuses
-one. The exclusion is `Executions`' own serialization strategy, the one
-every step takes; there is no separate lease.
+one. There is no separate lease. `migrate/4` takes the same `serialization:`
+option every `Executions` entry point takes, defaulting as they do, and
+calls that strategy's `with_execution/3` directly; it does not go through
+`serialized/5`, whose `entry()` is ADR-0010's closed door vocabulary
+(decision 5). A host passes the strategy it passes to its steps, and the
+two are then mutually exclusive on the execution.
 
 `on_failure:` chooses what a refusal of the second validation does to the
 execution. `:refuse`, the default, returns the refusal and writes nothing. A
 failed migration may instead park the execution in the status ADR-0014
 decides, under `:park`; that is the one write a refusal can cause, it
-touches no blob, and the position stays on the from chart. A refusal that
-comes before the execution is read - a static fault, a lock that could not
-be taken - parks nothing. A successful migration writes the execution back at
+touches no blob, and the position stays on the from chart. `:park` parks
+only an execution that is not in a terminal status and is stored on the
+plan's `from` hash. A refusal because the execution is terminal, or because
+it is stored on another chart than the plan's `from`, writes nothing under
+either value, and so does a refusal that comes before the execution is
+read - a static fault, a lock that could not be taken. A successful migration writes the execution back at
 `:active`.
 
 **5. No stored trace entry: one telemetry event on success, and the answer
@@ -262,12 +280,24 @@ proceeds blind to them.** This package stores no timer and changes none; a pendi
 send stays in the host's queue with the deadline it was given, and a
 migration that maps the state around it leaves it there - that is what
 `keep_mapped: true` states, and it is the only value this format admits.
-Because the send counters are carried (decision 2), no send the migrated
-execution makes collides with an id or an ordinal a surviving timer holds.
+Because the counters are carried (decision 2), a send id the migrated
+execution generates (`send_counter`) and a timer ordinal it mints
+(`timer_counter`) cannot collide with one a surviving timer holds. An
+author-written send id is not protected by either counter: an id the to
+chart writes by hand can still equal the id of a pending timer, and that is
+the plan author's to check.
 
-A state **could own a timer** when, in the from chart, its `onentry`, its
-`onexit` or the executable content of a transition leaving it holds a
-`<send>` with a `delay` or a `delayexpr`. The definition is static because a
+A state **could own a timer** when, in the from chart, a `<send>` with a
+`delay` or a `delayexpr` appears anywhere in its `onentry`, its `onexit`,
+the executable content of a transition it owns (its `<initial>` element's
+transition and a history state's default transition included), or the
+`<finalize>` of any of its `<invoke>`s, the bodies of nested `<if>` and
+`<foreach>` included. That is the engine's whole reach for executable
+content: the owner of a content block is one of `{:onentry, ...}`,
+`{:onexit, ...}`, `{:transition, ...}` or `{:finalize, state_index,
+invoke_index}` (`deps/statifier/lib/statifier/machine/content.ex`,
+`@type owner`, statifier 2.6.0), and a `<send>` inside `<finalize>`
+compiles with a validator warning and still executes. The definition is static because a
 count cannot say which state a pending timer came from and a delayed send is
 not scoped to a state.
 
@@ -335,9 +365,8 @@ this record claims no complete list of the family's timer-owning shapes.
 two ways to empty one: wait for its executions to finish, or migrate them.
 Either way the drained query (`docs/adr/0012-retention-and-retirement.md`,
 decision 3) is how it sees the hash empty, and `Executions.retire_chart/4`
-(same record, decision 5) is how it retires it. Adding a key to the drained
-query's map is ADR-0014's, through a dated Note on ADR-0012; this record
-does not amend ADR-0012.
+(same record, decision 5) is how it retires it. This record does not amend
+ADR-0012.
 
 **The identity guard's reading of `identity_mismatch` gains a second
 remedy.** ADR-0003 decision 4 says the arm carries both identities because
