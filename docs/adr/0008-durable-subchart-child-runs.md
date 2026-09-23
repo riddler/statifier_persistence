@@ -1098,3 +1098,39 @@ Read the closing gloss, then, as: the guarantee is per-execution - **not a
 promise about every lock**. The sentence item 2 ends on is the accurate
 form and is unchanged: a callback handed execution E never runs inside E's
 own exclusion, and may run inside E's parent's.
+
+## Amendment (2026-09-23, sp-3l2a): a child's linkage pin follows a migration of that child, and nothing else rewrites it
+
+Status of this amendment: proposed (2026-09-23, sp-3l2a). The record above
+stays accepted; this amendment is proposed until the operator accepts it.
+
+Decision 2 makes the linkage's chart-identity pin mandatory: the same
+content hash `Statifier.Machine.identity/1` produces for the child's own
+chart, recorded a second time where the parent-child relationship can see
+it. Execution metadata is write-once (ADR-0006 decision 1), so until now
+nothing could change the pin, and nothing needed to: a child's chart never
+changed. ADR-0013 changed that for one execution and left children
+untouched (its decision 7); ADR-0015 moves a tree of executions, a child
+among them, onto new charts
+(`docs/adr/0015-the-tree-migration.md`).
+
+**It amends decision 2.** The pin pins the child's own chart, so it
+follows a migration **of that child** and nothing else:
+
+- When `Executions.migrate_tree/4` re-pins a child, in the one store unit
+  ADR-0015 decision 3 decides, the same write rewrites the linkage's
+  `content_hash` to the content hash of the chart the child now walks.
+  This is the one sanctioned rewrite of the linkage. Every other value
+  under the reserved key - `parent_execution_id`, `invoke_id`,
+  `child_index`, and a fan-out's `child_count` and `policy` - is written
+  once at create and never again.
+- A parent's migration rewrites nothing in any child, by `migrate/4` or by
+  the tree command: a child absent from the plans keeps its row, its
+  position and its pin (ADR-0013 decision 7).
+- The write-once rule stands for every other metadata key, the host's
+  keys included.
+
+The pin keeps the meaning decision 2 gave it. After the rewrite it is
+again the identity hash of the chart the child's own row is pinned to,
+which is what decision 2 says it records, and ADR-0012's retirement counts
+the child's pin against its new chart rather than the one it left.
