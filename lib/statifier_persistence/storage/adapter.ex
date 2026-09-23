@@ -55,11 +55,14 @@ defmodule StatifierPersistence.Storage.Adapter do
 
   @typedoc """
   An execution's lifecycle status (ADR-0004 decision 2, extended by ADR-0008
-  decision 5). `:completed`, `:failed` and `:cancelled` are terminal. No
-  callback here validates a transition between them - the lifecycle above
-  the facade owns that.
+  decision 5 and ADR-0014 decision 1): five arms. `:completed`, `:failed`
+  and `:cancelled` are terminal. `:active` and `:needs_migration` are not:
+  `:needs_migration` is an execution a migration parked on the chart it
+  was already pinned to, which takes no event until it leaves the arm
+  (ADR-0014 decision 2). No callback here validates a transition between
+  them - the lifecycle above the facade owns that.
   """
-  @type execution_status :: :active | :completed | :failed | :cancelled
+  @type execution_status :: :active | :needs_migration | :completed | :failed | :cancelled
 
   @typedoc """
   An execution's optional opaque metadata (ADR-0006 decision 1): a map of string
@@ -133,17 +136,20 @@ defmodule StatifierPersistence.Storage.Adapter do
   hash answers zeros rather than an empty map or a miss - "nothing is
   running on this chart" is an answer, not an absence.
 
-  The four arm keys are the stored statuses of `t:execution_status/0` and
+  The five arm keys are the stored statuses of `t:execution_status/0` and
   nothing else: there is no `terminal` key, because terminal is a fold
   this package names in prose and never stores (decision 2). A reader
-  that wants the fold adds the three.
+  that wants the fold adds the three terminal arms. `needs_migration` is
+  not one of them (ADR-0014 decision 4).
 
   `children` counts the durable-child linkage pins naming that hash whose
-  parent execution is `:active` - the pin decision 1 counts, which is not
-  an execution row on the hash and so is not one of the four arms.
+  parent execution is `:active` or `:needs_migration` - the pin decision
+  1 counts, as ADR-0014 decision 4 reads it, which is not an execution
+  row on the hash and so is not one of the five arms.
   """
   @type execution_counts :: %{
           active: non_neg_integer(),
+          needs_migration: non_neg_integer(),
           completed: non_neg_integer(),
           failed: non_neg_integer(),
           cancelled: non_neg_integer(),
@@ -164,15 +170,17 @@ defmodule StatifierPersistence.Storage.Adapter do
   source's under that source's module name.
 
   Deliberately not `t:execution_counts/0`. The drained query answers
-  "what is running on this chart" and keeps decision 3's five flat keys;
-  this answers "what would I break", so the four execution arms are
+  "what is running on this chart" and keeps its flat keys; this answers
+  "what would I break", so the five execution arms are
   nested under `:executions` to keep them distinguishable from the two
   counts that are not execution rows at all, and `:positions` and
   `:sources` are here and are not in the drained query's map.
 
-  Only four of these block a retirement: `executions.active`,
-  `children`, `positions`, and any non-zero count under any source. The
-  three terminal execution arms are reported and never block, because a
+  Only these block a retirement: `executions.active`,
+  `executions.needs_migration` (a parked execution pins its chart,
+  ADR-0014 decision 4), `children`, `positions`, and any non-zero count
+  under any source. The three terminal execution arms are reported and
+  never block, because a
   terminal row never goes away and counting one would make a chart
   permanently unretirable the first time anything on it finished
   (ADR-0012 decision 1).
@@ -180,6 +188,7 @@ defmodule StatifierPersistence.Storage.Adapter do
   @type pin_counts :: %{
           executions: %{
             active: non_neg_integer(),
+            needs_migration: non_neg_integer(),
             completed: non_neg_integer(),
             failed: non_neg_integer(),
             cancelled: non_neg_integer()
@@ -617,8 +626,9 @@ defmodule StatifierPersistence.Storage.Adapter do
   (ADR-0012 decision 3).
 
   Answers `t:execution_counts/0` for `content_hash`: how many execution
-  rows carry that hash in each of `:active`, `:completed`, `:failed` and
-  `:cancelled`, plus the `children` pin count. Every key is present for
+  rows carry that hash in each of `:active`, `:needs_migration`,
+  `:completed`, `:failed` and `:cancelled`, plus the `children` pin
+  count. Every key is present for
   every hash, including one this store has never seen, which answers
   zeros.
 
@@ -636,8 +646,9 @@ defmodule StatifierPersistence.Storage.Adapter do
   `children` is not a count of rows on the hash. It counts the durable
   children pinned to it: a linkage pin under this package's reserved
   metadata key naming `content_hash`, whose parent execution is in the
-  `:active` arm, whatever arm the child itself is in (ADR-0012 decision
-  1). An adapter that holds no metadata holds no pin and counts zero.
+  `:active` or the `:needs_migration` arm, whatever arm the child itself
+  is in (ADR-0012 decision 1, as ADR-0014 decision 4 reads it). An
+  adapter that holds no metadata holds no pin and counts zero.
   """
   @callback count_executions_by_content_hash(opts(), content_hash()) ::
               {:ok, StatifierPersistence.Storage.Adapter.execution_counts()}
@@ -657,7 +668,10 @@ defmodule StatifierPersistence.Storage.Adapter do
   package's key - and decision 3's query answers counts, which a source
   cannot be handed. Only the `:active` arm is listed: a terminal
   execution pins nothing (decision 1), and a source asked about one
-  would be asked about work that cannot resume.
+  would be asked about work that cannot resume. A `:needs_migration`
+  execution is not listed either (ADR-0014 decision 4): it already
+  refuses a retirement through its own count, so a source's view of it
+  could not change whether one proceeds.
 
   A hash this store has never seen answers `{:ok, []}`, not a not-found
   arm, for the reason the counts answer zeros.
@@ -707,14 +721,15 @@ defmodule StatifierPersistence.Storage.Adapter do
   - a row already carrying a `retired_at`: `{:error, {:chart_retired,
     info}}`, and nothing is written - a second retirement is the retired
     arm, never a second tombstone;
-  - otherwise the counts: the `:active` execution rows on the hash, the
-    durable-child linkage pins naming it whose parent is `:active`, and
-    the position rows on it, folded with the `sources` counts
-    `retirement` carries into a `t:pin_counts/0`. If any of the four
-    blocking counts is non-zero, `{:error, {:pinned, counts}}` and
+  - otherwise the counts: the `:active` and `:needs_migration` execution
+    rows on the hash, the durable-child linkage pins naming it whose
+    parent is `:active` or `:needs_migration`, and the position rows on
+    it, folded with the `sources` counts `retirement` carries into a
+    `t:pin_counts/0`. If any blocking count is non-zero,
+    `{:error, {:pinned, counts}}` and
     **nothing is written**; the three terminal arms are reported in that
     map and never cause it.
-  - all four clear: `retired_at` and `retired_by` are set from
+  - all clear: `retired_at` and `retired_by` are set from
     `retirement`, `identity_blob` and `chart_blob` are nulled, and the
     row and its content hash are kept. `{:ok, info}`.
 
@@ -806,13 +821,13 @@ defmodule StatifierPersistence.Storage.Adapter do
 
   Every adapter that implements `c:retire_chart/3` builds its refusal
   through this function, so the two adapters cannot drift into two
-  shapes for one answer. `counts` is the drained query's own five-key
+  shapes for one answer. `counts` is the drained query's own six-key
   map, which both adapters already compute.
   """
   @spec pin_counts(execution_counts(), non_neg_integer(), source_counts()) :: pin_counts()
   def pin_counts(%{} = counts, positions, %{} = sources) when is_integer(positions) do
     %{
-      executions: Map.take(counts, [:active, :completed, :failed, :cancelled]),
+      executions: Map.take(counts, [:active, :needs_migration, :completed, :failed, :cancelled]),
       children: counts.children,
       positions: positions,
       sources: sources
@@ -823,8 +838,10 @@ defmodule StatifierPersistence.Storage.Adapter do
   Whether `counts` holds a pin that refuses a retirement: ADR-0012
   decision 1's blocking set, and nothing else.
 
-  A non-zero `executions.active`, a non-zero `children`, a non-zero
-  `positions`, or a non-zero count under any source. The three terminal
+  A non-zero `executions.active` or `executions.needs_migration` (a
+  parked execution pins its chart, ADR-0014 decision 4), a non-zero
+  `children`, a non-zero `positions`, or a non-zero count under any
+  source. The three terminal
   execution arms are reported in `counts` and are not read here, which
   is what keeps a chart retirable after everything on it has finished.
 
@@ -833,8 +850,9 @@ defmodule StatifierPersistence.Storage.Adapter do
   what it counted is a pin.
   """
   @spec pinned?(pin_counts()) :: boolean()
-  def pinned?(%{executions: %{active: active}, children: children, positions: positions} = counts) do
-    active > 0 or children > 0 or positions > 0 or sources_pinned?(counts.sources)
+  def pinned?(%{executions: executions, children: children, positions: positions} = counts) do
+    executions.active > 0 or executions.needs_migration > 0 or children > 0 or positions > 0 or
+      sources_pinned?(counts.sources)
   end
 
   @doc """

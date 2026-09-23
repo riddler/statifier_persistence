@@ -261,7 +261,11 @@ defmodule StatifierPersistence.Driver do
   `{:ok, execution, machine_state}` for an execution that reached quiescence with
   nothing left to answer, `{:discarded, execution}` for an event delivered to a
   terminal execution, and the error arms of `StatifierPersistence.Executions` plus
-  this module's own `{:turns_exhausted, max_turns}`.
+  this module's own `{:turns_exhausted, max_turns}`. Among those,
+  `{:needs_migration, execution}` is an event delivered to a parked execution,
+  refused whole before any position decode (ADR-0014 decision 2): a door
+  that answers it has consumed nothing, and retrying the delivery after the
+  execution leaves the arm is the host's.
   """
   @type result ::
           {:ok, Execution.t(), MachineState.t()}
@@ -507,7 +511,9 @@ defmodule StatifierPersistence.Driver do
 
   `StatifierPersistence.Executions.step/5` with this driver's executor, then the
   answer loop. An event delivered to a terminal execution is that function's own
-  `{:discarded, execution}`, before any position decode and before any dispatch.
+  `{:discarded, execution}`, before any position decode and before any dispatch;
+  one delivered to a `:needs_migration` execution is its
+  `{:error, {:needs_migration, execution}}`, at the same point.
   """
   @spec send_event(
           driver :: t(),
@@ -1274,6 +1280,9 @@ defmodule StatifierPersistence.Driver do
     end
   end
 
+  # A positive list, so `:needs_migration` answers `false` (ADR-0014
+  # decision 5): a fan-out does not settle while a child is parked, as it
+  # does not while one is `:active`.
   @spec terminal?(Adapter.execution_status()) :: boolean()
   defp terminal?(status), do: status in [:completed, :failed, :cancelled]
 

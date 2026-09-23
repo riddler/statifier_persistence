@@ -60,13 +60,28 @@ if Code.ensure_loaded?(Ecto) do
 
     # The executions.status column vocabulary (ADR-0004 decision 2), mapped
     # explicitly in both directions - never String.to_atom on database
-    # bytes, and an unknown stored status fails loudly on a clause.
-    @statuses [active: "active", completed: "completed", failed: "failed", cancelled: "cancelled"]
+    # bytes, and an unknown stored status fails loudly on a clause. The
+    # column has no constraint through V07, so `needs_migration` (ADR-0014
+    # decisions 1 and 7) is a new string here and no schema version.
+    @statuses [
+      active: "active",
+      needs_migration: "needs_migration",
+      completed: "completed",
+      failed: "failed",
+      cancelled: "cancelled"
+    ]
 
     # Every key of the drained query's answer at zero. The grouped count
     # returns only the arms the table holds rows in, so the answer is
     # folded onto this rather than built from what came back.
-    @zero_counts %{active: 0, completed: 0, failed: 0, cancelled: 0, children: 0}
+    @zero_counts %{
+      active: 0,
+      needs_migration: 0,
+      completed: 0,
+      failed: 0,
+      cancelled: 0,
+      children: 0
+    }
 
     @doc """
     Resolves the `:persistence` host module into the handle every other
@@ -544,8 +559,9 @@ if Code.ensure_loaded?(Ecto) do
 
     `children` is a second query, because it counts something the
     executions table's own `content_hash` column does not hold: the
-    linkage pins naming this hash whose parent execution is `:active`
-    (ADR-0012 decision 1). It is a containment probe on the reserved
+    linkage pins naming this hash whose parent execution is `:active` or
+    `:needs_migration` (ADR-0012 decision 1, as ADR-0014 decision 4 reads
+    it). It is a containment probe on the reserved
     metadata key joined to the parent row by `execution_id`, and
     containment is the operator V03's `jsonb_path_ops` GIN index on
     `metadata` serves.
@@ -579,7 +595,8 @@ if Code.ensure_loaded?(Ecto) do
 
     # ADR-0012 decision 1's child clause, as decision 3's `children` key:
     # a linkage pin naming this hash counts for as long as the execution
-    # its `parent_execution_id` names is `:active`, whatever arm the
+    # its `parent_execution_id` names is `:active` or `:needs_migration`
+    # (ADR-0014 decision 4), whatever arm the
     # child itself is in. The child row is matched on its pin rather
     # than on its `content_hash` column, because the pin is the value
     # the decision names and the two are written by separate calls.
@@ -701,7 +718,8 @@ if Code.ensure_loaded?(Ecto) do
     thing inside it is worth naming, because it is what closes the race
     the record cares about. The tombstone is not an update the counts
     authorise; it is a single conditional `UPDATE` that re-asserts every
-    one of them in its own `WHERE` - no `:active` execution row on the
+    one of them in its own `WHERE` - no `:active` or `:needs_migration`
+    execution row on the
     hash, no position row on it, no durable-child pin naming it, and the
     row not already retired. The counts taken above it are what a
     refusal reports; the `UPDATE` is what decides. So there is no
@@ -834,9 +852,10 @@ if Code.ensure_loaded?(Ecto) do
     end
 
     # The blocking set of ADR-0012 decision 1, as the WHERE of the one
-    # statement that writes the tombstone. The three terminal execution
-    # arms are absent on purpose: they are reported in a refusal and
-    # never cause one.
+    # statement that writes the tombstone. A parked execution pins its
+    # chart like an active one (ADR-0014 decision 4). The three terminal
+    # execution arms are absent on purpose: they are reported in a
+    # refusal and never cause one.
     @spec unpinned_chart(Adapter.opts(), Adapter.content_hash()) :: Ecto.Query.t()
     defp unpinned_chart(opts, content_hash) do
       executions = execution_schema(opts)
@@ -845,7 +864,7 @@ if Code.ensure_loaded?(Ecto) do
       active =
         from(r in executions,
           where: r.content_hash == ^content_hash,
-          where: r.status == ^encode_status(:active),
+          where: r.status in ^pinning_statuses(),
           select: 1
         )
 
@@ -903,10 +922,17 @@ if Code.ensure_loaded?(Ecto) do
               type(^"parent_execution_id", :string)
             ),
         where: fragment("? @> ?", child.metadata, type(^pin_match, :map)),
-        where: parent.status == ^encode_status(:active),
+        where: parent.status in ^pinning_statuses(),
         select: 1
       )
     end
+
+    # The stored arms whose execution pins a chart (ADR-0012 decision 1,
+    # as ADR-0014 decision 4 reads it): an execution row on the hash in
+    # one of these arms blocks a retirement, and so does a durable
+    # child's pin while its parent is in one of them.
+    @spec pinning_statuses() :: [String.t()]
+    defp pinning_statuses, do: [encode_status(:active), encode_status(:needs_migration)]
 
     @doc """
     Declares input log support (the optional

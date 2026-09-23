@@ -36,8 +36,21 @@ defmodule StatifierPersistence.Storage.InMemory do
 
   # Every key of the drained query's answer at zero: what an unknown hash
   # answers, and what a hash with executions on it is folded onto, so a
-  # missing arm is impossible rather than merely unlikely.
-  @zero_counts %{active: 0, completed: 0, failed: 0, cancelled: 0, children: 0}
+  # missing arm is impossible rather than merely unlikely - and the fold's
+  # `Map.update!/3` raises on a status with no key here.
+  @zero_counts %{
+    active: 0,
+    needs_migration: 0,
+    completed: 0,
+    failed: 0,
+    cancelled: 0,
+    children: 0
+  }
+
+  # The arms whose execution pins a chart (ADR-0012 decision 1, as
+  # ADR-0014 decision 4 reads it): a durable child's pin counts while its
+  # parent is in one of them.
+  @pinning_statuses [:active, :needs_migration]
 
   @doc """
   Starts the backing Agent and returns `opts` with `:pid` merged in - the
@@ -343,7 +356,8 @@ defmodule StatifierPersistence.Storage.InMemory do
   the count is a grouped count.
 
   `children` counts the durable-child linkage pins naming `content_hash`
-  whose parent execution is `:active` (ADR-0012 decision 1): a second
+  whose parent execution is `:active` or `:needs_migration` (ADR-0012
+  decision 1, as ADR-0014 decision 4 reads it): a second
   pass over the same map, reading each execution's reserved metadata key
   through `StatifierPersistence.Execution.Linkage.from_metadata/1` and
   looking its parent up by execution id.
@@ -373,7 +387,8 @@ defmodule StatifierPersistence.Storage.InMemory do
 
   # ADR-0012 decision 1's child clause: a linkage pin naming this hash
   # counts for as long as the execution its `parent_execution_id` names
-  # is `:active`, whatever arm the child itself is in. The pin is read
+  # is `:active` or `:needs_migration`, whatever arm the child itself is
+  # in. The pin is read
   # off the child's metadata rather than taken from the child's
   # `content_hash` field, because the pin is the value the decision
   # names and the two are written by separate calls.
@@ -397,7 +412,10 @@ defmodule StatifierPersistence.Storage.InMemory do
 
     case Linkage.from_metadata(metadata) do
       {:ok, %Linkage{content_hash: ^content_hash, parent_execution_id: parent_execution_id}} ->
-        match?(%{status: :active}, Map.get(executions, parent_execution_id))
+        match?(
+          %{status: status} when status in @pinning_statuses,
+          Map.get(executions, parent_execution_id)
+        )
 
       _no_pin_on_this_hash ->
         false
@@ -450,7 +468,7 @@ defmodule StatifierPersistence.Storage.InMemory do
   the hash between the counting and the write.
 
   A refused retirement returns the state unchanged, and the refusal
-  carries every count - the four execution arms, the durable-child
+  carries every count - the five execution arms, the durable-child
   pins, the position rows, and each source's own counts - while only
   ADR-0012 decision 1's blocking set causes one.
 
