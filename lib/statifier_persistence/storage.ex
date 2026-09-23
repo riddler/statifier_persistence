@@ -208,6 +208,15 @@ defmodule StatifierPersistence.Storage do
   `StatifierPersistence.Executions.create/4` runs it ahead of
   `Statifier.Interpreter.initialize/2`, so an execution on a retired
   chart fires no effect on its way to the refusal.
+
+  The read does not transfer the chart's bytes when the adapter declares
+  the optional
+  `c:StatifierPersistence.Storage.Adapter.supports_retired_info?/1`: the
+  check then asks
+  `c:StatifierPersistence.Storage.Adapter.fetch_retired_info/2`, which
+  reads the tombstone alone, so its cost does not grow with the chart.
+  An adapter that does not declare it is answered through
+  `fetch_chart/2` instead - the same answer, reading the whole row.
   """
   @spec check_chart_retired(store :: t(), machine :: Machine.t()) :: :ok | {:error, error()}
   def check_chart_retired(%__MODULE__{} = store, %Machine{} = machine) do
@@ -219,10 +228,38 @@ defmodule StatifierPersistence.Storage do
 
   @spec chart_retired(t(), Adapter.content_hash()) :: :ok | {:error, error()}
   defp chart_retired(store, content_hash) do
-    case fetch_chart(store, content_hash) do
-      {:error, {:chart_retired, _info}} = refusal -> refusal
-      _other -> :ok
+    if retired_info_supported?(store) do
+      case fetch_retired_info(store, content_hash) do
+        {:ok, %{} = info} -> {:error, {:chart_retired, info}}
+        _other -> :ok
+      end
+    else
+      case fetch_chart(store, content_hash) do
+        {:error, {:chart_retired, _info}} = refusal -> refusal
+        _other -> :ok
+      end
     end
+  end
+
+  # Whether the adapter declares the narrow tombstone read: the same
+  # export-then-ask shape as `chart_retirement_supported?/1`, kept private
+  # because its only caller is the check above.
+  @spec retired_info_supported?(t()) :: boolean()
+  defp retired_info_supported?(store) do
+    Code.ensure_loaded?(store.adapter) and
+      function_exported?(store.adapter, :supports_retired_info?, 1) and
+      function_exported?(store.adapter, :fetch_retired_info, 2) and
+      adapter_call(store.adapter, :supports_retired_info?, [], fn ->
+        store.adapter.supports_retired_info?(store.opts)
+      end) == true
+  end
+
+  @spec fetch_retired_info(t(), Adapter.content_hash()) ::
+          {:ok, Adapter.retired_info() | nil} | {:error, error()}
+  defp fetch_retired_info(store, content_hash) do
+    adapter_call(store.adapter, :fetch_retired_info, [content_hash: content_hash], fn ->
+      store.adapter.fetch_retired_info(store.opts, content_hash)
+    end)
   end
 
   @doc """

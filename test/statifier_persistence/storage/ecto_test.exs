@@ -175,4 +175,76 @@ defmodule StatifierPersistence.Storage.EctoTest do
                )
     end
   end
+
+  describe "the narrow tombstone read" do
+    # The conformance suite proves what fetch_retired_info/2 answers; the
+    # bytes staying behind can only be seen in the statement itself, so
+    # it is read here off the repo's own query telemetry. The fetch_chart/2
+    # half is the control: the same observation does see the blobs when a
+    # read selects them.
+    #
+    # sabotage: made fetch_retired_info/2 answer through
+    # `repo(opts).get_by(chart_schema(opts), content_hash: content_hash)`
+    # and read retired_at and retired_by off the row -> red, the statement
+    # selected chart_blob and identity_blob. Verified red, reverted from a
+    # copy.
+    test "reads retired_at and retired_by without selecting either chart blob", %{
+      default: opts
+    } do
+      :ok =
+        Storage.Ecto.save_chart(opts, %{
+          content_hash: "sha256:ecto-narrow-read",
+          identity_blob: <<1, 2, 3>>,
+          chart_blob: <<4, 5, 6>>
+        })
+
+      narrow =
+        statements(fn -> Storage.Ecto.fetch_retired_info(opts, "sha256:ecto-narrow-read") end)
+
+      full = statements(fn -> Storage.Ecto.fetch_chart(opts, "sha256:ecto-narrow-read") end)
+
+      assert [narrow_sql] = narrow
+      assert narrow_sql =~ "retired_at"
+      assert narrow_sql =~ "retired_by"
+      refute narrow_sql =~ "chart_blob"
+      refute narrow_sql =~ "identity_blob"
+
+      assert [full_sql] = full
+      assert full_sql =~ "chart_blob"
+    end
+  end
+
+  # Every statement the repo runs on this process while `fun` does.
+  defp statements(fun) do
+    test_pid = self()
+    handler_id = {__MODULE__, :statements, make_ref()}
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:statifier_persistence, :test_repo, :query],
+        &__MODULE__.forward_statement/4,
+        %{pid: test_pid}
+      )
+
+    try do
+      fun.()
+    after
+      :telemetry.detach(handler_id)
+    end
+
+    collect_statements([])
+  end
+
+  def forward_statement(_event, _measurements, metadata, %{pid: pid}) do
+    if self() == pid, do: send(pid, {:statement, metadata.query})
+  end
+
+  defp collect_statements(acc) do
+    receive do
+      {:statement, sql} -> collect_statements([sql | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
 end

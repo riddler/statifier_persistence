@@ -1604,6 +1604,78 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         end
       end
 
+      # -- Adapter level: the optional tombstone read (ADR-0012) ---------
+      #
+      # Generated only when the adapter under test exports the optional
+      # fetch_retired_info/2. What these cases prove is the answer; that
+      # the read leaves the chart's bytes behind is asserted per adapter,
+      # where the store can be observed: the Ecto adapter's statement in
+      # StatifierPersistence.Storage.EctoTest.
+
+      if Code.ensure_loaded?(conformance_adapter) and
+           function_exported?(conformance_adapter, :fetch_retired_info, 2) do
+        # sabotage: in the adapter under test's fetch_retired_info/2,
+        # answer {:ok, %{retired_at: DateTime.utc_now(), retired_by: nil}}
+        # for every hash -> red, a live chart and a hash never stored both
+        # read as retired. Verified red on both conformance suites.
+        # Reverted from a copy.
+        test "adapter: the tombstone read answers nil for a live chart and for a hash never stored",
+             %{store: store} do
+          assert :ok =
+                   @conformance_adapter.save_chart(store.opts, %{
+                     content_hash: "sha256:conformance-tombstone-live",
+                     identity_blob: <<1, 2, 3>>,
+                     chart_blob: <<4, 5, 6>>
+                   })
+
+          assert {:ok, nil} =
+                   @conformance_adapter.fetch_retired_info(
+                     store.opts,
+                     "sha256:conformance-tombstone-live"
+                   )
+
+          assert {:ok, nil} =
+                   @conformance_adapter.fetch_retired_info(
+                     store.opts,
+                     "sha256:conformance-tombstone-never-stored"
+                   )
+        end
+
+        if function_exported?(conformance_adapter, :retire_chart, 3) do
+          # sabotage: in the adapter under test's fetch_retired_info/2,
+          # answer {:ok, nil} for every hash -> red, the retired hash read
+          # as live. Verified red on both conformance suites. Reverted
+          # from a copy.
+          test "adapter: the tombstone read answers what the retired arm of fetch_chart/2 carries",
+               %{store: store} do
+            hash = "sha256:conformance-tombstone-retired"
+            at = DateTime.from_naive!(~N[2026-09-23 09:00:00.000000], "Etc/UTC")
+
+            assert :ok =
+                     @conformance_adapter.save_chart(store.opts, %{
+                       content_hash: hash,
+                       identity_blob: <<1, 2, 3>>,
+                       chart_blob: <<4, 5, 6>>
+                     })
+
+            assert {:ok, _info} =
+                     @conformance_adapter.retire_chart(store.opts, hash, %{
+                       retired_at: at,
+                       retired_by: "conformance-operator",
+                       sources: %{}
+                     })
+
+            assert {:error, {:chart_retired, from_fetch}} =
+                     @conformance_adapter.fetch_chart(store.opts, hash)
+
+            assert {:ok, from_read} = @conformance_adapter.fetch_retired_info(store.opts, hash)
+            assert from_read == from_fetch
+            assert from_read.retired_at == at
+            assert from_read.retired_by == "conformance-operator"
+          end
+        end
+      end
+
       # -- Adapter level: the optional execution metadata (ADR-0006) -----------
       #
       # A conformant adapter either round-trips a non-empty metadata map or
@@ -2150,6 +2222,108 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                    "sess_conformance_unidentified_save",
                    unidentified_machine
                  )
+      end
+
+      # The check create/4 runs at open, asserted for every adapter: the
+      # narrow tombstone read when the adapter declares it, the full-row
+      # fetch_chart/2 otherwise, and one answer either way. The retired
+      # half runs only where the store can carry a tombstone.
+      #
+      # sabotage: in StatifierPersistence.Storage's private
+      # chart_retired/2, make the narrow branch answer :ok whatever it
+      # read -> red on both shipped adapters' suites, the retired chart
+      # was let through; and, separately, make the fallback branch
+      # answer :ok -> red on the NoTombstoneReadAdapter suite, which can
+      # retire a chart and declares no tombstone read. Each verified red,
+      # reverted from a copy.
+      test "facade: the tombstone check refuses a retired chart and lets a live one through",
+           %{store: store} do
+        {source, machine} = Charts.chart_a()
+        content_hash = Machine.identity(machine).content_hash
+
+        assert :ok = Storage.check_chart_retired(store, machine)
+
+        assert :ok = Storage.save_chart(store, machine, source)
+        assert :ok = Storage.check_chart_retired(store, machine)
+
+        if Storage.content_hash_query_supported?(store) and
+             Storage.chart_retirement_supported?(store) do
+          assert {:ok, _info} =
+                   Storage.retire_chart(store, content_hash, retired_by: "conformance-operator")
+
+          assert {:error, {:chart_retired, info}} = Storage.check_chart_retired(store, machine)
+          assert {:error, {:chart_retired, ^info}} = Storage.fetch_chart(store, content_hash)
+          assert info.retired_by == "conformance-operator"
+        end
+      end
+
+      # Which read the check takes is pinned per adapter through the
+      # facade's own adapter-call telemetry: an adapter that declares the
+      # tombstone read must be asked for it and not for the whole row,
+      # and one that does not is answered through fetch_chart/2.
+      #
+      # sabotage: in StatifierPersistence.Storage's private
+      # chart_retired/2, always take the fetch_chart/2 branch -> red on
+      # both shipped adapters' suites, the check called :fetch_chart.
+      # Verified red, reverted from a copy.
+      test "facade: the tombstone check reads the whole chart only when the adapter declares no narrow read",
+           %{store: store} do
+        {source, machine} = Charts.chart_a()
+        assert :ok = Storage.save_chart(store, machine, source)
+
+        test_pid = self()
+        handler_id = {__MODULE__, :tombstone_read, make_ref()}
+
+        :ok =
+          :telemetry.attach(
+            handler_id,
+            [:statifier_persistence, :adapter, :call],
+            &__MODULE__.__conformance_forward_adapter_call__/4,
+            %{pid: test_pid}
+          )
+
+        try do
+          assert :ok = Storage.check_chart_retired(store, machine)
+        after
+          :telemetry.detach(handler_id)
+        end
+
+        callbacks = collect_adapter_calls([])
+
+        if narrow_read_declared?(store) do
+          assert :fetch_retired_info in callbacks
+          refute :fetch_chart in callbacks
+        else
+          assert :fetch_chart in callbacks
+          refute :fetch_retired_info in callbacks
+        end
+      end
+
+      # The telemetry handler for the case above, a named function
+      # because :telemetry warns on an anonymous one. It forwards only
+      # the calls made on the test's own process, so an async suite
+      # running beside it adds nothing to what the case reads.
+      @doc false
+      def __conformance_forward_adapter_call__(_event, _measurements, metadata, %{pid: pid}) do
+        if self() == pid, do: send(pid, {:adapter_call, metadata.callback})
+      end
+
+      defp narrow_read_declared?(store) do
+        if function_exported?(@conformance_adapter, :supports_retired_info?, 1) and
+             function_exported?(@conformance_adapter, :fetch_retired_info, 2) do
+          # credo:disable-for-next-line Credo.Check.Refactor.Apply
+          apply(@conformance_adapter, :supports_retired_info?, [store.opts]) == true
+        else
+          false
+        end
+      end
+
+      defp collect_adapter_calls(acc) do
+        receive do
+          {:adapter_call, callback} -> collect_adapter_calls([callback | acc])
+        after
+          0 -> Enum.reverse(acc)
+        end
       end
 
       # sabotage: in the adapter under test's fetch_position/2, change the
