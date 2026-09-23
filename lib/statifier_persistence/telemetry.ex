@@ -94,6 +94,7 @@ defmodule StatifierPersistence.Telemetry do
   | `[:statifier_persistence, :execution, :created]` | `system_time` | `execution_id`, `session_id`, `content_hash`, `child?`, `metadata?` |
   | `[:statifier_persistence, :execution, :terminated]` | `system_time` | `execution_id`, `session_id`, `content_hash`, `status`, `driven_by`, `reason` |
   | `[:statifier_persistence, :execution, :discarded]` | `system_time` | `execution_id`, `entry`, `reason`, `repaired?` |
+  | `[:statifier_persistence, :execution, :migrated]` | `system_time` | `execution_id`, `from_content_hash`, `to_content_hash`, `dropped` |
   | `[:statifier_persistence, :effect, :failed]` | `system_time` | `execution_id`, `session_id`, `content_hash`, `kind`, `executor`, `reason`, `reentered?` |
   | `[:statifier_persistence, :drive, :turns_exhausted]` | `system_time`, `turns` | `execution_id`, `entry` |
 
@@ -102,6 +103,13 @@ defmodule StatifierPersistence.Telemetry do
   them. `:discarded`'s `reason` is the closed vocabulary `:terminal_execution`,
   `:builder_declined`, `:position_terminal`, and only the third sets
   `repaired?: true`.
+
+  `:migrated` fires once per successful
+  `StatifierPersistence.Executions.migrate/4`, after its serialization
+  section returns (ADR-0013 decision 5). It carries both content hashes
+  under their own names, because a migration has two charts in hand, and
+  `dropped` is the list of dropped state ids that were in the execution's
+  configuration. A refused or parked migration emits nothing.
 
   ## The durable-subchart seam (ADR-0008)
 
@@ -165,6 +173,7 @@ defmodule StatifierPersistence.Telemetry do
   @execution_created [:statifier_persistence, :execution, :created]
   @execution_terminated [:statifier_persistence, :execution, :terminated]
   @execution_discarded [:statifier_persistence, :execution, :discarded]
+  @execution_migrated [:statifier_persistence, :execution, :migrated]
   @effect_failed [:statifier_persistence, :effect, :failed]
   @drive_turns_exhausted [:statifier_persistence, :drive, :turns_exhausted]
   @child_started [:statifier_persistence, :child, :started]
@@ -183,6 +192,7 @@ defmodule StatifierPersistence.Telemetry do
     @execution_created,
     @execution_terminated,
     @execution_discarded,
+    @execution_migrated,
     @effect_failed,
     @drive_turns_exhausted,
     @child_started,
@@ -366,6 +376,26 @@ defmodule StatifierPersistence.Telemetry do
         entry: fields[:entry],
         reason: fields[:reason],
         repaired?: fields[:repaired?]
+      }
+    )
+  end
+
+  @doc """
+  Emits `[:statifier_persistence, :execution, :migrated]`: one execution
+  re-pinned from `from_content_hash` to `to_content_hash` by
+  `StatifierPersistence.Executions.migrate/4` (ADR-0013 decision 5).
+  `dropped` lists the dropped state ids that were in its configuration.
+  """
+  @spec execution_migrated(fields :: fields()) :: :ok
+  def execution_migrated(fields) do
+    :telemetry.execute(
+      @execution_migrated,
+      %{system_time: System.system_time()},
+      %{
+        execution_id: fields[:execution_id],
+        from_content_hash: fields[:from_content_hash],
+        to_content_hash: fields[:to_content_hash],
+        dropped: fields[:dropped]
       }
     )
   end

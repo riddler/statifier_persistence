@@ -1,0 +1,4 @@
+### Added
+
+- `StatifierPersistence.Executions.migrate/4` moves one execution onto another chart by a `StatifierPersistence.Migration.Plan`, whole or not at all (ADR-0013): it takes the two machines in `from_machine:` and `to_machine:`, re-pins the position, content hash and identity in one write at `:active` and answers `{:ok, execution, migrated}`, or refuses with `{:error, reason}` and writes nothing. Under `on_failure: :park` a refusal of the check against the execution instead writes `:needs_migration` and answers `{:parked, reason}`. Until pin sources are read, a plan that drops a state or leaves one unmapped is refused with `:no_pin_source`.
+- A telemetry event, `[:statifier_persistence, :execution, :migrated]`, once per successful migration, carrying `execution_id`, `from_content_hash`, `to_content_hash` and `dropped`; `StatifierPersistence.Telemetry.events/0` returns seventeen names.

@@ -14,8 +14,9 @@ defmodule StatifierPersistence.Migration do
 
   `StatifierPersistence.Migration.Plan` is the plan: its struct, its one
   JSON-safe map encoding, and the static validation against the two
-  machines. Nothing in this package migrates an execution because a chart
-  was saved, created against or published.
+  machines. `StatifierPersistence.Executions.migrate/4` applies a plan to
+  one execution. Nothing in this package migrates an execution because a
+  chart was saved, created against or published.
 
   ## Not the table migrations
 

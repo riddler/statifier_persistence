@@ -1,6 +1,6 @@
 ### Added
 
-- A fifth execution status, `:needs_migration`: an execution parked on the chart it was already pinned to. It is not terminal, it takes no event, `fail/4` and `cancel/3` end it as they end an `:active` one, and it pins its chart against a retirement as an `:active` one does. Nothing in this release parks an execution.
+- A fifth execution status, `:needs_migration`: an execution parked on the chart it was already pinned to. It is not terminal, it takes no event, `fail/4` and `cancel/3` end it as they end an `:active` one, and it pins its chart against a retirement as an `:active` one does. `StatifierPersistence.Executions.migrate/4` under `on_failure: :park` is the one thing that parks an execution.
 - `StatifierPersistence.Executions.unpark/3` puts a `:needs_migration` execution back to `:active` at the position it was parked at, on its own chart, writing its status and nothing else; an `:active` execution answers `{:ok, execution}` unchanged and a terminal one is discarded.
 
 ### Changed

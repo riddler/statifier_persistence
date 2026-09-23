@@ -1065,8 +1065,10 @@ in the `:active` or the `:needs_migration` status, a durable child whose
 linkage pin names the hash while its parent is in one of those two, a
 position row on the hash, and any non-zero count from a pin source. A
 `:needs_migration` execution is one a migration parked on its chart; it
-takes no event until `Executions.unpark/3` puts it back to `:active`,
-and `fail/4` and `cancel/3` end it as they end an `:active` one. An
+takes no event until `Executions.unpark/3` puts it back to `:active` on
+that chart, or a corrected plan through `Executions.migrate/4` moves it
+onto the plan's `to` chart at `:active`, and `fail/4` and `cancel/3` end it as they
+end an `:active` one. An
 execution that has finished pins nothing - its counts are reported in
 a refusal and never cause one - which is what keeps a chart retirable
 once its traffic is over. Asking `Executions.executions_on/2` first

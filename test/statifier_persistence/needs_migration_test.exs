@@ -3,10 +3,11 @@ defmodule StatifierPersistence.NeedsMigrationTest do
   The fifth execution status, `:needs_migration`, at the entry points
   (ADR-0014 decisions 2 to 4), over both shipped adapters.
 
-  Nothing in this package parks an execution yet - the park is a
-  migration's - so every case here sets the status through
+  The park itself is `StatifierPersistence.Executions.migrate/4`'s and
+  is tested with it; every case here sets the status through
   `StatifierPersistence.Storage.update_execution_status/4`, the same
-  status-only write a park makes. The adapter half (the stored string,
+  status-only write a park makes, so that the entry points are tested
+  apart from any plan. The adapter half (the stored string,
   the counts, the pins) is pinned for every adapter by the conformance
   template.
 
