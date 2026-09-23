@@ -145,17 +145,19 @@ defmodule StatifierPersistence.NeedsMigrationTest do
     test "closes its step span as an error with the bare reason and no status", %{
       store: store,
       machine: machine,
-      executor: executor
+      executor: executor,
+      adapter: adapter
     } do
-      parked_hold(store, machine, "hold-span")
+      execution_id = "hold-span-#{adapter}"
+      parked_hold(store, machine, execution_id)
       attach(self(), [:statifier_persistence, :execution, :step, :stop])
 
       {:error, {:needs_migration, _execution}} =
-        Executions.step(store, "hold-span", machine, Event.external("copy.collected"),
+        Executions.step(store, execution_id, machine, Event.external("copy.collected"),
           executor: executor
         )
 
-      assert_receive {:telemetry, _name, %{execution_id: "hold-span"} = metadata}
+      assert_receive {:telemetry, _name, %{execution_id: ^execution_id} = metadata}
       assert metadata.outcome == :error
       assert metadata.status == nil
       assert metadata.reason == :needs_migration
@@ -246,16 +248,19 @@ defmodule StatifierPersistence.NeedsMigrationTest do
     test "on an :active execution answers {:ok, _} and writes nothing", %{
       store: store,
       machine: machine,
-      executor: executor
+      executor: executor,
+      adapter: adapter
     } do
+      execution_id = "hold-active-#{adapter}"
+
       {:ok, _execution, _ms} =
-        Executions.create(store, "hold-active", machine, executor: executor)
+        Executions.create(store, execution_id, machine, executor: executor)
 
       attach(self(), [:statifier_persistence, :adapter, :call])
 
-      assert {:ok, %Execution{status: :active}} = Executions.unpark(store, "hold-active")
+      assert {:ok, %Execution{status: :active}} = Executions.unpark(store, execution_id)
 
-      callbacks = collect_callbacks([])
+      callbacks = collect_callbacks(execution_id)
       assert :fetch_execution in callbacks
       refute Enum.any?(callbacks, &(&1 in [:update_execution, :insert_execution]))
     end
@@ -339,10 +344,14 @@ defmodule StatifierPersistence.NeedsMigrationTest do
     end
   end
 
-  defp collect_callbacks(acc) do
+  # The handler is global and this module is async, so every concurrent
+  # test's adapter calls arrive here too: only the calls made for
+  # `execution_id` are collected, and the rest are left unread.
+  defp collect_callbacks(execution_id, acc \\ []) do
     receive do
-      {:telemetry, [:statifier_persistence, :adapter, :call], %{callback: callback}} ->
-        collect_callbacks([callback | acc])
+      {:telemetry, [:statifier_persistence, :adapter, :call],
+       %{callback: callback, execution_id: ^execution_id}} ->
+        collect_callbacks(execution_id, [callback | acc])
     after
       0 -> Enum.reverse(acc)
     end
