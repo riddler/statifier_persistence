@@ -872,6 +872,22 @@ defmodule StatifierPersistence.Executions do
     finding when the plan leaves any such state unmapped, and never when it
     drops them all.
 
+  ## Children
+
+  A migration moves one execution and rewrites nothing in any durable
+  child of it: not the child's row, its linkage or its position (decision
+  7). A child's linkage pins the child's own chart, and execution metadata
+  is write-once. A live child reaches its parent by its invocation id
+  alone, and the invocation ids in the parent's active invocations cross
+  unchanged: every active invocation maps to a key of the to chart, through
+  the plan's `invocations` or by the same-ordinal default, or the migration
+  is refused with an invocation finding (decision 3). So the parent's own
+  position answers whether its children still resolve; no child is read
+  and no child's lock is taken. Under `on_failure: :park` a refusal parks
+  the parent only.
+
+  Migrating a child, or a tree of executions, is not done here.
+
   ## What it does
 
   In this order, and every check and the whole transform come before the

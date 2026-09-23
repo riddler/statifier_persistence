@@ -159,7 +159,10 @@ defmodule StatifierPersistence.Migration.Transform do
   # ADR-0013 decision 3's invocation rules: every active invocation maps -
   # through `:invocations`, or to the same ordinal under its state's mapped
   # id - to a key whose ordinal is in range of that to state's `<invoke>`
-  # children, and no two keys coincide. The invocation ids cross unchanged.
+  # children, and no two keys coincide. The invocation ids cross unchanged,
+  # and that is decision 7's child rule: a live child reaches its parent by
+  # its invocation id alone, so a transform that answers keeps every child
+  # the parent named resolvable, and one that cannot is refused here.
   @spec map_invocations(
           %{{Plan.state_id(), non_neg_integer()} => String.t()},
           [Plan.invocation()],
