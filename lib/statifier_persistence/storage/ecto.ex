@@ -193,6 +193,36 @@ if Code.ensure_loaded?(Ecto) do
       end
     end
 
+    @doc """
+    Declares the narrow tombstone read (the optional
+    `c:StatifierPersistence.Storage.Adapter.supports_retired_info?/1`).
+
+    Always `true`, and unlike `supports_chart_retirement?/1` it does not
+    ask the store: the read selects `retired_at` and `retired_by`, which
+    `fetch_chart/2` and `save_chart/2` already read on every store this
+    adapter serves. A store that can never carry a tombstone answers
+    `nil` for every hash, cheaply, which is the answer a create needs.
+    """
+    @impl Adapter
+    @spec supports_retired_info?(Adapter.opts()) :: boolean()
+    def supports_retired_info?(_opts), do: true
+
+    @doc """
+    Reads the tombstone on `content_hash`, or `nil` for a hash that has
+    none (the optional
+    `c:StatifierPersistence.Storage.Adapter.fetch_retired_info/2`).
+
+    One `SELECT` of `retired_at` and `retired_by` on the unique index,
+    restricted to a tombstoned row, so neither chart blob crosses the
+    wire and the cost does not grow with the chart.
+    """
+    @impl Adapter
+    @spec fetch_retired_info(Adapter.opts(), Adapter.content_hash()) ::
+            {:ok, Adapter.retired_info() | nil}
+    def fetch_retired_info(opts, content_hash) do
+      {:ok, retired_info(opts, content_hash)}
+    end
+
     # The tombstone on one hash, or nil for a hash that has none - which
     # includes a hash with no row at all, because "no row" is
     # `:chart_not_found`'s answer to give and not this function's.

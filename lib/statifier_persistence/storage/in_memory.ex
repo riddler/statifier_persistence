@@ -106,6 +106,29 @@ defmodule StatifierPersistence.Storage.InMemory do
     end
   end
 
+  @doc """
+  Declares the narrow tombstone read (the optional
+  `c:StatifierPersistence.Storage.Adapter.supports_retired_info?/1`).
+  """
+  @impl Adapter
+  @spec supports_retired_info?(Adapter.opts()) :: boolean()
+  def supports_retired_info?(_opts), do: true
+
+  @doc """
+  Reads the tombstone on `content_hash`, or `nil` for a hash that has
+  none (the optional
+  `c:StatifierPersistence.Storage.Adapter.fetch_retired_info/2`).
+
+  The Agent answers with the tombstone alone rather than the stored
+  entry, so the reply carries no chart bytes.
+  """
+  @impl Adapter
+  @spec fetch_retired_info(Adapter.opts(), Adapter.content_hash()) ::
+          {:ok, Adapter.retired_info() | nil}
+  def fetch_retired_info(opts, content_hash) do
+    {:ok, Agent.get(pid(opts), &retired_info(get_in(&1, [:charts, content_hash])))}
+  end
+
   # The tombstone on one stored entry, or nil for an entry that carries
   # none. An entry that was never stored carries none either, and
   # `:chart_not_found` is the answer for that, given by the caller.

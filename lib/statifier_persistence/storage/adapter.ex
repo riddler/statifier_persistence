@@ -741,6 +741,50 @@ defmodule StatifierPersistence.Storage.Adapter do
               {:ok, retired_info()} | {:error, error()}
 
   @doc """
+  Optional declaration that this adapter can read one hash's tombstone
+  without reading the chart's bytes (ADR-0012 decision 6).
+
+  The same opt-in-by-export shape `supports_metadata?/1` uses: an adapter
+  exports it and answers `true`, the facade checks with
+  `function_exported?/3`, and an adapter that does not export it sees no
+  behaviour change. It is a predicate of its own rather than a widening of
+  `supports_chart_retirement?/1`, because an adapter that declared that
+  predicate before this one existed would otherwise be called for a
+  callback it never agreed to export.
+
+  It is independent of `supports_chart_retirement?/1` in the other
+  direction too: a store that can never carry a tombstone can still answer
+  "this hash has none" cheaply, and that is the answer every create on
+  such a store needs.
+
+  For an adapter that does not declare it,
+  `StatifierPersistence.Storage.check_chart_retired/2` falls back to
+  `c:fetch_chart/2` and reads the retired arm off the full row, which
+  answers the same thing at the cost of transferring the chart's bytes.
+  """
+  @callback supports_retired_info?(opts()) :: boolean()
+
+  @doc """
+  Optional read of one hash's tombstone, without reading `identity_blob`
+  or `chart_blob` (ADR-0012 decision 6).
+
+  Answers `{:ok, info}` for a tombstoned hash, carrying the same
+  `t:retired_info/0` the retired arm of `c:fetch_chart/2` carries, and
+  `{:ok, nil}` for every hash that has no tombstone - a stored chart that
+  was never retired and a hash this store never held alike. Telling
+  those two apart is `c:fetch_chart/2`'s job, and this callback exists
+  for a caller that needs only the one question answered: whether the
+  hash is retired.
+
+  The bytes not crossing is the contract. An adapter answering this by
+  loading the whole chart row and discarding the blobs is conformant in
+  what it returns and defeats the callback's whole purpose, which is that
+  a create's tombstone check costs the same whatever the chart's size.
+  """
+  @callback fetch_retired_info(opts(), content_hash()) ::
+              {:ok, retired_info() | nil} | {:error, error()}
+
+  @doc """
   Optional declaration that this adapter keeps an execution's input log
   (ADR-0010 decision 1).
 
@@ -811,6 +855,8 @@ defmodule StatifierPersistence.Storage.Adapter do
                       list_active_execution_ids_by_content_hash: 2,
                       supports_chart_retirement?: 1,
                       retire_chart: 3,
+                      supports_retired_info?: 1,
+                      fetch_retired_info: 2,
                       supports_input_log?: 1,
                       append_input: 3,
                       list_inputs: 2
