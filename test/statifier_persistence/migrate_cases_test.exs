@@ -20,10 +20,10 @@ defmodule StatifierPersistence.MigrateCasesTest do
   - rename - the hold lands in `ready_for_pickup` on the new hash, the
     revision with the `transferred` outcome, its counters and invocation
     ids carried (decisions 1, 2 and 9).
-  - drop - a state the plan drops leaves the position, and the drop is
-    reported as an operator exit in the answer and on the `migrated`
-    event, the only record of it; nothing is stored as a trace (decision
-    5).
+  - drop - a region the plan drops leaves the position, the parallel
+    keeping its other region, and the drop is reported as an operator
+    exit in the answer and on the `migrated` event, the only record of
+    it; nothing is stored as a trace (decision 5).
   - unknown target refused - a plan naming a state the to chart does not
     have is refused before the execution is read (decisions 3 and 4).
   - non-quiescent refused - a position with a queued internal event is
@@ -156,29 +156,43 @@ defmodule StatifierPersistence.MigrateCasesTest do
   </scxml>
   """
 
-  # A revision with no routing step: a copy goes to the desk as soon as it
-  # is available.
-  @hold_direct """
+  # A hold waiting at its branch in two regions at once: the patron's
+  # notice, and the copy's transit to the branch.
+  @two_regions_before """
   <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="hold">
-    <datamodel>
-      <data id="branch" expr="'central'"/>
-    </datamodel>
-    <state id="hold" initial="placed">
-      <state id="placed">
-        <transition event="copy.available" target="ready_for_pickup"/>
+    <parallel id="hold">
+      <state id="notice_region" initial="notice_pending">
+        <state id="notice_pending">
+          <transition event="patron.notified" target="notice_sent"/>
+        </state>
+        <state id="notice_sent"/>
       </state>
-      <state id="ready_for_pickup">
-        <onentry>
-          <send id="pickup" event="pickup.expired" delay="259200s"/>
-        </onentry>
-        <invoke id="notice" type="library:notify_patron"/>
-        <invoke id="slip" type="library:print_slip"/>
-        <transition event="copy.collected" target="fulfilled"/>
-        <transition event="pickup.expired" target="expired"/>
+      <state id="transit_region" initial="in_transit">
+        <state id="in_transit">
+          <transition event="copy.routed" target="on_shelf"/>
+        </state>
+        <state id="on_shelf"/>
       </state>
-    </state>
+      <transition event="copy.collected" target="fulfilled"/>
+    </parallel>
     <final id="fulfilled"/>
-    <final id="expired"/>
+  </scxml>
+  """
+
+  # Its next revision holds copies at every branch, so the transit region
+  # is removed entirely; the parallel keeps the notice region alone.
+  @two_regions_after """
+  <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="hold">
+    <parallel id="hold">
+      <state id="notice_region" initial="notice_pending">
+        <state id="notice_pending">
+          <transition event="patron.notified" target="notice_sent"/>
+        </state>
+        <state id="notice_sent"/>
+      </state>
+      <transition event="copy.collected" target="fulfilled"/>
+    </parallel>
+    <final id="fulfilled"/>
   </scxml>
   """
 
@@ -393,7 +407,8 @@ defmodule StatifierPersistence.MigrateCasesTest do
           before: @hold_before,
           after: @hold_after,
           cancellable: @hold_cancellable,
-          direct: @hold_direct,
+          two_regions_before: @two_regions_before,
+          two_regions_after: @two_regions_after,
           no_slip: @hold_no_slip,
           slip_first: @hold_slip_first,
           suspendable_before: @suspendable_before,
@@ -611,25 +626,48 @@ defmodule StatifierPersistence.MigrateCasesTest do
     # sabotage: had dropped/2 (migration/transform.ex) answer [] -> red over
     # both adapters: the answer's dropped list was empty. Verified red,
     # reverted from a copy.
-    test "drop: a dropped state leaves the position, reported as an operator exit", ctx do
+    test "drop: a dropped region leaves the position, reported as an operator exit", ctx do
       execution_id = "hold-dropped-#{ctx.adapter}"
-      before = routing_hold(ctx, execution_id)
+      before = drive(ctx, execution_id, :two_regions_before, [])
       attach([:statifier_persistence, :execution, :migrated])
 
-      plan = plan!(ctx, :direct, rename(drop: ["routing"]))
+      {:ok, plan} =
+        Plan.new(
+          from: hash(ctx, :two_regions_before),
+          to: hash(ctx, :two_regions_after),
+          drop: ["transit_region", "in_transit", "on_shelf"]
+        )
 
-      assert {:ok, %Execution{status: :active}, %{dropped: ["routing"]}} =
-               migrate(ctx, execution_id, plan, :direct)
+      assert {:ok, %Execution{status: :active}, %{dropped: ["in_transit", "transit_region"]}} =
+               migrate_on(
+                 ctx.store,
+                 execution_id,
+                 plan,
+                 machine(ctx, :two_regions_before),
+                 machine(ctx, :two_regions_after),
+                 []
+               )
 
       assert_received {:telemetry, [:statifier_persistence, :execution, :migrated],
-                       %{execution_id: ^execution_id, dropped: ["routing"]}}
+                       %{execution_id: ^execution_id, dropped: ["in_transit", "transit_region"]}}
 
-      exported = exported(ctx, execution_id, :direct)
-      refute MapSet.member?(exported.configuration, "routing")
-      refute MapSet.member?(exported.entered_states, "routing")
+      exported = exported(ctx, execution_id, :two_regions_after)
+
+      for id <- ["transit_region", "in_transit", "on_shelf"] do
+        refute MapSet.member?(exported.configuration, id)
+        refute MapSet.member?(exported.entered_states, id)
+      end
+
+      # On the to chart `hold` is a parallel whose one region is
+      # `notice_region`, so the parallel, that region and its active leaf
+      # are a whole configuration of it.
+      assert exported.configuration == MapSet.new(["hold", "notice_region", "notice_pending"])
 
       # A drop delivers no event, so nothing is appended to the input log.
       assert snapshot(ctx, execution_id).inputs == before.inputs
+
+      assert {:ok, %Execution{status: :active}, _ms} =
+               step(ctx, execution_id, :two_regions_after, "patron.notified")
     end
 
     # sabotage: dropped migrate/4's static_check/3 -> red over both
@@ -844,8 +882,8 @@ defmodule StatifierPersistence.MigrateCasesTest do
 
     # sabotage: had default_invocation/4's :dropped clause
     # (migration/transform.ex) keep the key -> red over both adapters: the
-    # findings named the import's refusal instead. Verified red, reverted
-    # from a copy.
+    # findings named the import's refusal and no :invocation_dropped.
+    # Verified red, reverted from a copy.
     test "an invocation under a dropped state is refused", ctx do
       before = waiting_hold(ctx, "hold-dropped-invocation")
       plan = plan!(ctx, :after, drop: ["awaiting_pickup"])
@@ -855,10 +893,10 @@ defmodule StatifierPersistence.MigrateCasesTest do
                  pin_sources: [QuietTimerQueue]
                )
 
-      assert findings == [
-               {:invocation_dropped, {"awaiting_pickup", 0}},
-               {:invocation_dropped, {"awaiting_pickup", 1}}
-             ]
+      # Dropping the active leaf leaves a configuration this case does not
+      # judge, so it asserts only the two invocation findings.
+      assert {:invocation_dropped, {"awaiting_pickup", 0}} in findings
+      assert {:invocation_dropped, {"awaiting_pickup", 1}} in findings
 
       assert snapshot(ctx, "hold-dropped-invocation") == before
     end
