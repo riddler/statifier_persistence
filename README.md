@@ -1038,14 +1038,18 @@ keeps the row and its content hash, records `retired_at` and
     end
 
 Four things pin a chart and each refuses: an execution row on the hash
-in the `:active` status, a durable child whose linkage pin names the
-hash while its parent is `:active`, a position row on the hash, and any
-non-zero count from a pin source. An execution that has finished pins
-nothing - its counts are reported in a refusal and never cause one -
-which is what keeps a chart retirable once its traffic is over. Asking
-`Executions.executions_on/2` first finds candidates; it is not a
-retirability test on its own, because it reports the finished arms and
-leaves out the position rows and the host's own sources.
+in the `:active` or the `:needs_migration` status, a durable child whose
+linkage pin names the hash while its parent is in one of those two, a
+position row on the hash, and any non-zero count from a pin source. A
+`:needs_migration` execution is one a migration parked on its chart; it
+takes no event until `Executions.unpark/3` puts it back to `:active`,
+and `fail/4` and `cancel/3` end it as they end an `:active` one. An
+execution that has finished pins nothing - its counts are reported in
+a refusal and never cause one - which is what keeps a chart retirable
+once its traffic is over. Asking `Executions.executions_on/2` first
+finds candidates; it is not a retirability test on its own, because it
+reports the finished arms and leaves out the position rows and the
+host's own sources.
 
 A refusal carries every count it knows, so one answer says everything
 holding the chart. A source that could not answer is a different arm

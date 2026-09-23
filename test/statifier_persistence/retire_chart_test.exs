@@ -168,7 +168,14 @@ defmodule StatifierPersistence.RetireChartTest do
       assert {:error, {:pinned, counts}} =
                Executions.retire_chart(store, content_hash, [], retired_by: "ops@example.test")
 
-      assert counts.executions == %{active: 1, completed: 1, failed: 0, cancelled: 0}
+      assert counts.executions == %{
+               active: 1,
+               needs_migration: 0,
+               completed: 1,
+               failed: 0,
+               cancelled: 0
+             }
+
       assert counts.children == 0
       assert counts.positions == 0
       assert counts.sources == %{}
@@ -216,7 +223,14 @@ defmodule StatifierPersistence.RetireChartTest do
                  retired_by: "ops@example.test"
                )
 
-      assert counts.executions == %{active: 0, completed: 0, failed: 0, cancelled: 0}
+      assert counts.executions == %{
+               active: 0,
+               needs_migration: 0,
+               completed: 0,
+               failed: 0,
+               cancelled: 0
+             }
+
       assert counts.sources == %{AddressPinSource => %{addresses: 1}}
     end
 
@@ -237,7 +251,14 @@ defmodule StatifierPersistence.RetireChartTest do
                Executions.retire_chart(store, content_hash, [], retired_by: "ops@example.test")
 
       assert counts.positions == 1
-      assert counts.executions == %{active: 0, completed: 0, failed: 0, cancelled: 0}
+
+      assert counts.executions == %{
+               active: 0,
+               needs_migration: 0,
+               completed: 0,
+               failed: 0,
+               cancelled: 0
+             }
     end
   end
 

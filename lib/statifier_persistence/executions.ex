@@ -20,6 +20,20 @@ defmodule StatifierPersistence.Executions do
   execution is discarded with a typed `{:discarded, execution}` result, never an
   exception and never a silent step.
 
+  ## A parked execution takes no event
+
+  `:needs_migration` is the status a migration leaves an execution in when
+  it parks it on the chart it was already pinned to (ADR-0014 decision 1).
+  It is not terminal, and it takes no event: a delivery through any event
+  door answers `{:error, {:needs_migration, execution}}` from the execution
+  record alone, before any position is loaded, and nothing is appended,
+  consumed, executed or written (decision 2). It is an error rather than a
+  discard because the execution will take events again: holding the
+  delivery and retrying it after the execution leaves the arm is the
+  host's. `fail/4` and `cancel/3` proceed on a parked execution as they do
+  on an `:active` one, and `unpark/3` puts it back to `:active` on its own
+  chart (decision 3).
+
   ## A chart says its own execution failed
 
   Two routes reach `:failed`, and both are the chart's own word rather than
@@ -179,6 +193,7 @@ defmodule StatifierPersistence.Executions do
   """
   @type error ::
           Storage.error()
+          | {:needs_migration, Execution.t()}
           | {:budget_exhausted, BudgetExhausted.t()}
           | {:serialization, term()}
           | {:pin_source_failed, {module(), PinSource.reason()}}
@@ -429,6 +444,11 @@ defmodule StatifierPersistence.Executions do
   whose `:active` status lies about a terminal stored position: it discards
   too, and repairs the record's status to `:completed` on the way out.
 
+  An event delivered to a `:needs_migration` execution is refused whole with
+  `{:error, {:needs_migration, execution}}`, also from the execution record
+  alone and before any position decode: nothing is appended to the input
+  log, no effect is executed and nothing is written (ADR-0014 decision 2).
+
   `event` may also be a `t:event_builder/0` - a fun the loaded position is
   handed, for an event only the position can build or decline. A builder
   that declines discards the delivery through the same `{:discarded, execution}`
@@ -468,6 +488,13 @@ defmodule StatifierPersistence.Executions do
       when status in [:completed, :failed, :cancelled] ->
         discarded(execution_record, execution_id, entry, :terminal_execution)
 
+      # ADR-0014 decision 2: a parked execution is refused ahead of the
+      # load, so nothing below - the input log, the step, the effects,
+      # the write - is reached. Without this arm the one after it would
+      # load and step it, because it steps whatever is not terminal.
+      {:ok, %{status: :needs_migration} = execution_record} ->
+        {:error, {:needs_migration, Execution.from_record(execution_record)}}
+
       {:ok, execution_record} ->
         with {:ok, machine_state} <- Storage.load_execution_position(store, execution_id, machine) do
           step_loaded(
@@ -494,6 +521,9 @@ defmodule StatifierPersistence.Executions do
   untouched and only the record's status and failure reason change.
 
   A terminal execution is discarded, same as `step/5`: `{:discarded, execution}`.
+  A `:needs_migration` execution is failed exactly as an `:active` one is:
+  giving up on a parked execution is a host decision about it, not an event
+  for its chart (ADR-0014 decision 2).
   `reason` is the short string stored as the execution's `failure` - keep it a
   prefixed, console-readable reason, not an inspect dump.
 
@@ -608,7 +638,9 @@ defmodule StatifierPersistence.Executions do
   the record's status changes, to `:cancelled`. An execution that is already
   terminal - cancelled by an earlier, interrupted cascade included - is
   discarded with `{:discarded, execution}`, which is what makes re-running a
-  cascade over an already-cancelled subtree a no-op.
+  cascade over an already-cancelled subtree a no-op. A `:needs_migration`
+  execution is cancelled exactly as an `:active` one is, so a cascading
+  cancel reaches a parked child (ADR-0014 decision 2).
 
   `opts` accepts `serialization:` only - `fail/4`'s `serialization:`,
   without its `driver:`: no chart is stepped by a cancel, on either side of
@@ -633,6 +665,58 @@ defmodule StatifierPersistence.Executions do
           terminated(execution_id, execution_record.content_hash, :cancelled, nil)
           {:ok, Execution.from_record(%{execution_record | status: :cancelled, failure: nil})}
         end
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  @doc """
+  Puts a `:needs_migration` execution back to `:active` on the chart it was
+  already pinned to (ADR-0014 decision 3): the way out of the arm for a host
+  that decides the execution should go on unmigrated.
+
+  The status is the only thing written. The execution goes on at the
+  position it was parked at, under the content hash it already carried,
+  with its blobs, metadata and input log as they were; the write is
+  `StatifierPersistence.Storage.update_execution_status/4`'s, which carries
+  every other stored field forward. Nothing is replayed: a delivery that was
+  refused while the execution was parked is delivered again by the host or
+  not at all.
+
+  An `:active` execution answers `{:ok, execution}` and nothing is written,
+  so re-running an interrupted unpark changes nothing. A terminal execution
+  answers `{:discarded, execution}`, as `fail/4` and `cancel/3` do.
+
+  `opts` accepts `serialization:` only, with `cancel/3`'s default. The call
+  runs inside the execution's serialization strategy and emits no telemetry
+  event of its own.
+  """
+  @spec unpark(store :: Storage.t(), execution_id :: execution_id(), opts :: keyword()) ::
+          {:ok, Execution.t()} | {:discarded, Execution.t()} | {:error, error()}
+  def unpark(%Storage{} = store, execution_id, opts \\ []) do
+    {strategy, config} = Keyword.get(opts, :serialization, {AdapterLock, store})
+
+    case strategy.with_execution(config, execution_id, fn -> unpark_tail(store, execution_id) end) do
+      {:ok, result} -> result
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @spec unpark_tail(Storage.t(), execution_id()) ::
+          {:ok, Execution.t()} | {:discarded, Execution.t()} | {:error, error()}
+  defp unpark_tail(store, execution_id) do
+    case Storage.fetch_execution(store, execution_id) do
+      {:ok, %{status: :needs_migration} = execution_record} ->
+        with :ok <- Storage.update_execution_status(store, execution_id, :active, failure: nil) do
+          {:ok, Execution.from_record(%{execution_record | status: :active, failure: nil})}
+        end
+
+      {:ok, %{status: :active} = execution_record} ->
+        {:ok, Execution.from_record(execution_record)}
+
+      {:ok, execution_record} ->
+        {:discarded, Execution.from_record(execution_record)}
 
       {:error, _reason} = error ->
         error
@@ -749,18 +833,22 @@ defmodule StatifierPersistence.Executions do
   Counts the executions on `content_hash`, per stored arm (ADR-0012
   decision 3).
 
-  Answers `%{active: n, completed: n, failed: n, cancelled: n,
-  children: n}` - every key present for every hash, and zeros for a hash
-  this store has never seen. The four arm keys are the stored statuses
-  and nothing else: `terminal` is a fold this record's decision 2 names
-  in prose and never stores, so a caller that wants it adds
-  `completed`, `failed` and `cancelled` itself.
+  Answers `%{active: n, needs_migration: n, completed: n, failed: n,
+  cancelled: n, children: n}` - every key present for every hash, and
+  zeros for a hash this store has never seen. The five arm keys are the
+  stored statuses and nothing else: `terminal` is a fold this record's
+  decision 2 names in prose and never stores, so a caller that wants it
+  adds `completed`, `failed` and `cancelled` itself. `needs_migration`
+  counts the parked executions on the hash (ADR-0014 decision 4): they
+  are not terminal, and they pin the chart as `active` ones do, so this
+  key is how a host finds the executions a migration left behind.
 
   `children` counts the durable-child linkage pins on the hash whose
-  parent execution is `:active`, whatever arm the child itself is in
-  (ADR-0012 decision 1). It counts pins and not rows, so it is a
-  different population from the four arm keys and can be non-zero for a
-  hash carrying no execution row of its own.
+  parent execution is `:active` or `:needs_migration`, whatever arm the
+  child itself is in (ADR-0012 decision 1, as ADR-0014 decision 4 reads
+  it). It counts pins and not rows, so it is a different population from
+  the five arm keys and can be non-zero for a hash carrying no execution
+  row of its own.
 
   `{:error, :content_hash_query_unsupported}` for a store whose adapter
   does not answer the query, without calling the adapter at all.
@@ -1077,6 +1165,13 @@ defmodule StatifierPersistence.Executions do
   defp stop_shape({:error, {:budget_exhausted, _payload} = reason}),
     do: {nil, nil, :error, :failed, reason}
 
+  # A parked execution's refusal (ADR-0014 decision 2) reaches no write, so
+  # `status` is `nil`. `reason` is narrowed to the bare atom: the execution
+  # the error carries is the caller's, and the event keeps to the closed
+  # term an operator can dimension on.
+  defp stop_shape({:error, {:needs_migration, %Execution{} = execution}}),
+    do: {nil, execution.content_hash, :error, nil, :needs_migration}
+
   defp stop_shape({:error, reason}), do: {nil, nil, :error, nil, reason}
 
   # The chart's own `_sessionid`, read out of the decoded datamodel - the
@@ -1387,6 +1482,10 @@ defmodule StatifierPersistence.Executions do
   defp report_write(:update, execution_id, session_id, identity, status, lifecycle),
     do: report_termination(execution_id, session_id, identity, status, lifecycle)
 
+  # `:needs_migration` (ADR-0014 decision 5) needs no clause of its own:
+  # every status handed here is one a write just stored from a stepped
+  # position or a create, which is never that arm, and dialyzer reports a
+  # clause for it as a pattern that can never match.
   @spec report_termination(
           execution_id(),
           String.t() | nil,
@@ -1559,6 +1658,11 @@ defmodule StatifierPersistence.Executions do
   # for a host abandoning an execution and this package does not mint one. Family
   # two's `[:statifier_persistence, :execution, :terminated]` reports those, with
   # `driven_by: :host`.
+  #
+  # `:needs_migration` (ADR-0014 decision 5) needs no clause of its own:
+  # this is only ever handed the status `execution_status/2` derived from
+  # a stepped position, which is never that arm, and the compiler reports
+  # a clause for it as unreachable.
   @spec report_halt(
           MachineState.t(),
           String.t() | nil,

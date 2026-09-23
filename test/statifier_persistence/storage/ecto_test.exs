@@ -54,24 +54,44 @@ defmodule StatifierPersistence.Storage.EctoTest do
   end
 
   describe "execution status vocabulary" do
-    # sabotage: crossed the @statuses mapping (completed -> "failed",
-    # failed -> "failed2") -> the round trip alone stayed green (a
-    # self-consistent swap is invisible to it), so this test also pins
-    # the raw stored strings, which went red under the same mutation.
-    # Verified red, reverted.
-    test "all three statuses round-trip and store ADR-0004's strings", %{default: opts} do
-      for {status, stored, execution_id} <- [
-            {:active, "active", "execution-ecto-status-active"},
-            {:completed, "completed", "execution-ecto-status-completed"},
-            {:failed, "failed", "execution-ecto-status-failed"}
-          ] do
+    # The arms are read off `t:StatifierPersistence.Storage.Adapter.execution_status/0`
+    # itself rather than listed here, so an arm added to the type without
+    # a stored string fails this test instead of being left out of it
+    # (ADR-0014 decision 5). Each arm is stored as its own name.
+    #
+    # sabotage: drop the `needs_migration: "needs_migration"` entry from the
+    # Ecto adapter's @statuses -> red, the parked insert raised
+    # FunctionClauseError in encode_status/1. Verified red, reverted from a
+    # copy.
+    test "every arm of the status type round-trips and stores its own name", %{default: opts} do
+      statuses = execution_status_arms()
+
+      assert :needs_migration in statuses
+      assert length(statuses) == 5
+
+      for status <- statuses do
+        execution_id = "execution-ecto-status-#{status}"
+
         :ok =
           Storage.Ecto.insert_execution(opts, execution_record(execution_id, %{status: status}))
 
         assert {:ok, %{status: ^status}} = Storage.Ecto.fetch_execution(opts, execution_id)
-        assert TestRepo.get_by(Default.Execution, execution_id: execution_id).status == stored
+
+        assert TestRepo.get_by(Default.Execution, execution_id: execution_id).status ==
+                 Atom.to_string(status)
       end
     end
+  end
+
+  # The atoms of the union `t:execution_status/0` is declared as, read
+  # from the compiled module's typespecs.
+  defp execution_status_arms do
+    {:ok, types} = Code.Typespec.fetch_types(StatifierPersistence.Storage.Adapter)
+
+    {:type, {:execution_status, {:type, _line, :union, arms}, []}} =
+      Enum.find(types, &match?({:type, {:execution_status, _ast, []}}, &1))
+
+    Enum.map(arms, fn {:atom, _line, atom} -> atom end)
   end
 
   describe "row-count idempotence" do

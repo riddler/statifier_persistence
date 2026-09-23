@@ -1300,7 +1300,14 @@ defmodule StatifierPersistence.ExecutionsTest do
     test "a hash this store has never seen answers every key at zero", %{store: store} do
       assert {:ok, counts} = Executions.executions_on(store, "sha256:never-stored")
 
-      assert counts == %{active: 0, completed: 0, failed: 0, cancelled: 0, children: 0}
+      assert counts == %{
+               active: 0,
+               needs_migration: 0,
+               completed: 0,
+               failed: 0,
+               cancelled: 0,
+               children: 0
+             }
     end
 
     # sabotage: in the in-memory adapter's

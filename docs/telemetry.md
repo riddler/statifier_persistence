@@ -199,7 +199,11 @@ different expected shapes.
 `outcome` on the stop is `:ok`, `:discarded` or `:error`, mirroring the
 three return shapes exactly. `status` is the execution's resulting
 `Adapter.execution_status` (`:active`, `:completed`, `:failed`,
-`:cancelled`) and is `nil` when the step did not reach a write. `reason` is the error term on
+`:cancelled`) and is `nil` when the step did not reach a write. A step
+never results in the fifth arm, `:needs_migration` (ADR-0014): a delivery
+to a parked execution reaches no write, so its stop carries `status: nil`,
+`outcome: :error` and the bare atom `:needs_migration` as `reason` rather
+than the error term, which carries the execution. `reason` is the error term on
 an `:error` outcome and `nil` otherwise - and it is a term, so a consumer
 folding it into a metric dimension must narrow it first.
 

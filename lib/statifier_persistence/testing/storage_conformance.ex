@@ -696,7 +696,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # count_executions_by_content_hash/2, fold onto %{} instead of
         # onto @zero_counts, so the answer carries only the arms the
         # store holds rows in -> red, this case's unknown hash came back
-        # as %{} rather than the five zero keys. Verified red on both
+        # as %{} rather than the zero keys. Verified red on both
         # conformance suites, four cases red in each ("35 tests, 4
         # failures" over InMemory, "40 tests, 4 failures" over Ecto).
         # Reverted from a copy.
@@ -707,7 +707,14 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                      "sha256:conformance-never-stored"
                    )
 
-          assert counts == %{active: 0, completed: 0, failed: 0, cancelled: 0, children: 0}
+          assert counts == %{
+                   active: 0,
+                   needs_migration: 0,
+                   completed: 0,
+                   failed: 0,
+                   cancelled: 0,
+                   children: 0
+                 }
         end
 
         # sabotage: in the adapter under test's
@@ -770,6 +777,56 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                    @conformance_adapter.count_executions_by_content_hash(
                      store.opts,
                      "sha256:counts-moving"
+                   )
+        end
+
+        # ADR-0014 decisions 1 and 4: the fifth arm is stored, read back
+        # and counted under its own key. A hold parked on its chart is
+        # neither :active nor terminal, and the drained query says so.
+        #
+        # sabotage: drop `needs_migration: 0` from the in-memory adapter's
+        # @zero_counts and the `needs_migration: "needs_migration"` entry from
+        # the Ecto adapter's @statuses -> red on both conformance suites: the
+        # in-memory fold raised KeyError on the parked row, and the Ecto insert
+        # raised FunctionClauseError in encode_status/1. Verified red, reverted
+        # from a copy.
+        test "adapter: a parked execution round-trips and counts under needs_migration, never under active",
+             %{store: store} do
+          inserted =
+            insert_counted_execution(
+              store,
+              "hold-parked",
+              "sha256:counts-parked-hold",
+              :needs_migration
+            )
+
+          assert {:ok, ^inserted} =
+                   @conformance_adapter.fetch_execution(store.opts, "hold-parked")
+
+          insert_counted_execution(store, "hold-waiting", "sha256:counts-parked-hold", :active)
+
+          assert {:ok, counts} =
+                   @conformance_adapter.count_executions_by_content_hash(
+                     store.opts,
+                     "sha256:counts-parked-hold"
+                   )
+
+          assert counts == %{
+                   active: 1,
+                   needs_migration: 1,
+                   completed: 0,
+                   failed: 0,
+                   cancelled: 0,
+                   children: 0
+                 }
+
+          assert :ok =
+                   @conformance_adapter.update_execution(store.opts, %{inserted | status: :active})
+
+          assert {:ok, %{active: 2, needs_migration: 0}} =
+                   @conformance_adapter.count_executions_by_content_hash(
+                     store.opts,
+                     "sha256:counts-parked-hold"
                    )
         end
 
@@ -880,6 +937,53 @@ defmodule StatifierPersistence.Testing.StorageConformance do
             assert counts.children == 1
             assert counts.completed == 1
             assert counts.active == 0
+          end
+
+          # A parked parent can take a step again once it leaves the arm,
+          # so it can read its child's pin again: the pin counts
+          # (ADR-0014 decision 4).
+          #
+          # sabotage: read "the parent is :active" alone as the pin (the
+          # in-memory @pinning_statuses and the Ecto pinning_statuses/0 cut to
+          # the :active arm) -> red on both conformance suites, this case read
+          # children: 0 under a parked parent. Verified red, reverted from the
+          # copies.
+          test "adapter: a durable child's pin counts while its parent is parked", %{
+            store: store
+          } do
+            parent =
+              insert_counted_execution(
+                store,
+                "counts-parked-parent",
+                "sha256:counts-parked-parent",
+                :needs_migration
+              )
+
+            insert_pinned_child(
+              store,
+              "counts-parked-parent/call/0",
+              "sha256:counts-parked-child",
+              0,
+              :completed
+            )
+
+            assert {:ok, %{children: 1}} =
+                     @conformance_adapter.count_executions_by_content_hash(
+                       store.opts,
+                       "sha256:counts-parked-child"
+                     )
+
+            assert :ok =
+                     @conformance_adapter.update_execution(
+                       store.opts,
+                       %{parent | status: :cancelled}
+                     )
+
+            assert {:ok, %{children: 0}} =
+                     @conformance_adapter.count_executions_by_content_hash(
+                       store.opts,
+                       "sha256:counts-parked-child"
+                     )
           end
 
           # sabotage: in the adapter under test's children count, take
@@ -1019,7 +1123,15 @@ defmodule StatifierPersistence.Testing.StorageConformance do
 
         if Storage.content_hash_query_supported?(store) do
           assert {:ok, counts} = answer
-          assert counts == %{active: 0, completed: 0, failed: 0, cancelled: 0, children: 0}
+
+          assert counts == %{
+                   active: 0,
+                   needs_migration: 0,
+                   completed: 0,
+                   failed: 0,
+                   cancelled: 0,
+                   children: 0
+                 }
         else
           assert {:error, :content_hash_query_unsupported} = answer
         end
@@ -1059,6 +1171,31 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           assert counts.children == 0
           assert counts.positions == 0
           assert counts.sources == %{}
+
+          assert {:ok, chart} = @conformance_adapter.fetch_chart(store.opts, @retire_hash)
+          assert chart.chart_blob == <<4, 5, 6>>
+        end
+
+        # ADR-0014 decision 4: a parked execution pins the chart it is
+        # parked on, and the refusal reports it under its own key.
+        #
+        # sabotage: drop the `executions.needs_migration > 0` term from
+        # StatifierPersistence.Storage.Adapter.pinned?/1 and read the Ecto
+        # adapter's unpinned_chart/2 `active` subquery as `:active` alone ->
+        # red on both conformance suites, this case alone in each: the parked
+        # hold's chart was retired instead of refused. Verified red, reverted
+        # from the copies.
+        test "adapter: a parked execution on the hash refuses the retirement", %{store: store} do
+          save_retirable_chart(store, @retire_hash)
+          insert_retire_execution(store, "retire-parked", @retire_hash, :needs_migration)
+
+          assert {:error, {:pinned, counts}} =
+                   @conformance_adapter.retire_chart(store.opts, @retire_hash, retirement())
+
+          assert counts.executions.needs_migration == 1
+          assert counts.executions.active == 0
+          assert counts.children == 0
+          assert counts.positions == 0
 
           assert {:ok, chart} = @conformance_adapter.fetch_chart(store.opts, @retire_hash)
           assert chart.chart_blob == <<4, 5, 6>>
@@ -1137,6 +1274,50 @@ defmodule StatifierPersistence.Testing.StorageConformance do
             assert counts.executions.active == 0
             assert counts.executions.completed == 1
             assert counts.positions == 0
+
+            assert {:ok, chart} = @conformance_adapter.fetch_chart(store.opts, @retire_hash)
+            assert chart.chart_blob == <<4, 5, 6>>
+          end
+        end
+
+        # The child clause of decision 1 under a parked parent, as a refusal.
+        #
+        # sabotage: the pinning arms cut to :active alone, as for the parked-
+        # parent count case above -> red on both conformance suites: the chart
+        # under a terminal child of a parked parent was retired instead of
+        # refused. Verified red, reverted from the copies.
+        if function_exported?(conformance_adapter, :supports_metadata?, 1) do
+          test "adapter: a terminal child's pin under a parked parent refuses the retirement",
+               %{store: store} do
+            save_retirable_chart(store, @retire_hash)
+
+            insert_retire_execution(
+              store,
+              "retire-parked-parent",
+              "sha256:retire-parent",
+              :needs_migration
+            )
+
+            assert :ok =
+                     @conformance_adapter.insert_execution(store.opts, %{
+                       execution_id: "retire-parked-parent/call/0",
+                       status: :completed,
+                       content_hash: @retire_hash,
+                       identity_blob: <<1, 2, 3>>,
+                       position_blob: <<7, 8, 9>>,
+                       failure: nil,
+                       metadata:
+                         Linkage.to_metadata(
+                           Linkage.new("retire-parked-parent", "call", 0, @retire_hash)
+                         ),
+                       outcome_blob: nil
+                     })
+
+            assert {:error, {:pinned, counts}} =
+                     @conformance_adapter.retire_chart(store.opts, @retire_hash, retirement())
+
+            assert counts.children == 1
+            assert counts.executions.needs_migration == 0
 
             assert {:ok, chart} = @conformance_adapter.fetch_chart(store.opts, @retire_hash)
             assert chart.chart_blob == <<4, 5, 6>>
@@ -1325,6 +1506,29 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                    )
 
           assert ids == ["retire-listed"]
+        end
+
+        # ADR-0014 decision 4: the listing a pin source is handed stays
+        # :active only; a parked execution already refuses a retirement
+        # through its own count.
+        #
+        # sabotage: list every pinning arm (the in-memory filter reading
+        # `status in @pinning_statuses`, the Ecto listing reading
+        # `status in ^pinning_statuses()`) -> red on both conformance suites,
+        # this case alone in each: the parked id was listed too. Verified red,
+        # reverted from the copies.
+        test "adapter: a parked execution is not listed for a pin source", %{store: store} do
+          save_retirable_chart(store, @retire_hash)
+          insert_retire_execution(store, "retire-listed-active", @retire_hash, :active)
+          insert_retire_execution(store, "retire-unlisted-parked", @retire_hash, :needs_migration)
+
+          assert {:ok, ids} =
+                   @conformance_adapter.list_active_execution_ids_by_content_hash(
+                     store.opts,
+                     @retire_hash
+                   )
+
+          assert ids == ["retire-listed-active"]
         end
 
         defp retirement(sources \\ %{}) do
