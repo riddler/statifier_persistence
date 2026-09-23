@@ -5,76 +5,86 @@ against it at proposed and cites its Decision items)
 
 ## Context
 
-The migration-plan record (ADR-0013, proposed beside this one) gives
-`migrate/4` an `on_failure:` option with two values. Under `:refuse` a
-plan that cannot apply to an execution is answered with an error and the
-execution is left exactly as it was. Under `:park` the execution is also
-left exactly as it was - same position, same chart - but it is marked, so
-that nothing steps it forward on a chart its host has already decided to
-move it off, and so that a host can find it again. That mark is a status,
-and this record decides it.
+ADR-0013 decision 4 gives `Executions.migrate/4` an `on_failure:` option
+with two values, and it chooses what a refusal of decision 3's second
+validation - the one against the execution - does to that execution. Under
+`:refuse`, the default, the refusal is returned and nothing is written.
+Under `:park` the execution is left at the same position on the same chart,
+and its status alone is written, so that nothing steps it forward on a
+chart its host has already decided to move it off, and so that a host can
+find it again. ADR-0013 leaves that status to this record, in its list of
+what it does not decide.
 
 A migration is whole or it did not happen. Nothing in this record
-describes a partial apply, and the park is not one: it is the record that
-a migration did *not* happen, written on an execution the migration left
-untouched in every other field.
+describes a partial apply, and the park is not one: ADR-0013 decision 4
+names the park's status write as the one write a refusal can cause, and it
+touches no blob. It records that a migration did *not* happen.
 
 ### The premise surface
 
-Everything below rests on `statifier_persistence` `main` at **`9cd192b`**
-("Promotes the sp-l4p send-types fragment into the 0.13.0 section"), read
-2026-09-23. Every code cite carries that SHA and an anchor beside its line
+Everything below rests on `statifier_persistence` `main` at **`2d2598a`**
+("Cure 2: exact refusal wording, two ADR-0013 rules"), read 2026-09-23.
+ADR-0013 is cited as merged at that SHA. Every code cite carries that SHA and an anchor beside its line
 number, because line numbers move and anchors do not.
 
 - **A stored execution's status has four arms.**
   `@type execution_status :: :active | :completed | :failed | :cancelled`
   (`lib/statifier_persistence/storage/adapter.ex:62`, `t:execution_status/0`,
-  @9cd192b). ADR-0012 decision 2 names `:completed`, `:failed` and
+  @2d2598a). ADR-0012 decision 2 names `:completed`, `:failed` and
   `:cancelled` together as "terminal", a fold in prose that is never
   stored.
 - **The column needs no schema version.** The status column is
   `add(:status, :text, null: false)`
-  (`lib/statifier_persistence/ecto/migrations/v01.ex:69`, the `executions`
-  table in `up/1`, @9cd192b), and no migration from V01 to V07 adds a
-  constraint, a check or a partial index on it (@9cd192b). The vocabulary
+  (`lib/statifier_persistence/ecto/migrations/v01.ex:79`, the `executions`
+  table in `up/1`, @2d2598a), and no migration from V01 to V07 adds a
+  constraint, a check or a partial index on it (@2d2598a). The vocabulary
   is enforced in Elixir, by the Ecto adapter's `@statuses` list
-  (`lib/statifier_persistence/storage/ecto.ex:64`, `@statuses`, @9cd192b),
+  (`lib/statifier_persistence/storage/ecto.ex:64`, `@statuses`, @2d2598a),
   from which `encode_status/1` and `decode_status/1` are generated
-  (`ecto.ex:1213`, `for {atom, string} <- @statuses`, @9cd192b). An
+  (`ecto.ex:1225`, `for {atom, string} <- @statuses`, @2d2598a). An
   unknown stored string fails loudly on a missing clause, by design.
 - **The input log is a replay log, not a queue.** ADR-0010 decision 5
   appends "only inputs the interpreter saw"; decision 6 closes the log
   with a marker past the host's cap; nothing in this package reads the log
   back to deliver it; and `StatifierPersistence.Storage.InMemory` keeps no
   log at all (it exports no `supports_input_log?/1`,
-  `lib/statifier_persistence/storage/in_memory.ex`, @9cd192b). So the log
+  `lib/statifier_persistence/storage/in_memory.ex`, @2d2598a). So the log
   cannot hold a delivery for later.
 - **Every event door reaches one guard.** `step/5`'s fetch-and-guard is
-  `step_tail/7` (`lib/statifier_persistence/executions.ex:465`, @9cd192b),
+  `step_tail/7` (`lib/statifier_persistence/executions.ex:465`, @2d2598a),
   which discards on `status in [:completed, :failed, :cancelled]` before
   any position is loaded; `StatifierPersistence.Driver`'s `send_event/4`,
   `done_invocation/5`, `failed_invocation/5` and `answer_parent/3` all drive
   through `Executions.step/5` (`lib/statifier_persistence/driver.ex:1499`,
-  the one `Executions.step` call in the module, @9cd192b).
-- **A status-only write already exists.**
+  the one `Executions.step` call in the module, @2d2598a).
+- **A status write that touches no blob already exists.**
   `StatifierPersistence.Storage.update_execution_status/4`
-  (`lib/statifier_persistence/storage.ex:458`, @9cd192b) writes a status and
-  carries every other stored field forward verbatim, both blobs included.
+  (`lib/statifier_persistence/storage.ex:458`, @2d2598a) writes the status
+  and the `failure` reason (`nil` unless the caller passes one) and carries
+  every other stored field forward verbatim, both blobs included; an
+  `outcome_blob:` left at its `nil` default carries the stored answer
+  forward too.
 
 ## Decision
 
 **1. A fifth arm, `:needs_migration`, reached only by `migrate/4` under
 `on_failure: :park`.** `t:execution_status/0` gains `:needs_migration`,
 stored by the Ecto adapter as the string `"needs_migration"`. The one way
-into the arm is a call to `migrate/4` with `on_failure: :park` whose plan
-cannot apply to the execution - either validation in ADR-0013 refuses it.
-The park is a status-only write of the kind `update_execution_status/4`
-makes: the position, the content hash, the identity blob, the metadata and
-the input log are the ones the execution had before the call. Only an
-execution in `:active` or already in `:needs_migration` can be parked; a
-parked execution that is parked again stays as it is. No step, create,
-fail, cancel or retirement writes the arm, and nothing parks an execution
-because a chart was published.
+into the arm is ADR-0013 decision 4's park: a call to `migrate/4` with
+`on_failure: :park` whose validation against the execution (ADR-0013
+decision 3) refuses, on an execution that is not in a terminal status and
+is stored on the plan's `from` hash. Every other refusal parks nothing and
+writes nothing, under either value: a static refusal, a lock that could not
+be taken, a refusal because the execution is terminal, a refusal because it
+is stored on another chart than the plan's `from`, and the refusal of a to
+hash ADR-0012 has tombstoned. The park writes the status and a `nil`
+`failure`, as `update_execution_status/4` does; the position, the content
+hash, the identity blob, the metadata and the input log are the ones the
+execution had before the call. The execution parked is therefore one in
+`:active` or already in `:needs_migration`, and a parked execution that is
+parked again stays as it is. No step, create, fail, cancel or retirement
+writes the arm, and nothing parks an execution because a chart was
+published.
 
 **2. It is not terminal, it consumes no events, and a delivery to it is
 refused whole.** `:needs_migration` is outside ADR-0012's terminal fold. A
@@ -105,10 +115,13 @@ migrating it first.
 **3. It is left by a corrected plan, or by `Executions.unpark/3` onto its
 own chart.** There are two ways out, and both are explicit calls:
 
-- `migrate/4` with a plan that applies. It accepts an execution in
-  `:needs_migration` as it accepts one in `:active`, and on success the
-  execution is `:active` on the plan's target chart. A plan that fails
-  again leaves it parked under `:park` and parked under `:refuse`.
+- `migrate/4` with a plan that applies. ADR-0013 decision 3's validation
+  against the execution refuses a terminal execution and no other status,
+  so a parked execution is migrated as an `:active` one is, and ADR-0013
+  decision 4 writes a successful migration back at `:active` on the plan's
+  `to` chart. A plan that is refused again leaves it parked: under `:park`
+  the park writes the arm it already holds, and under `:refuse` nothing is
+  written.
 - `StatifierPersistence.Executions.unpark/3` (store, execution id, opts)
   writes `:active` and nothing else: the execution goes on at the position
   it was parked at, on the chart it was already pinned to. It takes
@@ -143,16 +156,16 @@ reported and never decisive.
 
 **5. What the arm does at each kind of site.** The rule is stated per kind
 of site rather than as a complete list of a live codebase; the sites named
-are the ones read at `9cd192b`.
+are the ones read at `2d2598a`.
 
 - *Types and their documentation.* `t:execution_status/0` gains the arm;
   every typedoc or doc that lists the arms or says which are terminal says
   five arms and names `:needs_migration` as not terminal: the typedoc of
-  `t:execution_status/0` (`adapter.ex:56`, @9cd192b), of
-  `t:execution_counts/0` (`adapter.ex:128`, "The four arm keys", @9cd192b),
+  `t:execution_status/0` (`adapter.ex:56`, @2d2598a), of
+  `t:execution_counts/0` (`adapter.ex:128`, "The four arm keys", @2d2598a),
   the docs of `executions_on/2` and of
   `Storage.count_executions_by_content_hash/2`, and the `status` paragraph
-  of `docs/telemetry.md` (step stop, @9cd192b).
+  of `docs/telemetry.md` (step stop, @2d2598a).
   `t:StatifierPersistence.Execution.t/0` and `t:execution_state/0` widen
   with the type and need nothing of their own.
 - *Stored-value vocabularies.* The Ecto adapter's `@statuses` gains
@@ -161,52 +174,55 @@ are the ones read at `9cd192b`.
   count that reads a parked row raises on a missing clause.
 - *Count vocabularies.* Every map that carries one key per arm gains
   `needs_migration`: `@zero_counts` in both adapters (`ecto.ex:69`,
-  `in_memory.ex:40`, @9cd192b), which is what each adapter's
-  `count_executions_by_content_hash/2` folds onto (`ecto.ex:554`,
-  `in_memory.ex:362` in `execution_counts/2`, @9cd192b) - on the in-memory
+  `in_memory.ex:40`, @2d2598a), which is what each adapter's
+  `count_executions_by_content_hash/2` folds onto (`ecto.ex:562`,
+  `in_memory.ex:362` in `execution_counts/2`, @2d2598a) - on the in-memory
   side it is also what keeps the fold's `Map.update!/3` from raising on the
   new status, and on the Ecto side the grouped count reads the new string
   through `decode_status/1`; the nested `executions` map of
   `t:pin_counts/0` and the key list `Adapter.pin_counts/3` takes
-  (`adapter.ex:813`, `pin_counts/3`, @9cd192b).
+  (`adapter.ex:813`, `pin_counts/3`, @2d2598a).
 - *Terminal guards.* The arm is not terminal wherever a terminal set is
   tested. `step_tail/7` gains a refusal arm for it ahead of its load
   (decision 2) - without one a parked execution would step, because its
   non-terminal arm loads and steps whatever is not in the terminal list.
-  `fail_tail/3` and `cancel_tail/2` (`executions.ex:584`, `:625`, @9cd192b)
+  `fail_tail/3` and `cancel_tail/2` (`executions.ex:584`, `:625`, @2d2598a)
   keep their terminal-only discard, which is decision 2's proceed.
-  `Driver`'s private `terminal?/1` (`driver.ex:1278`, @9cd192b) answers
+  `Driver`'s private `terminal?/1` (`driver.ex:1278`, @2d2598a) answers
   `false`, so a fan-out under `:all` does not settle while a child is
   parked, as it does not while one is `:active`.
 - *Pin filters.* Every filter that reads "the parent is `:active`" or "an
   `:active` row on the hash" as a pin reads "`:active` or
-  `:needs_migration`": `Adapter.pinned?/1` (`adapter.ex:836`, @9cd192b);
-  the Ecto adapter's `children_pin_count/2`, `child_pins/2` and the
-  tombstone's `unpinned_chart/2` (`ecto.ex:579`, `:878`, `:834`, @9cd192b);
-  the in-memory `pinned_child?/3` (`in_memory.ex:395`, @9cd192b). The two
-  pin-source listings (`ecto.ex:620`, `in_memory.ex:420`, @9cd192b) keep
+  `:needs_migration`": `Adapter.pinned?/1` (`adapter.ex:836`, @2d2598a);
+  the Ecto adapter's `child_pins/2`, which `children_pin_count/2` counts
+  through, and the tombstone's `unpinned_chart/2` (`ecto.ex:890`, `:587`,
+  `:841`, @2d2598a);
+  the in-memory `pinned_child?/3` (`in_memory.ex:395`, @2d2598a). The two
+  pin-source listings (`ecto.ex:613`, `in_memory.ex:420`, @2d2598a) keep
   `:active` only, per decision 4.
 - *Status producers and reporters.* No step produces the arm:
-  `execution_status/2` (`executions.ex:1847`, @9cd192b) derives
+  `execution_status/2` (`executions.ex:1847`, @2d2598a) derives
   `:active`, `:completed` or `:failed` from a stepped position and never
   `:needs_migration`. `report_termination/5` and `report_halt/4`
-  (`executions.ex:1396`, `:1567`, @9cd192b) treat the arm as they treat
+  (`executions.ex:1396`, `:1567`, @2d2598a) treat the arm as they treat
   `:active` - nothing is terminated, nothing is reported - and no path
   reaches them with it today. `repair_terminal/4` is reached only after a
   load, which decision 2's refusal precedes. `Driver`'s `report_settled/3`
-  (`driver.ex:1189`, @9cd192b) counts a parked child in none of its three
+  (`driver.ex:1189`, @2d2598a) counts a parked child in none of its three
   terminal tallies, as it counts an `:active` one, and its private
   `maybe_answer_parent/3` answers a parent only for `:completed` and
   `:failed`, which a parked execution never is.
 - *Tests that fix the vocabulary.* Every exact-key assertion on the drained
   query's answer gains the key - the conformance suite's two unknown-hash
   cases (`lib/statifier_persistence/testing/storage_conformance.ex:710`,
-  `:1022`, @9cd192b) among them - and the conformance suite gains a parked
-  execution's count and its pin. The test that enumerates the stored arms
-  is the Ecto adapter's status round trip
+  `:1022`, @2d2598a) among them - and the conformance suite gains a parked
+  execution's count and its pin. The Ecto adapter's status round trip
   (`test/statifier_persistence/storage/ecto_test.exs:62`, "all three
-  statuses round-trip and store ADR-0004's strings", @9cd192b), which the
-  code half widens to every arm of the type. A site this list misses is
+  statuses round-trip and store ADR-0004's strings", @2d2598a) is a fixed
+  list of three of the four arms today - `:active`, `:completed` and
+  `:failed` - and enumerates nothing from the type; the code half (sp-3vv)
+  makes it cover every arm of the type, and it is then the test that
+  enumerates the stored arms. A site this list misses is
   held by the same rule: the arm is non-terminal, it pins, it is counted
   under its own key, and it takes no event.
 
@@ -226,7 +242,8 @@ column and needs no migration. Had the read found one, a version would
 have been appended; it did not.
 
 **8. What this record does not decide.** The plan format, both
-validations and `migrate/4` itself are ADR-0013's. Migrating a tree of
+validations and `migrate/4` itself are ADR-0013's (its decisions 1, 3, 4
+and 9). Migrating a tree of
 executions together - a parent and its durable children - is not decided.
 Nothing migrates an execution automatically, on a publish or at any other
 time, and nothing here parks one automatically either. Queuing a refused
@@ -240,10 +257,13 @@ own is not decided here.
 A hold's execution waits in `awaiting_pickup` with its `pickup` timer
 pending, while the library's hold document is edited: `awaiting_pickup`
 becomes `ready_for_pickup`, and the step that routes the copy to the
-pickup branch gains a `transferred` outcome. The host's first plan maps the
-routing step and its new outcome but leaves `awaiting_pickup` unmapped.
-`migrate/4` with `on_failure: :park` refuses it, because the execution's
-active state does not resolve against the target chart, and parks it: the
+pickup branch gains a `transferred` outcome. The host's first plan leaves
+`awaiting_pickup` out of its `states`, and the to chart has no state of that
+id, so under ADR-0013 decision 1 the state is unmapped. The execution is
+`:active` and stored on the plan's `from` hash, so `migrate/4` with
+`on_failure: :park` reaches ADR-0013 decision 3's validation against the
+execution, which refuses because a state in its configuration is unmapped,
+and parks it: the
 execution is `:needs_migration`, still at `awaiting_pickup` on the old
 chart, and `executions_on/2` on the old hash answers `needs_migration: 1`.
 The old chart cannot be retired while it waits.
