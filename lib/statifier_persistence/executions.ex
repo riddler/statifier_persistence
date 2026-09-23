@@ -781,6 +781,13 @@ defmodule StatifierPersistence.Executions do
     `<invoke>` children.
   - `{:invocations_coincide, {to_state_id, ordinal}, sources}` - two or more
     active invocations would land on one key.
+  - `{:invocation_outside_configuration, {state_id, ordinal}, {to_state_id,
+    to_ordinal}}` - an active invocation kept by the same-ordinal default,
+    or moved through the plan's `invocations`, onto a state that is not in
+    the transformed configuration (ADR-0013's 2026-09-23 Amendment,
+    finding 2). Nothing would reach its child there: the engine cancels an
+    invocation only when its state exits, so the child would outlive the
+    parent. Move it onto a state the migrated configuration holds.
   - `{:datamodel_refused, index, operation, :key_present | :key_absent}` -
     a datamodel operation that does not apply at its place in the order.
   - `{:pending_timers, states, source_counts}` - the plan leaves unmapped
@@ -813,6 +820,8 @@ defmodule StatifierPersistence.Executions do
              {Plan.state_id(), non_neg_integer()}, non_neg_integer()}
           | {:invocations_coincide, {Plan.state_id(), non_neg_integer()},
              [{Plan.state_id(), non_neg_integer()}]}
+          | {:invocation_outside_configuration, {Plan.state_id(), non_neg_integer()},
+             {Plan.state_id(), non_neg_integer()}}
           | {:datamodel_refused, non_neg_integer(), Plan.datamodel_op(),
              :key_present | :key_absent}
           | {:pending_timers, [Plan.state_id() | non_neg_integer()],

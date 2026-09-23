@@ -46,6 +46,10 @@ defmodule StatifierPersistence.MigrateCasesTest do
     child; it is refused as an illegal configuration, nothing written, and
     parks under `:park` (ADR-0013's invocation and legality Amendment,
     finding 3). The drop case above is the legal drop that still migrates.
+  - notice moved off the configuration refused - a plan that keeps every
+    state and moves the notice onto a state the hold is not in is refused,
+    nothing written, and parks under `:park` (the same Amendment, finding
+    2).
 
   And the paths the invocation, history and lock rules add: an invocation
   whose same-ordinal default is out of range, two invocations that would
@@ -153,6 +157,41 @@ defmodule StatifierPersistence.MigrateCasesTest do
         <transition event="copy.collected" target="fulfilled"/>
         <transition event="pickup.expired" target="expired"/>
         <transition event="hold.cancelled" target="cancelled"/>
+      </state>
+    </state>
+    <final id="fulfilled"/>
+    <final id="expired"/>
+    <final id="cancelled"/>
+  </scxml>
+  """
+
+  # A revision that keeps every state id, adds a way to cancel a hold
+  # waiting at the desk, and adds a `stash` beside the wait state whose
+  # one `<invoke>` also authors `id="notice"`. A hold never enters it.
+  @hold_stash """
+  <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="hold">
+    <datamodel>
+      <data id="branch" expr="'central'"/>
+    </datamodel>
+    <state id="hold" initial="placed">
+      <state id="placed">
+        <transition event="copy.available" target="routing"/>
+      </state>
+      <state id="routing">
+        <transition event="copy.routed" target="awaiting_pickup"/>
+      </state>
+      <state id="awaiting_pickup">
+        <onentry>
+          <send id="pickup" event="pickup.expired" delay="259200s"/>
+        </onentry>
+        <invoke id="notice" type="library:notify_patron"/>
+        <invoke id="slip" type="library:print_slip"/>
+        <transition event="copy.collected" target="fulfilled"/>
+        <transition event="pickup.expired" target="expired"/>
+        <transition event="hold.cancelled" target="cancelled"/>
+      </state>
+      <state id="stash">
+        <invoke id="notice" type="library:notify_patron"/>
       </state>
     </state>
     <final id="fulfilled"/>
@@ -412,6 +451,7 @@ defmodule StatifierPersistence.MigrateCasesTest do
           before: @hold_before,
           after: @hold_after,
           cancellable: @hold_cancellable,
+          stash: @hold_stash,
           two_regions_before: @two_regions_before,
           two_regions_after: @two_regions_after,
           no_slip: @hold_no_slip,
@@ -1041,6 +1081,27 @@ defmodule StatifierPersistence.MigrateCasesTest do
                migrate(ctx, "hold-dropped-leaf", plan, :after, on_failure: :park)
 
       assert snapshot(ctx, "hold-dropped-leaf") == parked(before)
+    end
+  end
+
+  describe "an invocation lands in the transformed configuration" do
+    # sabotage: had outside_configuration/2 (migration/transform.ex) answer
+    # [] -> red over both adapters: the hold migrated with the notice on
+    # `stash`, a state it is not in. Verified red, reverted from a copy.
+    test "notice moved off the configuration: refused, nothing written", ctx do
+      before = waiting_hold(ctx, "hold-stashed")
+      plan = plan!(ctx, :stash, invocations: [{"awaiting_pickup", 0, "stash", 0}])
+      finding = {:invocation_outside_configuration, {"awaiting_pickup", 0}, {"stash", 0}}
+
+      assert {:error, {:migration_refused, [^finding]}} =
+               migrate(ctx, "hold-stashed", plan, :stash)
+
+      assert snapshot(ctx, "hold-stashed") == before
+
+      assert {:parked, {:migration_refused, [^finding]}} =
+               migrate(ctx, "hold-stashed", plan, :stash, on_failure: :park)
+
+      assert snapshot(ctx, "hold-stashed") == parked(before)
     end
   end
 end
