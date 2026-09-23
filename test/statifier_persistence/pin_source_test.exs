@@ -33,10 +33,13 @@ defmodule StatifierPersistence.PinSourceTest do
   end
 
   # sabotage: dropped the context match in TimerQueuePinSource.pins/2 and
-  # returned a constant -> red (the count stopped following the ids handed in)
+  # returned a constant (0, then 2) -> red both times (the count stopped
+  # following the three ids handed in)
   test "a source answers from the execution ids it is handed, not the hash" do
-    assert {:ok, %{TimerQueuePinSource => %{pending_timers: 0}}} =
-             PinSource.collect([TimerQueuePinSource], @hash, %{execution_ids: []})
+    context = %{execution_ids: ["exec_loan_01J4", "exec_loan_01J5", "exec_hold_01J6"]}
+
+    assert {:ok, %{TimerQueuePinSource => %{pending_timers: 3}}} =
+             PinSource.collect([TimerQueuePinSource], @hash, context)
   end
 
   # sabotage: removed the `rescue` clause from collect/3's ask -> red (the
@@ -48,6 +51,35 @@ defmodule StatifierPersistence.PinSourceTest do
     assert Exception.message(exception) =~ "unreachable"
   end
 
+  # sabotage: removed the `:throw` clause from ask/3's `catch` -> red (the
+  # throw escaped collect/3 instead of being reported as a refusal)
+  test "a throwing source is an error naming the module, never a zero" do
+    defmodule ThrowingPinSource do
+      @moduledoc false
+      def pins(_content_hash, _context), do: throw(:hold_queue_busy)
+    end
+
+    assert PinSource.collect([ThrowingPinSource], @hash, @context) ==
+             {:error, {ThrowingPinSource, {:thrown, :hold_queue_busy}}}
+  end
+
+  # sabotage: removed the `:exit` clause from ask/3's `catch` -> red (the
+  # exit escaped collect/3 and took the test process with it instead of
+  # being reported as a refusal)
+  test "an exiting source is an error naming the module, never a zero" do
+    defmodule ExitingPinSource do
+      @moduledoc false
+      def pins(_content_hash, _context) do
+        exit({:timeout, {GenServer, :call, [:hold_queue, :count_pending, 5_000]}})
+      end
+    end
+
+    assert PinSource.collect([ExitingPinSource], @hash, @context) ==
+             {:error,
+              {ExitingPinSource,
+               {:exited, {:timeout, {GenServer, :call, [:hold_queue, :count_pending, 5_000]}}}}}
+  end
+
   # sabotage: made ask/3 accept any return value -> red (the keyword list came
   # back as {:ok, ...} where it must be an error)
   test "a malformed return is an error naming the module, never a zero" do
@@ -56,7 +88,8 @@ defmodule StatifierPersistence.PinSourceTest do
   end
 
   # sabotage: replaced reduce_while with reduce so the walk continued past a
-  # failure -> red (the refusal was overwritten by the later source's counts)
+  # failure -> red (the next iteration raised FunctionClauseError, because the
+  # reducer's {:ok, collected} head does not match the refusal accumulator)
   test "the first failing source stops the walk and no later count is reported" do
     assert PinSource.collect(
              [RefusingPinSource, TimerQueuePinSource],

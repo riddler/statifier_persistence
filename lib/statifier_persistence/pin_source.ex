@@ -34,6 +34,11 @@ defmodule StatifierPersistence.PinSource do
   took. Returning anything that is not a map of atom to non-negative integer
   is the same kind of failure and gets the same answer.
 
+  A source that throws, or exits - a `GenServer.call/3` that times out inside
+  it is the usual case - has not answered either, and is refused the same
+  way. Each failure keeps its own reason, so a host can tell them apart: see
+  `t:reason/0`.
+
   ## This package ships no source
 
   There is no implementation of this behaviour in `lib/`, and `mix.exs` gains
@@ -80,13 +85,27 @@ defmodule StatifierPersistence.PinSource do
   @typedoc "A source's own named counts."
   @type counts :: %{atom() => non_neg_integer()}
 
-  @typedoc "Why a source did not answer."
-  @type reason :: {:raised, Exception.t()} | {:invalid_return, term()}
+  @typedoc """
+  Why a source did not answer.
+
+  - `{:raised, exception}` - `pins/2` raised `exception`.
+  - `{:thrown, value}` - `pins/2` threw `value`.
+  - `{:exited, reason}` - `pins/2` exited with `reason`, as a
+    `GenServer.call/3` that times out does.
+  - `{:invalid_return, value}` - `pins/2` returned `value`, which is not a
+    map of atom to non-negative integer.
+  """
+  @type reason ::
+          {:raised, Exception.t()}
+          | {:thrown, term()}
+          | {:exited, term()}
+          | {:invalid_return, term()}
 
   @doc """
   Answers this source's named counts for `content_hash`.
 
-  Raise to refuse: a source that cannot answer must not answer zero.
+  Raise to refuse: a source that cannot answer must not answer zero. A throw
+  or an exit refuses too.
   """
   @callback pins(content_hash :: String.t(), context :: context()) :: counts()
 
@@ -94,9 +113,11 @@ defmodule StatifierPersistence.PinSource do
   Calls each source in order and collects its counts under its module name.
 
   Answers `{:ok, %{module => counts}}` when every source answered, and
-  `{:error, {module, reason}}` at the first source that raised or returned
-  anything but a map of atom to non-negative integer. An empty source list
-  answers `{:ok, %{}}`.
+  `{:error, {module, reason}}` at the first source that raised, threw, exited
+  or returned anything but a map of atom to non-negative integer, where
+  `reason` is `{:raised, exception}`, `{:thrown, value}`, `{:exited, reason}`
+  or `{:invalid_return, value}` (`t:reason/0`). An empty source list answers
+  `{:ok, %{}}`.
 
   The first failure stops the walk: the retirement is already refused, and the
   remaining sources' counts cannot change that.
@@ -120,6 +141,9 @@ defmodule StatifierPersistence.PinSource do
       else: {:error, {:invalid_return, counts}}
   rescue
     exception -> {:error, {:raised, exception}}
+  catch
+    :throw, value -> {:error, {:thrown, value}}
+    :exit, reason -> {:error, {:exited, reason}}
   end
 
   defp valid_counts?(counts) do
