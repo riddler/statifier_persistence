@@ -1,6 +1,9 @@
 # ADR-0013: The migration plan: one plan per pair of chart hashes, a transform over the engine's export applied by its import, two validations, whole or nothing, a telemetry event and no stored trace, timers read through host pin sources and refused without one, children untouched, three owners
 
-Status: proposed (2026-09-23, sp-bn0)
+Status: accepted (2026-09-23, sp-bn0; proposed the same day and accepted once
+the code beads had landed against it: sp-mz3 the plan struct, sp-7a9
+`Executions.migrate/4`, sp-7cj children untouched, sp-pq4 timers, sp-9tj4 the
+migrate cases)
 
 ## Context
 
