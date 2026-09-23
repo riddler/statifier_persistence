@@ -521,3 +521,26 @@ decision 3's capability covers two callbacks rather than one, why widening
 it was safe before `0.13.0` and would not be again, and the corrected totals
 of callbacks and predicates. A reader scanning the headings for where the
 capability's scope was settled finds it under the sp-brx Note.
+
+## Note (2026-09-23, sp-zf8): a fifth stored arm, `:needs_migration`, adds a key to the drained query and pins its chart
+
+Pure addition: nothing above is edited, and this record is read at the date
+its sections were decided. This Note decides nothing; ADR-0014 (the fifth
+execution status, proposed) does, and this Note names where it reaches the
+enumerations above.
+
+**Decision 2's four stored arms become five.** ADR-0014 decision 1 adds
+`:needs_migration`, the status a parking migration writes. It is outside
+the terminal fold: `:completed`, `:failed` and `:cancelled` remain the only
+arms decision 2's word covers.
+
+**Decision 3's map gains a sixth key.** `count_executions_by_content_hash/2`
+and `Executions.executions_on/2` answer `needs_migration` beside the four
+arm keys and `children` (ADR-0014 decision 4).
+
+**Decision 1's blocking set keeps its four kinds, and two of them read two
+arms.** An execution row on the hash in `:active` or `:needs_migration`
+pins it, and a durable child's linkage pin counts while its parent is in
+either arm (ADR-0014 decision 4). The listing handed to a pin source
+(`list_active_execution_ids_by_content_hash/2`) stays `:active` only; the
+three terminal arms still pin nothing.
