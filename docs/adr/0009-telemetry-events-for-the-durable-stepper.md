@@ -984,13 +984,21 @@ It is emitted from the step that failed (`resolve_and_answer/4`, in this
 change), which is reached by the automatic answer and by
 `Driver.resolve_and_answer_parent/3`. The linkage has already been read at
 that point, so `child_execution_id`, `parent_execution_id`, `invoke_id` and
-`child_count` are the same values a delivered answer reports.
+`child_count` are the same values a delivered answer reports. This widens
+the sp-6neq Amendment's decision 1, under which the event fires once per
+answer after the parent's door returns: it now also fires when no door ran,
+and then only with one of these two `delivery` values.
 
 **3. `outcome` is the child's own and `failed_count` is `nil`.** No door
 ran and, for a fan-out, no settlement was entered, so there is no
 assembled answer to take the invocation's aggregate from or to count.
 `outcome` is the child's `:done` or `:failed`, which is the same value it
-has on the single-child path.
+has on the single-child path. For a fan-out this departs from the sp-8wv
+Amendment's decision 3 on two values: there `outcome` is the invocation's
+aggregate and `failed_count` an integer, and here they are the child's own
+outcome and `nil`. A handler tells the two apart by `delivery`: the
+sp-8wv reading holds on every value except `:parent_unfetched` and
+`:parent_chart_unresolved`.
 
 **4. Decision 7 holds.** Neither the fetch's error term nor anything the
 resolver returned travels; `delivery` stays an atom from a closed
@@ -1010,5 +1018,7 @@ the linkage comes from, is still `:ok` from
 no linkage to name a parent from. The settlement section's own storage
 errors on a fan-out are likewise unchanged.
 
-No other decision moves, and decision 8's count of event names does not
-change.
+Two earlier decisions move, each only on these two `delivery` values: the
+sp-6neq Amendment's decision 1 (decision 2 above) and the sp-8wv
+Amendment's decision 3 (decision 3 above). Decision 8's count of event
+names does not change.
