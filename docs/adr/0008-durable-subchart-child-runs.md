@@ -1101,7 +1101,7 @@ own exclusion, and may run inside E's parent's.
 
 ## Amendment (2026-09-23, sp-3l2a): a child's linkage pin follows a migration of that child, and nothing else rewrites it
 
-Status of this amendment: proposed (2026-09-23, sp-3l2a). The record above
+Status of this amendment: accepted (2026-09-23, sp-3l2a). The record above
 stays accepted; this amendment is proposed until the operator accepts it.
 
 Decision 2 makes the linkage's chart-identity pin mandatory: the same
@@ -1136,3 +1136,31 @@ The pin keeps the meaning decision 2 gave it. After the rewrite it is
 again the identity hash of the chart the child's own row is pinned to,
 which is what decision 2 says it records, and ADR-0012's retirement counts
 the child's pin against its new chart rather than the one it left.
+
+## Note (2026-09-23, sp-o2ev): the sp-3l2a Amendment is accepted
+
+The operator accepted the 2026-09-23 sp-3l2a Amendment on 2026-09-23,
+after the code that implements it shipped in statifier_persistence 0.15.0
+(tag `v0.15.0`, `ae9c855`). That Amendment's own status line flips in
+place from proposed to accepted, and the record above stays accepted. Its
+"this amendment is proposed until the operator accepts it" is met here
+and stays as written. Every cite below was read on `main` at `ae9c855`.
+
+What was re-read before the flip:
+
+- **One key is rewritten.** A re-pin rewrites only `content_hash` under
+  `Linkage.reserved_key/0` and carries every other metadata key forward
+  (`lib/statifier_persistence/storage/ecto.ex`, `linkage_update/3`;
+  `lib/statifier_persistence/storage/in_memory.ex`, `repin_linkage/2`).
+  `parent_execution_id`, `invoke_id`, `child_index`, `child_count` and
+  `policy` are written at create only
+  (`lib/statifier_persistence/execution/linkage.ex`, the struct).
+- **Only the tree command rewrites it.** In `lib/`,
+  `Storage.write_tree_migration/2` is called only by
+  `Executions.migrate_tree/4`, which writes a pin for a named node that
+  carries a linkage (`lib/statifier_persistence/executions.ex`,
+  `linkage_pin/3`). A child absent from `plans` is neither locked nor
+  written.
+- **`migrate/4` rewrites no pin.** It writes through
+  `Storage.update_execution/5`, which carries the stored metadata forward
+  (`executions.ex`, `repin/5`).

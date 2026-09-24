@@ -627,3 +627,38 @@ adapters).
   engine's import accepts. Refused with `illegal_configuration`. A drop of
   a whole region of a parallel - the parallel keeping its other regions -
   still migrates, because that configuration is legal.
+
+## Note (2026-09-23, sp-o2ev): the sp-i5ha Amendment re-read at v0.15.0
+
+The operator accepted the 2026-09-23 sp-i5ha Amendment, and its status
+line above reads accepted on `main` through the operator's own change
+(`c888a9a`). This Note changes no status line. It records that every claim
+of the Amendment was re-read on `main` at `v0.15.0` (`ae9c855`), the
+release that carries its code, and that every claim held. The sp-pq4
+Amendment's re-read is the Note below. Every cite below was read on
+`main` at `ae9c855`.
+
+What was re-read:
+
+- **Finding 1.** An authored id must match, and an unnamed element must
+  meet an unnamed one with a byte-equal source slice. A machine with no
+  source never matches, so the rule fails closed
+  (`lib/statifier_persistence/migration/transform.ex`,
+  `element_findings/3` and `same_element?/2`). Only a target in range is
+  compared.
+- **Finding 2.** An invocation whose target state is not in the
+  transformed configuration is refused (`transform.ex`,
+  `outside_configuration/2`).
+- **Finding 3.** The transformed configuration is checked with the root
+  added, by the four rules and no further, using only public
+  `Statifier.Machine` functions (`transform.ex`,
+  `configuration_findings/2` and `legal_configuration?/2`). The finding
+  names the configuration, sorted.
+- **Where the findings arrive.** `t:migration_finding/0` carries the three
+  arms (`lib/statifier_persistence/executions.ex`). Each finding comes back
+  inside `{:migration_refused, findings}` and parks under `:park`
+  (`migrate_loaded/6`, `refuse/4`).
+- **No predicate.** Nothing in `lib/` calls `compatible_at?/3`, and
+  `mix.lock` resolves statifier 2.6.0 under `~> 2.6`.
+- **What a host sees.** The 0.15.0 section of `CHANGELOG.md` lists each
+  finding as a Breaking entry and says what a host does about it.
