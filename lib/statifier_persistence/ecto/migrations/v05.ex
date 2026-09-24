@@ -38,7 +38,9 @@ if Code.ensure_loaded?(Ecto.Migration) do
 
     The table carries the host's `:leading_columns`, if it configured any,
     immediately after `id` and in the order given, on the same terms as
-    V01's three tables (`StatifierPersistence.Ecto.Migrations.V01`).
+    V01's three tables (`StatifierPersistence.Ecto.Migrations.V01`), and
+    takes `:timestamps_position` and `:column_collations` on those terms
+    too.
     """
 
     use Ecto.Migration
@@ -55,18 +57,31 @@ if Code.ensure_loaded?(Ecto.Migration) do
 
         for {name, {type, opts}} <- config.leading_columns, do: add(name, type, opts)
 
-        add(:execution_id, :text, null: false)
+        if config.timestamps_position == :leading, do: timestamps(type: :utc_datetime_usec)
+
+        add(:execution_id, :text, collated(config, :execution_id, null: false))
         add(:seq, :bigint, null: false)
-        add(:door, :text, null: false)
+        add(:door, :text, collated(config, :door, null: false))
         # Nullable by decision: a null blob is the closed marker of
         # ADR-0010 decision 6, never an absent payload.
         add(:input_blob, :binary, null: true)
-        timestamps(type: :utc_datetime_usec)
+
+        if config.timestamps_position == :trailing,
+          do: timestamps(type: :utc_datetime_usec)
       end
 
       create(unique_index(inputs, [:execution_id, :seq], prefix: config.prefix))
 
       :ok
+    end
+
+    # The `add/3` opts for a package text column, carrying the collation
+    # `:column_collations` names for it, if any.
+    defp collated(%Config{column_collations: collations}, name, opts) do
+      case Keyword.fetch(collations, name) do
+        {:ok, collation} -> Keyword.put(opts, :collation, collation)
+        :error -> opts
+      end
     end
 
     @doc "Drops the input log table."

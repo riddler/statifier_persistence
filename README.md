@@ -1013,6 +1013,57 @@ The option only places the column:
   declare the column, so every row this package inserts leaves it to the
   column's default - `NULL` until you set one.
 
+Two more options exist for a host that wrote these tables by hand and
+wants the helper to build exactly what it wrote:
+
+    defmodule MyApp.Persistence do
+      use StatifierPersistence.Ecto,
+        repo: MyApp.Repo,
+        leading_columns: [tenant_id: {:text, null: true}],
+        timestamps_position: :leading,
+        column_collations: [execution_id: "C"]
+    end
+
+- **`timestamps_position: :leading`** puts `inserted_at` and
+  `updated_at` immediately after the leading columns - after `id` when
+  there are none - in every table V01 and V05 create, instead of last.
+  The default, `:trailing`, is the layout this package has always
+  built. A column a later version adds (`metadata`, `outcome_blob`,
+  `retired_at`, `retired_by`) lands at the end either way.
+- **`column_collations: [name: collation]`** declares that package
+  column with that collation wherever V01 or V05 creates it: above,
+  `execution_id` is `COLLATE "C"` on both the executions and the inputs
+  table. The names it takes are the text columns those two versions
+  declare - `content_hash`, `session_id`, `execution_id`, `status`,
+  `failure` and `door` - and the collation must be one your database
+  knows. A column of your own takes its collation in its
+  `:leading_columns` opts (`collation: "C"`, which `Ecto.Migration.add/3`
+  already accepts).
+
+Like `:leading_columns`, both apply to a fresh create only.
+
+To replace a hand-written migration with the helper **at the same
+migration version**, so that a database that already ran it runs
+nothing again:
+
+1. Configure the options above until the helper's tables match yours.
+   Prove it on a scratch database: build one copy with your migration
+   and one with the helper under a different `:table_prefix`, then
+   compare `information_schema.columns` (name, type, collation,
+   nullability, ordinal position) and `pg_indexes` table for table,
+   with the prefix stripped. The diff must be empty. This package's own
+   suite makes exactly that comparison against a hand-written mirror.
+2. Replace the body of your migration with the helper calls covering
+   the versions it stood in for, capped with `from:` and `version:` as
+   "The Ecto adapter" above describes - a migration that stood in for
+   V01 through V05 becomes `up(for: MyApp.Persistence, version: 5)`
+   with `down(for: MyApp.Persistence, from: 5)`. Keep the file's name
+   and version number.
+
+`Ecto.Migrator` records that version as already run on every existing
+database, so the new body only ever runs on a fresh one, where it
+builds what the comparison proved identical.
+
 ## Pin sources
 
 Some of what holds a chart in use is not in this package's tables: a

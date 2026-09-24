@@ -48,6 +48,26 @@ defmodule StatifierPersistence.Ecto.Config do
       already had; the generated schemas do not declare it, so the
       package never reads or writes it; and a default or a `NOT NULL`
       belongs to a later migration of the host's own.
+    * `:timestamps_position` - where the migrations helper places
+      `inserted_at` and `updated_at` in every table V01 and V05 create,
+      `:trailing` (default: last in the `CREATE TABLE`, the package's
+      layout since V01) or `:leading` (immediately after `id` and the
+      `:leading_columns`). Like `:leading_columns` it only places the two
+      columns, on a fresh create: an existing table keeps its layout, and
+      a column a later version adds (V02's `metadata`, V03's
+      `outcome_blob`, V07's `retired_at` and `retired_by`) still lands
+      at the end.
+    * `:column_collations` - a collation per package column, applied
+      where V01 or V05 declares that column in a `CREATE TABLE`, default
+      `[]` (every column takes the database default). A keyword list of
+      `name: collation`, the collation a string:
+      `column_collations: [execution_id: "C"]` declares `execution_id`
+      `COLLATE "C"` on the executions and inputs tables. The names are
+      the text columns those two versions declare (`content_hash`,
+      `session_id`, `execution_id`, `status`, `failure`, `door`); a
+      host column takes its collation in its own `:leading_columns`
+      opts instead. The collation is passed to `Ecto.Migration.add/3`
+      as its `:collation` option, so it must be one the database knows.
 
   Unknown options and unknown table keys raise `ArgumentError` - at the
   host's compile time when reached through `use`.
@@ -62,9 +82,13 @@ defmodule StatifierPersistence.Ecto.Config do
     :tables,
     :prefix,
     :blob_type,
-    :leading_columns
+    :leading_columns,
+    :timestamps_position,
+    :column_collations
   ]
   @table_keys [:charts, :positions, :executions, :inputs]
+  @timestamps_positions [:trailing, :leading]
+  @collatable_columns [:content_hash, :session_id, :execution_id, :status, :failure, :door]
 
   @enforce_keys @known_options
   defstruct @known_options
@@ -77,7 +101,9 @@ defmodule StatifierPersistence.Ecto.Config do
           tables: %{optional(KeyGenerator.table()) => String.t()},
           prefix: String.t() | nil,
           blob_type: :binary | {module(), keyword()},
-          leading_columns: [{atom(), {term(), keyword()}}]
+          leading_columns: [{atom(), {term(), keyword()}}],
+          timestamps_position: :trailing | :leading,
+          column_collations: [{atom(), String.t()}]
         }
 
   @doc """
@@ -95,7 +121,10 @@ defmodule StatifierPersistence.Ecto.Config do
       tables: validate_tables!(Keyword.get(opts, :tables, %{})),
       prefix: validate_prefix!(Keyword.get(opts, :prefix)),
       blob_type: validate_blob_type!(Keyword.get(opts, :blob_type, :binary)),
-      leading_columns: validate_leading_columns!(Keyword.get(opts, :leading_columns, []))
+      leading_columns: validate_leading_columns!(Keyword.get(opts, :leading_columns, [])),
+      timestamps_position:
+        validate_timestamps_position!(Keyword.get(opts, :timestamps_position, :trailing)),
+      column_collations: validate_column_collations!(Keyword.get(opts, :column_collations, []))
     }
   end
 
@@ -258,6 +287,57 @@ defmodule StatifierPersistence.Ecto.Config do
     raise ArgumentError,
           "the :leading_columns entry for #{inspect(name)} must be {type, opts}, " <>
             "got: #{inspect(other)}"
+  end
+
+  defp validate_timestamps_position!(position) when position in @timestamps_positions,
+    do: position
+
+  defp validate_timestamps_position!(other) do
+    raise ArgumentError,
+          "the :timestamps_position option must be one of " <>
+            "#{inspect(@timestamps_positions)}, got: #{inspect(other)}"
+  end
+
+  defp validate_column_collations!(collations) when is_list(collations) do
+    if not Keyword.keyword?(collations) do
+      raise ArgumentError,
+            "the :column_collations option must be a keyword list of name: collation, " <>
+              "got: #{inspect(collations)}"
+    end
+
+    Enum.each(collations, &validate_column_collation!/1)
+
+    case Keyword.keys(collations) -- Enum.uniq(Keyword.keys(collations)) do
+      [] ->
+        collations
+
+      duplicated ->
+        raise ArgumentError,
+              "the :column_collations option names #{inspect(Enum.uniq(duplicated))} " <>
+                "more than once"
+    end
+  end
+
+  defp validate_column_collations!(other) do
+    raise ArgumentError,
+          "the :column_collations option must be a keyword list of name: collation, " <>
+            "got: #{inspect(other)}"
+  end
+
+  defp validate_column_collation!({name, collation})
+       when name in @collatable_columns and is_binary(collation) and collation != "",
+       do: :ok
+
+  defp validate_column_collation!({name, collation}) when name in @collatable_columns do
+    raise ArgumentError,
+          "the :column_collations entry for #{inspect(name)} must be a non-empty string, " <>
+            "got: #{inspect(collation)}"
+  end
+
+  defp validate_column_collation!({name, _collation}) do
+    raise ArgumentError,
+          "unknown column #{inspect(name)} in :column_collations; " <>
+            "known columns are #{inspect(@collatable_columns)}"
   end
 
   defp ecto_type?(module), do: function_exported?(module, :type, 0)

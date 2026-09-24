@@ -28,6 +28,14 @@ if Code.ensure_loaded?(Ecto.Migration) do
     since a column a later `ALTER TABLE` adds lands at the end. They are
     added as configured and nothing more: a default or a `NOT NULL` is a
     later migration of the host's own.
+
+    Two further options shape these three tables and nothing else. Under
+    `timestamps_position: :leading` the `inserted_at` / `updated_at` pair
+    follows the leading columns instead of closing each table, and
+    `:column_collations` gives a text column declared here the collation
+    named for it. Both exist so a host that once wrote these tables by
+    hand can be matched column for column; the default for each is the
+    layout above, unchanged.
     """
 
     use Ecto.Migration
@@ -48,10 +56,10 @@ if Code.ensure_loaded?(Ecto.Migration) do
       create table(charts, primary_key: false, prefix: config.prefix) do
         add(:id, pk_type, primary_key: true)
         add_leading_columns(config)
-        add(:content_hash, :text, null: false)
+        add(:content_hash, :text, collated(config, :content_hash, null: false))
         add(:identity_blob, :binary, null: false)
         add(:chart_blob, :binary, null: false)
-        timestamps(type: :utc_datetime_usec)
+        add_trailing_timestamps(config)
       end
 
       create(unique_index(charts, [:content_hash], prefix: config.prefix))
@@ -61,11 +69,11 @@ if Code.ensure_loaded?(Ecto.Migration) do
       create table(positions, primary_key: false, prefix: config.prefix) do
         add(:id, pk_type, primary_key: true)
         add_leading_columns(config)
-        add(:session_id, :text, null: false)
-        add(:content_hash, :text, null: false)
+        add(:session_id, :text, collated(config, :session_id, null: false))
+        add(:content_hash, :text, collated(config, :content_hash, null: false))
         add(:identity_blob, :binary, null: false)
         add(:position_blob, :binary, null: false)
-        timestamps(type: :utc_datetime_usec)
+        add_trailing_timestamps(config)
       end
 
       create(unique_index(positions, [:session_id], prefix: config.prefix))
@@ -75,16 +83,16 @@ if Code.ensure_loaded?(Ecto.Migration) do
       create table(executions, primary_key: false, prefix: config.prefix) do
         add(:id, pk_type, primary_key: true)
         add_leading_columns(config)
-        add(:execution_id, :text, null: false)
-        add(:status, :text, null: false)
-        add(:content_hash, :text, null: false)
+        add(:execution_id, :text, collated(config, :execution_id, null: false))
+        add(:status, :text, collated(config, :status, null: false))
+        add(:content_hash, :text, collated(config, :content_hash, null: false))
         add(:identity_blob, :binary, null: false)
         add(:position_blob, :binary, null: true)
-        add(:failure, :text, null: true)
+        add(:failure, :text, collated(config, :failure, null: true))
         # Nullable by design (ADR-0002 decision 5): library code does not
         # populate it yet.
-        add(:session_id, :text, null: true)
-        timestamps(type: :utc_datetime_usec)
+        add(:session_id, :text, collated(config, :session_id, null: true))
+        add_trailing_timestamps(config)
       end
 
       create(unique_index(executions, [:execution_id], prefix: config.prefix))
@@ -93,9 +101,27 @@ if Code.ensure_loaded?(Ecto.Migration) do
     end
 
     # Called inside each `create table` block, right after `id`: `add/3`
-    # appends to the table being created, so these land at positions 2..n.
-    defp add_leading_columns(%Config{leading_columns: columns}) do
+    # appends to the table being created, so these land at positions 2..n,
+    # followed by the timestamp pair when it is configured to lead.
+    defp add_leading_columns(%Config{leading_columns: columns} = config) do
       for {name, {type, opts}} <- columns, do: add(name, type, opts)
+
+      if config.timestamps_position == :leading, do: timestamps(type: :utc_datetime_usec)
+    end
+
+    # Called last inside each `create table` block: the package's layout
+    # unless the timestamp pair already went in with the leading columns.
+    defp add_trailing_timestamps(%Config{timestamps_position: position}) do
+      if position == :trailing, do: timestamps(type: :utc_datetime_usec)
+    end
+
+    # The `add/3` opts for a package text column, carrying the collation
+    # `:column_collations` names for it, if any.
+    defp collated(%Config{column_collations: collations}, name, opts) do
+      case Keyword.fetch(collations, name) do
+        {:ok, collation} -> Keyword.put(opts, :collation, collation)
+        :error -> opts
+      end
     end
 
     @doc "Drops the V01 tables in reverse creation order."
