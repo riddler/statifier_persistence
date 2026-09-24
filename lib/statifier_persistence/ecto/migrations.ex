@@ -183,8 +183,9 @@ if Code.ensure_loaded?(Ecto.Migration) do
         end
 
     Existing rows, terminal ones included, read `ended_at` as `nil`: the
-    version backfills nothing. `StatifierPersistence.Ecto.Migrations.V08`
-    records why.
+    version backfills nothing, and a terminal one keeps reading `nil` until
+    a later terminal write stamps it with that write's time.
+    `StatifierPersistence.Ecto.Migrations.V08` records why.
 
     `expected_version/0` answers what that newest version is. A host that
     delegates its migrations here never needs it; a host whose schema is

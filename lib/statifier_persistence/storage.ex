@@ -43,10 +43,12 @@ defmodule StatifierPersistence.Storage do
   `:cancelled`), with `DateTime.utc_now/0`, and leaves it `nil` otherwise.
   The adapter keeps a stamp already stored
   (`c:StatifierPersistence.Storage.Adapter.update_execution/2`), so the
-  stamp an execution carries is the time of the first write that made it
-  terminal, and a later write of a terminal row cannot move it. A write
-  that is not terminal - `write_tree_migration/2`'s re-pins and parks
-  included - never clears one.
+  stamp an execution carries is the time of the first terminal write its
+  row took while it had none, and no later write moves it. A write that
+  is not terminal - `write_tree_migration/2`'s re-pins and parks, and an
+  `update_execution/5` or `update_execution_status/4` putting a row back
+  to `:active` - never clears one, so a row can carry a stamp while its
+  status is not terminal.
 
   Every function here returns an error tuple instead of throwing; nothing
   in this module ever downgrades a failure to a default value.

@@ -1855,12 +1855,22 @@ defmodule StatifierPersistence.Executions do
 
   The answer is read off the stamp, not the status. Every write that takes
   an execution into `:completed`, `:failed` or `:cancelled` stamps
-  `ended_at`, and nothing clears or moves a stamp once written, so for an
-  execution this package carried into its terminal status the two agree.
-  They part only where no time is stored for when the execution ended: a
-  row that was already terminal before V08 of the migrations helper added
-  the column, or a record from an adapter that does not store the field.
-  Such an execution keeps its terminal status and reads `false` here.
+  `ended_at` unless the row already holds a stamp, and nothing clears or
+  moves a stamp once written. So for an execution this package took into
+  its terminal status, and whose row nothing has since written back to
+  another status, the two agree. They disagree in three cases:
+
+  - A stamped row written back to a status that is not terminal - through
+    `StatifierPersistence.Storage.update_execution/5` or
+    `update_execution_status/4` with `:active`, say - keeps its stamp, so
+    that execution is not terminal and answers `true`.
+  - A row that was already terminal before V08 of the migrations helper
+    added the column has no stamp and answers `false` - until a later
+    terminal write reaches it (a re-delivered settlement recording a
+    child's answer is one) and stamps it with that write's time, not the
+    time it ended.
+  - A record from an adapter that does not store the field carries no
+    stamp, so a terminal execution from it answers `false`.
 
   Pure: `execution` is the struct any function in this module handed back,
   or `StatifierPersistence.Execution.from_record/1` built from a fetched

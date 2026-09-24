@@ -6,10 +6,12 @@ defmodule StatifierPersistence.Execution do
   `StatifierPersistence.Storage.load_execution_position/3` path; this struct
   carries the fields a host reads to decide what to do with an execution.
 
-  `ended_at` is when the execution first reached a terminal status, `nil`
-  until it does - the stamp the stored record carries (V08 of the
-  migrations helper on the Ecto adapter), never rewritten once written.
-  `StatifierPersistence.Executions.ended?/1` reads it.
+  `ended_at` is the stamp the stored record carries (V08 of the
+  migrations helper on the Ecto adapter): the time of the first terminal
+  write the row received while it had no stamp, `nil` until then, and
+  never moved or cleared once written.
+  `StatifierPersistence.Executions.ended?/1` reads it, and says where the
+  stamp and the status can disagree.
   """
 
   alias StatifierPersistence.Storage.Adapter
