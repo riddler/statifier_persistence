@@ -10,6 +10,69 @@ fragment in [`changelog.d/`](https://github.com/riddler/statifier_persistence/bl
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
 
+## [0.17.0] 2026-09-24
+
+Feature release: an execution records when it ended, and a host can clear
+what a finished execution no longer needs. `ended_at` is stamped by the
+first write that takes an execution to `:completed`, `:failed` or
+`:cancelled`, `StatifierPersistence.Executions.ended?/1` answers whether it
+is set, migration V08 adds the column and an index on it, and
+`StatifierPersistence.Retention.prune/3` clears the position blob and the
+input log of every execution that ended before a cutoff you pass, keeping
+the execution row.
+
+**Breaking for a host that deploys without running V08, and for a storage
+adapter outside this package**: the generated execution schema reads
+`ended_at` on every query, so an executions table without the column fails
+every read; and an adapter of your own must store `ended_at` and, in
+`update_execution/2`, keep a stored stamp over the one a later record
+carries, as Added below lists and the conformance suite checks.
+
+Upgrading: run V08 before deploying this version. An install already at
+V07 writes `up(for: MyApp.Persistence, from: 8)` - `from:` is inclusive, so
+that call runs V08 and nothing before it - and V08 backfills nothing, so an
+execution already terminal reads `ended_at` as `nil` until a later terminal
+write stamps it. The two pruning callbacks are optional: an adapter that
+exports neither stays conformant, and `prune/3` answers
+`{:error, :execution_pruning_unsupported}` on it. The `statifier` floor
+stays `~> 2.6`.
+
+### Added
+
+- An execution records when it ended: `ended_at` on the stored record and
+  on `%StatifierPersistence.Execution{}` is stamped by the first write
+  that takes the execution to `:completed`, `:failed` or `:cancelled`, and
+  no later write moves or clears it, even one that puts the row back to
+  `:active`. It is `nil` for an execution that has not ended, and for a
+  row that was already terminal before V08 until a later terminal write
+  stamps it with that write's time.
+- `StatifierPersistence.Executions.ended?/1` answers whether an
+  execution carries that stamp.
+- V08 of the migrations helper adds the nullable `ended_at` column to the
+  executions table and an index on it. Run it before deploying this
+  version: the generated execution schema reads the column on every
+  query, so an executions table without it fails every read.
+- `StatifierPersistence.Storage.Adapter.execution_record/0` carries
+  `ended_at`, and `update_execution/2` keeps a stored stamp over the one
+  a later record carries. The shared conformance suite checks both
+  halves, so an adapter of your own must store the field and honour the
+  rule.
+- `StatifierPersistence.Retention.prune/3` clears the position blob and the
+  input log of every `:completed`, `:failed` or `:cancelled` execution whose
+  `ended_at` is before a `DateTime` you pass, in batches, and keeps the
+  execution row with its status, answer and `ended_at`. It takes no
+  duration and has no default window.
+- `StatifierPersistence.Storage.prune_executions/3` and
+  `execution_pruning_supported?/1`, the one-batch facade beneath it, which
+  answers `{:error, :execution_pruning_unsupported}` for an adapter that
+  does not declare the capability.
+- Two optional adapter callbacks, `supports_execution_pruning?/1` and
+  `prune_executions/3`, implemented by the in-memory and Ecto adapters and
+  checked by the conformance suite. An adapter of your own that exports
+  neither stays conformant.
+- `docs/retention.md`: which rows you may delete for a finished execution,
+  and which you must not.
+
 ## [0.16.0] 2026-09-24
 
 Feature release: `use StatifierPersistence.Ecto` takes two new options,
