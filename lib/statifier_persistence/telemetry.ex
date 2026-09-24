@@ -68,7 +68,9 @@ defmodule StatifierPersistence.Telemetry do
   `:cancel`. `outcome` on the stop is `:ok`, `:discarded` or `:error`.
   `[:statifier_persistence, :execution, :lock]`'s `duration` is the **wait** for
   the per-execution exclusion, not the held time, and its `outcome` is
-  `:acquired` or `:unavailable`.
+  `:acquired` or `:unavailable`. It is also emitted by
+  `StatifierPersistence.Executions.unpark/3`, which takes the same exclusion
+  and opens no step span.
 
   `invoke_id` and `child_count` on the stop are `nil` on every ordinary
   drive and set on the `entry: :answer_parent` step a child takes on its
@@ -113,6 +115,7 @@ defmodule StatifierPersistence.Telemetry do
   | `[:statifier_persistence, :execution, :terminated]` | `system_time` | `execution_id`, `session_id`, `content_hash`, `status`, `driven_by`, `reason` |
   | `[:statifier_persistence, :execution, :discarded]` | `system_time` | `execution_id`, `entry`, `reason`, `repaired?` |
   | `[:statifier_persistence, :execution, :migrated]` | `system_time` | `execution_id`, `from_content_hash`, `to_content_hash`, `dropped` |
+  | `[:statifier_persistence, :execution, :unparked]` | `system_time` | `execution_id`, `content_hash` |
   | `[:statifier_persistence, :effect, :failed]` | `system_time` | `execution_id`, `session_id`, `content_hash`, `kind`, `executor`, `reason`, `reentered?` |
   | `[:statifier_persistence, :drive, :turns_exhausted]` | `system_time`, `turns` | `execution_id`, `entry` |
 
@@ -128,6 +131,13 @@ defmodule StatifierPersistence.Telemetry do
   under their own names, because a migration has two charts in hand, and
   `dropped` is the list of dropped state ids that were in the execution's
   configuration. A refused or parked migration emits nothing.
+
+  `:unparked` fires once per `StatifierPersistence.Executions.unpark/3`
+  that writes a `:needs_migration` execution back to `:active`, after its
+  serialization section returns. `content_hash` is the chart the execution
+  was parked on and goes on under. An unpark that writes nothing - of an
+  `:active` execution, of a terminal one, or one refused - emits no
+  `:unparked`.
 
   ## The durable-subchart seam (ADR-0008)
 
@@ -207,6 +217,7 @@ defmodule StatifierPersistence.Telemetry do
   @execution_terminated [:statifier_persistence, :execution, :terminated]
   @execution_discarded [:statifier_persistence, :execution, :discarded]
   @execution_migrated [:statifier_persistence, :execution, :migrated]
+  @execution_unparked [:statifier_persistence, :execution, :unparked]
   @effect_failed [:statifier_persistence, :effect, :failed]
   @drive_turns_exhausted [:statifier_persistence, :drive, :turns_exhausted]
   @child_started [:statifier_persistence, :child, :started]
@@ -227,6 +238,7 @@ defmodule StatifierPersistence.Telemetry do
     @execution_terminated,
     @execution_discarded,
     @execution_migrated,
+    @execution_unparked,
     @effect_failed,
     @drive_turns_exhausted,
     @child_started,
@@ -495,6 +507,22 @@ defmodule StatifierPersistence.Telemetry do
         to_content_hash: fields[:to_content_hash],
         dropped: fields[:dropped]
       }
+    )
+  end
+
+  @doc """
+  Emits `[:statifier_persistence, :execution, :unparked]`: one
+  `:needs_migration` execution written back to `:active` by
+  `StatifierPersistence.Executions.unpark/3` (ADR-0014's telemetry
+  amendment). `content_hash` is the chart it was parked on and goes on
+  under.
+  """
+  @spec execution_unparked(fields :: fields()) :: :ok
+  def execution_unparked(fields) do
+    :telemetry.execute(
+      @execution_unparked,
+      %{system_time: System.system_time()},
+      %{execution_id: fields[:execution_id], content_hash: fields[:content_hash]}
     )
   end
 

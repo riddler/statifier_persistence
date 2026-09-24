@@ -320,3 +320,66 @@ points here.
 changelog's text: exhaustive matchers on the status or on the drained
 query's answer, and adapters that implement the drained query or store the
 status, must handle the new arm.
+
+## Amendment (2026-09-23): an unpark emits `:unparked` and the lock event, and the park's event stays undecided
+
+Status of this amendment: proposed (2026-09-23). The record above stays
+accepted; this amendment is proposed until the operator accepts it.
+
+Decision 8 leaves open whether the park and the unpark emit telemetry of
+their own. At `a6e393f` `Executions.unpark/3` emits nothing: it calls the
+serialization strategy's `with_execution/3` directly and unwraps the
+envelope itself (`lib/statifier_persistence/executions.ex`, `unpark/3`,
+read at `a6e393f`), where `fail/4` and `cancel/3` run inside
+`serialized/5`, which reports the wait for the exclusion as
+`[:statifier_persistence, :execution, :lock]` and brackets the drive with
+the step span (`executions.ex`, `serialized/5`, read at `a6e393f`). So a
+host that counts `fail/4` and `cancel/3` through
+`[:statifier_persistence, :execution, :terminated]` has no way to count the
+third host decision about a parked execution. This amendment decides the
+unpark's events. It adds one event name to ADR-0009's catalogue, which that
+record's own amendment of this date carries.
+
+**1. An unpark that writes `:active` emits
+`[:statifier_persistence, :execution, :unparked]`.** Its measurement is
+`system_time`, and its metadata is `execution_id` and `content_hash`: the
+chart the execution was parked on and goes on under, which is the one
+chart an unpark has in hand. `session_id` is not on it, because an unpark
+decodes no position (ADR-0009 decision 4). It is emitted once, after the
+serialization section returns, as `migrate/4`'s event is
+(`executions.ex`, `migrated/2`, read at `a6e393f`), and only for decision
+3's arm that writes `:active`. The emitter is
+`StatifierPersistence.Telemetry.execution_unparked/1`, in this change.
+
+**2. An unpark that writes nothing emits no `:unparked`.** An `:active`
+execution answers `{:ok, execution}` unchanged, a terminal one answers
+`{:discarded, execution}`, an absent one and a refused lock answer an
+error, and none of them emits it. A terminal unpark emits no
+`[:statifier_persistence, :execution, :discarded]` either: that event's
+`entry` is the step seam's door vocabulary, and an unpark is not a door
+of it.
+
+**3. An unpark reports its wait as the lock event, and opens no step
+span.** `unpark/3` emits `[:statifier_persistence, :execution, :lock]`
+exactly as `serialized/5` does, through the same private helpers
+(`executions.ex`, `emit_lock/5` and `unlocked/4`, read at `a6e393f`):
+`:acquired` from inside the section, or `:unavailable` with the strategy's
+refusal. It opens no step span, because an unpark delivers no event, loads
+no position and steps nothing, and `entry`'s vocabulary does not grow.
+
+**4. Decision 7 holds.** The event carries an id and a content hash, and
+nothing from the datamodel, the blobs or the metadata map.
+
+**5. The park's event stays undecided.** A park is not the unpark's shape.
+It has two emitters, `migrate/4` under `on_failure: :park`
+(`executions.ex`, `refuse/4`, read at `a6e393f`) and `migrate_tree/4`,
+which parks every named node in one store unit (`executions.ex`,
+`decide_tree/7`, read at `a6e393f`); and the reason a park would report is
+a list of findings or a map of tree refusals, which would have to be
+narrowed to a closed vocabulary before it could ride an event under
+ADR-0009 decision 7. That is a design of its own, and this amendment does
+not make it. A park still emits no event of its own, beside the adapter
+calls its status write makes, and no step span is involved, because a
+migration takes none (ADR-0013 decision 5).
+
+No other decision moves.
