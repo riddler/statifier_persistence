@@ -17,10 +17,20 @@ end
 # suite, idempotently. Only DDL persists - the sandbox rolls rows back.
 :ok = StatifierPersistence.BootstrapMigrations.up(StatifierPersistence.TestRepo)
 
-# The sandbox stays :manual for everything except the live migration tests
-# (migrations_test.exs, async: false), which manage their own DDL and
-# inserts: they switch the repo to :auto for the duration of their
-# setup_all/on_exit work and restore :manual afterward.
+# The sandbox stays :manual except inside the modules that must run live,
+# outside the sandbox: the tests that run their own DDL (migrations_test,
+# v06_rename_test, leading_columns_test) and the tests that need a second
+# connection to meet a real lock or a caller's real transaction (the live
+# lock, held lease, caller transaction, retire race and live fan-out
+# tests). Each switches the repo to
+# :auto in its setup or setup_all and restores :manual on exit.
+#
+# The mode belongs to the one shared repo, not to the module that set it,
+# so what keeps :auto inside those modules is ExUnit's ordering: every
+# async module runs first, and the synchronous modules run only after all
+# of them have finished, one at a time. A module that leaves :manual is
+# therefore never `async: true`; SandboxModeTest reads the suite's source
+# and fails on one that is.
 Ecto.Adapters.SQL.Sandbox.mode(StatifierPersistence.TestRepo, :manual)
 
 ExUnit.start()
