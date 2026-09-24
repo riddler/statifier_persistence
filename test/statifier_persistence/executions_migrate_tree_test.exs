@@ -455,5 +455,47 @@ defmodule StatifierPersistence.ExecutionsMigrateTreeTest do
       assert stored(ctx, ctx.hold_id) == hold_before
       assert stored(ctx, stray_id) == stray_before
     end
+
+    # The same stray under on_failure: :park: the hold, the one named
+    # node, parks on its old chart though its own plan would have
+    # applied; the stray and the pickup notice, both absent from plans,
+    # are left as they stood.
+    #
+    # sabotage: had parks_tree?/1 (executions.ex) answer false for
+    # {:child_unresolved, _, _} -> red over both adapters: the answer was
+    # {:error, {:tree_refused, _}}, not {:parked, _}. Verified red,
+    # reverted from a copy.
+    #
+    # sabotage: had decide_tree/7's :park clause (executions.ex) park
+    # every node of the tree (tree.order) rather than the named ones ->
+    # red over both adapters: the stray's stored record came back
+    # :needs_migration. Verified red, reverted from a copy.
+    test "under on_failure: :park an unresolved child parks the named nodes and not itself",
+         ctx do
+      {hold_before, notice_before} = waiting_tree(ctx)
+      stray_id = Linkage.child_execution_id(ctx.hold_id, "slip", 0)
+      linkage = Linkage.new(ctx.hold_id, "slip", 0, hash(ctx.notice_from))
+
+      {:ok, _execution, _ms} =
+        Executions.create(ctx.store, stray_id, ctx.notice_from,
+          linkage: linkage,
+          executor: fn _effect, _context -> :ok end
+        )
+
+      stray_before = stored(ctx, stray_id)
+      attach([:statifier_persistence, :execution, :migrated])
+
+      assert {:parked, {:tree_refused, refusals}} =
+               migrate_tree(ctx, %{ctx.hold_id => hold_plan!(ctx)}, on_failure: :park)
+
+      assert refusals == %{stray_id => {:child_unresolved, ctx.hold_id, "slip"}}
+
+      assert stored(ctx, ctx.hold_id) == %{hold_before | status: :needs_migration}
+      assert stored(ctx, stray_id) == stray_before
+      assert stored(ctx, ctx.notice_id) == notice_before
+
+      hold_id = ctx.hold_id
+      refute_receive {:telemetry, _event, %{execution_id: ^hold_id}}
+    end
   end
 end
