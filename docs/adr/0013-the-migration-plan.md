@@ -662,3 +662,42 @@ What was re-read:
   `mix.lock` resolves statifier 2.6.0 under `~> 2.6`.
 - **What a host sees.** The 0.15.0 section of `CHANGELOG.md` lists each
   finding as a Breaking entry and says what a host does about it.
+
+## Note (2026-09-23, sp-o2ev): the sp-pq4 Amendment re-read at v0.15.0
+
+The operator accepted the 2026-09-23 sp-pq4 Amendment, and its status line
+above reads accepted on `main` through the operator's own change
+(`c888a9a`). This Note changes no status line. The code that implements
+the Amendment shipped in statifier_persistence 0.14.0. This Note records
+that every claim of the Amendment was re-read on `main` at `v0.15.0`
+(`ae9c855`), including the commits since `v0.14.0` on `executions.ex` and
+`migration/transform.ex`, and that every claim held. The Amendment as
+proposed said "The record above stays proposed". That sentence is
+superseded by the Amendment's own status line on `main`, "The record above
+is accepted", and by the record's status line, which reads accepted and
+names sp-pq4 among the code that landed against it.
+
+What was re-read:
+
+- **A missing pin source is refused before the execution is read.** The
+  no-source check is `timer_check/4`
+  (`lib/statifier_persistence/executions.ex`). It runs inside
+  `plan_check/5` before `migrate/4` takes the execution's exclusion or
+  reads its record, and answers `{:error, {:no_pin_source, states}}`
+  outside `{:migration_refused, _}`.
+- **A counted timer on an unmapped state stays a finding.** When a source
+  counts a pending timer for the execution, the result is the
+  `{:pending_timers, states, source_counts}` finding inside
+  `{:migration_refused, findings}`
+  (`lib/statifier_persistence/migration/transform.ex`,
+  `pending_timer_findings/4`). It parks under `:park` (`migrate_loaded/6`).
+- **A source that cannot answer parks nothing.** It is refused as
+  `{:error, {:pin_source_failed, {module, reason}}}`, the arm a retirement
+  answers (`ask_pin_sources/3`). `migrate_loaded/6` parks only
+  `{:migration_refused, _}`, so neither this refusal nor the missing
+  source parks.
+- **A state with no id is unmapped.** `timer_owners/1` answers a state
+  with no id by its index, and `timer_states/3` counts every index as
+  unmapped (`transform.ex`).
+- **The walk.** ADR-0014 carries "A parked hold", the walk this Amendment
+  reads.

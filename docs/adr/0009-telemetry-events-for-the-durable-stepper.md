@@ -605,7 +605,7 @@ structure of the table are what it fixes, not the spelling of the noun.
 
 ## Amendment (2026-09-23, sp-7a9): a migration is this package's verdict on an execution, and it gets one event of its own
 
-Status of this amendment: proposed (2026-09-23, sp-7a9). The record above
+Status of this amendment: accepted (2026-09-23, sp-7a9). The record above
 stays accepted; this amendment is proposed until the operator accepts it.
 
 ADR-0013 (`docs/adr/0013-the-migration-plan.md`, proposed) decides that
@@ -730,9 +730,8 @@ after the code that implements it shipped in statifier_persistence 0.15.0
 (tag `v0.15.0`, `ae9c855`). That Amendment's own status line flips in
 place from proposed to accepted, and the record above stays accepted. Its
 "this amendment is proposed until the operator accepts it" is met here
-and stays as written. The 2026-09-23 sp-7a9 Amendment keeps its own
-status, because this flip does not cover it. Every cite below was read on
-`main` at `ae9c855`.
+and stays as written. The 2026-09-23 sp-7a9 Amendment is flipped by the
+Note below. Every cite below was read on `main` at `ae9c855`.
 
 What was re-read before the flip:
 
@@ -762,3 +761,40 @@ child's is not stored (`lib/statifier_persistence/execution.ex`, whose
 stored record carries no donedata). Neither makes the decision false: in
 both cases the event is emitted before the caller's call returns, and the
 caller holds the answer a redelivery needs.
+
+## Note (2026-09-23, sp-o2ev): the sp-7a9 Amendment is accepted
+
+The operator accepted the 2026-09-23 sp-7a9 Amendment on 2026-09-23. The
+code that implements it shipped in statifier_persistence 0.14.0 and is on
+`main` at `v0.15.0` (`ae9c855`). That Amendment's own status line flips in
+place from proposed to accepted. Its "this amendment is proposed until the
+operator accepts it" is met here and stays as written. Every cite below was
+read on `main` at `ae9c855`, including the commits since `v0.14.0` on
+`telemetry.ex`, `executions.ex` and `docs/telemetry.md`.
+
+What was re-read before the flip:
+
+- **The event and its shape.** `@execution_migrated` and its emitter
+  `execution_migrated/1` are in `lib/statifier_persistence/telemetry.ex`,
+  with `system_time` as the measurement and `execution_id`,
+  `from_content_hash`, `to_content_hash` and `dropped` as the metadata.
+  `session_id` is not on it. The two-hash precedent is `identity_refused/1`
+  (`stored_content_hash`, `supplied_content_hash`).
+- **When it fires.** It fires once per successful `migrate/4`, after the
+  serialization section returns (`executions.ex`, `migrated/2`), and a
+  refused or parked `migrate/4` emits nothing. `migrate/4` opens no step
+  span, and `t:StatifierPersistence.Executions.entry/0` has no migration
+  door.
+- **The count is seventeen.** `@events` lists seventeen names, and
+  `events/0` returns them. The sp-6neq Amendment below added a key, not a
+  name. `docs/telemetry.md`'s execution lifecycle table carries the row.
+
+Two sentences are superseded by later dated records on main and stay as
+written. First, "It is emitted once per successful `migrate/4`" still holds
+for `migrate/4`, and ADR-0015 decision 5
+(`docs/adr/0015-the-tree-migration.md`, accepted in this change) adds
+`migrate_tree/4` as a second
+emitter: once per re-pinned node, with the same keys (`executions.ex`,
+`tree_migrated/1`). `docs/telemetry.md` names both emitters. Second, the
+Amendment's opening calls ADR-0013 proposed, and ADR-0013's status line
+now reads accepted.
