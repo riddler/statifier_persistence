@@ -168,8 +168,45 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
       table_prefix: "kx_v07_"
     ]
 
-    def up, do: Migrations.up(@opts ++ [from: 7])
-    def down, do: Migrations.down(@opts ++ [version: 7])
+    # Pinned at V07 in both directions, for MigrateKxConcurrentV04's
+    # reason: without the ceiling this module would carry V08 too.
+    def up, do: Migrations.up(@opts ++ [from: 7, version: 7])
+    def down, do: Migrations.down(@opts ++ [from: 7, version: 7])
+  end
+
+  # V08's own cycle, the same shape: the base stops at V07, and the second
+  # migration carries V08 alone - the upgrade an install running 0.16.0
+  # performs.
+  defmodule MigrateKxV08Base do
+    @moduledoc false
+    use Ecto.Migration
+
+    alias StatifierPersistence.Ecto.Migrations
+
+    @opts [
+      repo: StatifierPersistence.TestRepo,
+      key: :uxid,
+      table_prefix: "kx_v08_"
+    ]
+
+    def up, do: Migrations.up(@opts ++ [version: 7])
+    def down, do: Migrations.down(@opts ++ [from: 7])
+  end
+
+  defmodule MigrateKxV08 do
+    @moduledoc false
+    use Ecto.Migration
+
+    alias StatifierPersistence.Ecto.Migrations
+
+    @opts [
+      repo: StatifierPersistence.TestRepo,
+      key: :uxid,
+      table_prefix: "kx_v08_"
+    ]
+
+    def up, do: Migrations.up(@opts ++ [from: 8])
+    def down, do: Migrations.down(@opts ++ [version: 8])
   end
 
   @host_migrations [
@@ -187,6 +224,8 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
   @input_log_version 20_260_906_000_501
 
   @retirement_versions [20_260_919_000_701, 20_260_919_000_702]
+
+  @ended_at_versions [20_260_924_000_801, 20_260_924_000_802]
 
   @key_prefixes ["kx_uxid_", "kx_uuid_", "kx_big_"]
 
@@ -599,6 +638,73 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     end
   end
 
+  describe "V08: the executions ended_at column and its index" do
+    # sabotage: removed V08's alter/add of :ended_at from up/1 and its
+    # remove/1 from down/1 together -> red: the host migrations raised on
+    # the index over a column that was not there, so setup_all failed and
+    # every case in this module was invalid. Verified red, reverted from a
+    # copy.
+    test "executions carries a nullable ended_at, across every key configuration" do
+      for prefix <- @key_prefixes do
+        assert identity_columns(prefix <> "executions", ["ended_at"]) ==
+                 [["ended_at", "timestamp without time zone", "YES"]]
+      end
+    end
+
+    # sabotage: removed V08's create(index(...)) and its matching drop/1
+    # -> red here, the definition list came back empty for every key
+    # configuration. Verified red, reverted from a copy.
+    test "executions carries a non-unique index on ended_at, across every key configuration" do
+      for prefix <- @key_prefixes do
+        table = prefix <> "executions"
+
+        assert [definition] = ended_at_index_definitions(table)
+        refute definition =~ "UNIQUE"
+        assert definition =~ "(ended_at)"
+      end
+    end
+
+    # sabotage: made V08.down/1 a no-op -> red here on the assertion
+    # block after the rollback, which still found the column and the
+    # index. Verified red, reverted from a copy.
+    test "up from V07, down and up again: the column and the index arrive, go and come back, and an existing row reads NULL" do
+      [base_version, version] = @ended_at_versions
+
+      on_exit(fn -> drop_ended_at_tables(base_version, version) end)
+
+      :ok = migrate(:up, base_version, MigrateKxV08Base)
+
+      assert identity_columns("kx_v08_executions", ["ended_at"]) == []
+      assert ended_at_index_definitions("kx_v08_executions") == []
+
+      insert_run("kx_v08_executions", "kx-v08-before")
+
+      :ok = migrate(:up, version, MigrateKxV08)
+
+      assert identity_columns("kx_v08_executions", ["ended_at"]) ==
+               [["ended_at", "timestamp without time zone", "YES"]]
+
+      assert [_definition] = ended_at_index_definitions("kx_v08_executions")
+
+      # No backfill: the row that was there before the version reads NULL.
+      assert %{rows: [[nil]]} =
+               SQL.query!(
+                 TestRepo,
+                 "SELECT ended_at FROM kx_v08_executions WHERE execution_id = $1",
+                 ["kx-v08-before"]
+               )
+
+      :ok = migrate(:down, version, MigrateKxV08)
+
+      assert identity_columns("kx_v08_executions", ["ended_at"]) == []
+      assert ended_at_index_definitions("kx_v08_executions") == []
+
+      :ok = migrate(:up, version, MigrateKxV08)
+
+      assert [_again] = ended_at_index_definitions("kx_v08_executions")
+    end
+  end
+
   describe "unique indexes enforced" do
     # sabotage: removed V01's charts unique_index -> duplicate insert red
     test "a duplicate content_hash insert violates the charts unique index" do
@@ -807,7 +913,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     # sabotage: skipped parse!'s version validation -> red (KeyError, not ArgumentError)
     test "an unknown version raises before any DDL" do
       assert_raise ArgumentError, ~r/unknown migration version/, fn ->
-        Migrations.up(for: KxUxid, version: 8)
+        Migrations.up(for: KxUxid, version: 9)
       end
 
       assert_raise ArgumentError, ~r/unknown migration version/, fn ->
@@ -829,7 +935,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     # red, reverted.
     test "an unknown down from: raises before any DDL" do
       assert_raise ArgumentError, ~r/unknown migration from/, fn ->
-        Migrations.down(for: KxUxid, from: 8)
+        Migrations.down(for: KxUxid, from: 9)
       end
     end
 
@@ -887,7 +993,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     # 1, right 5), this case and its SQLite twin alone ("45 tests, 2
     # failures"). Verified red, reverted.
     test "expected_version/0 is the newest version the migration map holds" do
-      assert Migrations.expected_version() == 7
+      assert Migrations.expected_version() == 8
     end
   end
 
@@ -1004,6 +1110,35 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
       """,
       [content_hash, content_hash]
     )
+  end
+
+  defp ended_at_index_definitions(table) do
+    %{rows: rows} =
+      SQL.query!(
+        TestRepo,
+        """
+        SELECT indexdef
+        FROM pg_indexes
+        WHERE schemaname = 'public' AND tablename = $1
+          AND indexname = $1 || '_ended_at_index'
+        """,
+        [table]
+      )
+
+    List.flatten(rows)
+  end
+
+  defp drop_ended_at_tables(base_version, version) do
+    SQL.query!(TestRepo, "DROP TABLE IF EXISTS kx_v08_inputs", [])
+    SQL.query!(TestRepo, "DROP TABLE IF EXISTS kx_v08_executions", [])
+    SQL.query!(TestRepo, "DROP TABLE IF EXISTS kx_v08_positions", [])
+    SQL.query!(TestRepo, "DROP TABLE IF EXISTS kx_v08_charts", [])
+
+    SQL.query!(TestRepo, "DELETE FROM schema_migrations WHERE version = ANY($1)", [
+      [base_version, version]
+    ])
+
+    :ok
   end
 
   defp drop_retirement_tables(base_version, version) do

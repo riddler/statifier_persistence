@@ -24,6 +24,11 @@ defmodule StatifierPersistence.BootstrapMigrations do
   `StatifierPersistence.Storage.retire_chart/3` would refuse at open
   against this suite's own database.
 
+  Migration 109 applies V08, the executions `ended_at` column and its
+  index, on its own for the same reason. The generated execution schema
+  reads that column on every fetch, so without it every Ecto adapter
+  test that reads an execution back fails on a column that is not there.
+
   Migration 107 is what makes a developer's existing test database take the
   same upgrade a host's does: a database bootstrapped before `0.12.0` holds
   the old names, and V06 renames them in place. On a database created from
@@ -44,7 +49,8 @@ defmodule StatifierPersistence.BootstrapMigrations do
     {20_260_905_000_105, __MODULE__.ExecutionOutcomeColumns},
     {20_260_906_000_106, __MODULE__.InputLogTables},
     {20_260_912_000_107, __MODULE__.ExecutionRenameTables},
-    {20_260_919_000_108, __MODULE__.ChartTombstoneColumns}
+    {20_260_919_000_108, __MODULE__.ChartTombstoneColumns},
+    {20_260_924_000_109, __MODULE__.ExecutionEndedAtColumns}
   ]
 
   defmodule DefaultTables do
@@ -206,6 +212,31 @@ defmodule StatifierPersistence.BootstrapMigrations do
     def down do
       for host <- [EctoHosts.Default, EctoHosts.Overridden, EctoHosts.BlobTyped] do
         Migrations.down(for: host, from: 7, version: 7)
+      end
+
+      :ok
+    end
+  end
+
+  defmodule ExecutionEndedAtColumns do
+    @moduledoc false
+    use Ecto.Migration
+
+    alias StatifierPersistence.Ecto.Migrations
+    alias StatifierPersistence.EctoHosts
+
+    # V08 alone, for the reason migration 104 applies V02 alone.
+    def up do
+      for host <- [EctoHosts.Default, EctoHosts.Overridden, EctoHosts.BlobTyped] do
+        Migrations.up(for: host, from: 8, version: 8)
+      end
+
+      :ok
+    end
+
+    def down do
+      for host <- [EctoHosts.Default, EctoHosts.Overridden, EctoHosts.BlobTyped] do
+        Migrations.down(for: host, from: 8, version: 8)
       end
 
       :ok

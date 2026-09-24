@@ -99,6 +99,15 @@ defmodule StatifierPersistence.Storage.Adapter do
   because a stored record otherwise carries no trace of what a completed
   execution answered with, and a fan-out's settlement has to assemble N answers
   it did not witness.
+
+  `ended_at` is when the execution first reached a terminal status, and
+  `nil` for an execution that has not. It is stamped once: the record that
+  carries an execution into a terminal status carries the stamp, and
+  `c:update_execution/2` keeps a stored stamp over any later record's, so
+  the value answers "when did this execution end" for as long as the row
+  exists, however often the row is written afterwards. This layer does
+  not decide what a stamp is - `StatifierPersistence.Storage`'s writers
+  choose it - and `c:insert_execution/2` stores the one it is given.
   """
   @type execution_record :: %{
           execution_id: execution_id(),
@@ -108,7 +117,8 @@ defmodule StatifierPersistence.Storage.Adapter do
           position_blob: binary() | nil,
           failure: String.t() | nil,
           metadata: metadata(),
-          outcome_blob: binary() | nil
+          outcome_blob: binary() | nil,
+          ended_at: DateTime.t() | nil
         }
 
   @typedoc """
@@ -491,6 +501,14 @@ defmodule StatifierPersistence.Storage.Adapter do
   answer, since this callback is a full-record overwrite and the stepper
   builds its record from a `MachineState` that has never seen one.
 
+  `ended_at` is the third exception, and the one that is first-write-wins
+  rather than nil-means-unchanged alone: a stored stamp is kept whatever
+  the given record carries, and a row with no stamp takes the given
+  record's `ended_at`, `nil` included. That is the rule that makes the
+  stamp the time an execution *first* ended - a later overwrite of a
+  terminal row, with the same status or another, cannot move it. The
+  shared conformance suite pins both halves.
+
   Like the other execution callbacks it decodes nothing,
   validates no status transition, and performs no identity check - the
   facade and the lifecycle own those (ADR-0003 decisions 1 and 2, ADR-0004
@@ -834,8 +852,8 @@ defmodule StatifierPersistence.Storage.Adapter do
   content hash, the identity blob, the position blob and the failure,
   rewrites the linkage pin's `content_hash` when the write carries one and
   the stored metadata holds a linkage, and carries every other metadata
-  key and the `outcome_blob` forward verbatim. A park writes the status
-  and the failure alone.
+  key, the `outcome_blob` and the stored `ended_at` forward verbatim. A
+  park writes the status and the failure alone.
 
   An adapter reached inside an enclosing transaction - the Ecto adapter's
   `c:lock_execution/3` is one - never returns an error that would commit

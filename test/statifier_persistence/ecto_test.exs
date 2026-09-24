@@ -83,6 +83,7 @@ defmodule StatifierPersistence.EctoTest do
                  :session_id,
                  :metadata,
                  :outcome_blob,
+                 :ended_at,
                  :inserted_at,
                  :updated_at
                ]

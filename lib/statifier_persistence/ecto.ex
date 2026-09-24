@@ -37,6 +37,10 @@ if Code.ensure_loaded?(Ecto) do
     `identity_blob` and `chart_blob` nulled, and both chart doors answer
     for it with the retired arm rather than with its bytes.
 
+    The execution schema also carries `ended_at`, the column V08 adds:
+    `nil` until the execution first reaches a terminal status, then the
+    time it did, never rewritten afterwards.
+
     The execution schema also carries `metadata`, the optional opaque map of
     host identities ADR-0006 grants, as a `jsonb` column (V02 of the
     migrations helper). It holds identities only, never personal data:
@@ -87,7 +91,8 @@ if Code.ensure_loaded?(Ecto) do
     # The storage contract's field set is the column list (ADR-0003
     # decision 3); the migrations helper's DDL mirrors these exactly -
     # V01 for every column but the charts table's two tombstone fields,
-    # which V07 adds (ADR-0012 decision 6).
+    # which V07 adds (ADR-0012 decision 6), and the executions table's
+    # `ended_at`, which V08 adds.
     # Blob columns are typed :binary here; schema_ast/3 substitutes the
     # configured :blob_type for any column in @blob_columns.
     @fields %{
@@ -113,7 +118,8 @@ if Code.ensure_loaded?(Ecto) do
         failure: :string,
         session_id: :string,
         metadata: :map,
-        outcome_blob: :binary
+        outcome_blob: :binary,
+        ended_at: :utc_datetime_usec
       ],
       inputs: [
         execution_id: :string,

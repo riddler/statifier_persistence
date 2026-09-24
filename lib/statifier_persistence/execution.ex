@@ -5,26 +5,34 @@ defmodule StatifierPersistence.Execution do
   (ADR-0004 decision 1), loaded only through the guarded
   `StatifierPersistence.Storage.load_execution_position/3` path; this struct
   carries the fields a host reads to decide what to do with an execution.
+
+  `ended_at` is when the execution first reached a terminal status, `nil`
+  until it does - the stamp the stored record carries (V08 of the
+  migrations helper on the Ecto adapter), never rewritten once written.
+  `StatifierPersistence.Executions.ended?/1` reads it.
   """
 
   alias StatifierPersistence.Storage.Adapter
 
   @enforce_keys [:execution_id, :status, :content_hash]
-  defstruct [:execution_id, :status, :content_hash, :failure, :donedata]
+  defstruct [:execution_id, :status, :content_hash, :failure, :donedata, :ended_at]
 
   @type t :: %__MODULE__{
           execution_id: Adapter.execution_id(),
           status: Adapter.execution_status(),
           content_hash: Adapter.content_hash(),
           failure: String.t() | nil,
-          donedata: term() | nil
+          donedata: term() | nil,
+          ended_at: DateTime.t() | nil
         }
 
   @doc """
   Builds the host-facing struct from a stored
   `t:StatifierPersistence.Storage.Adapter.execution_record/0`, dropping the two
   blob fields (`identity_blob`, `position_blob`) and carrying everything
-  else verbatim.
+  else verbatim. A record with no `ended_at` key - one from an adapter
+  written before the field existed - builds a struct whose `ended_at` is
+  `nil`.
 
   `donedata` is always `nil` here: a stored record carries no donedata
   (ADR-0008 decision 3) - a position that has reached a final state has no
@@ -33,18 +41,21 @@ defmodule StatifierPersistence.Execution do
   struct.
   """
   @spec from_record(Adapter.execution_record()) :: t()
-  def from_record(%{
-        execution_id: execution_id,
-        status: status,
-        content_hash: content_hash,
-        failure: failure
-      }) do
+  def from_record(
+        %{
+          execution_id: execution_id,
+          status: status,
+          content_hash: content_hash,
+          failure: failure
+        } = record
+      ) do
     %__MODULE__{
       execution_id: execution_id,
       status: status,
       content_hash: content_hash,
       failure: failure,
-      donedata: nil
+      donedata: nil,
+      ended_at: Map.get(record, :ended_at)
     }
   end
 end

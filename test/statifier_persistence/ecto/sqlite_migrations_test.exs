@@ -283,6 +283,17 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
       assert "status" in columns
     end
 
+    # V08 guards nothing by adapter, so the column and the index arrive
+    # here exactly as they do on Postgres.
+    #
+    # sabotage: removed V08's create(index(...)) and its matching drop/1
+    # -> red here, the index list carried no ended_at index. Verified red,
+    # reverted from a copy.
+    test "V08 adds ended_at and its index on this backend too" do
+      assert "ended_at" in columns("sq_executions")
+      assert "sq_executions_ended_at_index" in indexes("sq_executions")
+    end
+
     # sabotage: covered by the same execution as the case above - with the guard
     # replaced by `true` this case never executes, because creating the
     # index is what makes setup_all raise. That the index cannot exist
@@ -323,7 +334,7 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
     # 1, right 5), this case and its Postgres twin alone ("45 tests, 2
     # failures"). Verified red, reverted.
     test "expected_version/0 answers the same version this backend migrated through" do
-      assert Migrations.expected_version() == 7
+      assert Migrations.expected_version() == 8
     end
 
     # sabotage: replaced V03.down/1's postgres?() guard with `true`, so
