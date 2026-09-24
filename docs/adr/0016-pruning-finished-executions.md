@@ -1,0 +1,189 @@
+# ADR-0016: Pruning a finished execution: `Retention.prune/3` clears the position blob and the input log of every terminal execution that ended before a host's cutoff, keeps the row, leaves the positions table alone, and takes no duration
+
+Status: proposed (2026-09-24, sp-yy7d)
+
+## Context
+
+ADR-0012 retires charts and leaves an execution's own rows alone, and it
+says so: "Purging a finished execution's position and input log is a
+separate design bead and is not in scope: this record retires charts, and
+an execution's own rows are untouched by every decision above"
+(`docs/adr/0012-retention-and-retirement.md`, decision 8). This record is
+that design.
+
+What a finished execution leaves behind is not small and not neutral. Its
+row keeps the last position blob it was written with, and on an adapter
+that keeps ADR-0010's input log, every input it ever took, verbatim - the
+host's own event data at rest for the life of the store. A host with a
+data-retention duty has had no supported way to clear either, and the
+tables give it no help doing so by hand: nothing in the schema stops a
+wrong delete.
+
+### The premise surface
+
+Everything below rests on `statifier_persistence` `main` at **`341330a`**,
+read 2026-09-24. Code cites carry that SHA and an anchor, because line
+numbers move and anchors do not. The functions this record adds are cited
+by name alone; they arrive in the same change as the record.
+
+- **No foreign key anywhere.** The inputs table has none, "for the same
+  reason no other table here has one: `execution_id` is a caller-supplied
+  opaque string this layer stores verbatim ... and a host's own retention
+  of executions is not this package's to constrain"
+  (`lib/statifier_persistence/ecto/migrations/v05.ex`, moduledoc,
+  @341330a). A wrong delete is not refused by the database.
+- **An execution row records when it ended, and the stamp is not the
+  status.** `ended_at` is written by the first terminal write the row takes
+  while it has none, and kept over every later write, including one that
+  puts the row back to a status that is not terminal
+  (`lib/statifier_persistence/executions.ex`, `ended?/1`, @341330a). V08
+  indexes it (`lib/statifier_persistence/ecto/migrations/v08.ex`, `up/1`,
+  @341330a).
+- **The position blob of an execution row is already nullable.**
+  `add(:position_blob, :binary, null: true)` on the executions table
+  (`lib/statifier_persistence/ecto/migrations/v01.ex`, `up/1`, @341330a),
+  and a load of an execution whose blob is `nil` answers
+  `{:error, :execution_position_missing}`
+  (`lib/statifier_persistence/storage.ex`, `load_execution_position/3`,
+  @341330a).
+- **Nothing in this package reads a terminal execution's position.** A
+  step on a terminal execution is discarded before the position is loaded
+  (`lib/statifier_persistence/executions.ex`, `step_tail/7`, @341330a);
+  `fail/4` and `cancel/3` discard it the same way (same file, `fail/4`,
+  `cancel/3`, @341330a); and a migration refuses it before any load (same
+  file, `check_record/2`, @341330a).
+- **Nothing in this package reads the input log.** `Executions.inputs/2`
+  is "a diagnostic read, and nothing in this package consumes it"
+  (`lib/statifier_persistence/executions.ex`, `inputs/2`, @341330a).
+- **A parent reads a finished child's row, never its position or log.** A
+  fan-out's settlement assembles each child's entry from the child's
+  status and its `outcome_blob` (`lib/statifier_persistence/driver.ex`,
+  `entry/5`, @341330a), and a re-driven child create finds the existing
+  child by its deterministic id and adopts it
+  (`lib/statifier_persistence/driver.ex`, `adopt_child/3`, @341330a).
+- **The positions table is keyed by session, not by execution.** It
+  carries no end stamp, and the executions table's `session_id` is
+  nullable and not written by this package
+  (`lib/statifier_persistence/ecto/migrations/v01.ex`, `up/1`, @341330a).
+  A position row is one of the four things that pin a chart (ADR-0012
+  decision 1).
+- **This package has no clock.** "No call takes a duration" (ADR-0012
+  decision 7).
+
+## Decision
+
+**1. `StatifierPersistence.Retention.prune/3` clears what a finished
+execution leaves behind, and nothing else.** It takes the store, a cutoff
+and options, and for every execution it selects it nulls the row's
+`position_blob` and deletes every input log row the execution has, the
+closed marker included. It answers the counts it cleared - executions,
+position blobs, input rows - summed over its batches.
+
+**2. An execution is selected when its status is terminal and its stamp is
+strictly before the cutoff.** Both, because neither is enough alone. A row
+with no stamp is never selected, whatever its status: it either has not
+ended, or ended before V08 and its end time is not stored anywhere. A row
+with a stamp is selected only while its status is `:completed`, `:failed`
+or `:cancelled`, because the stamp stays on a row a later write put back to
+a status that is not terminal, and that execution can still take a step,
+which needs the position this prune would clear. The comparison is strict,
+so an execution that ended exactly at the cutoff is kept.
+
+**3. The execution row is the tombstone, and it is kept whole.** Its
+status, `failure`, `metadata`, `outcome_blob`, content hash, identity
+envelope and `ended_at` are untouched, and it is what a pruned execution
+leaves: its final status, its answer, and when it ended. This record adds
+no column, so the row does not record that it was pruned, nor who asked,
+nor when. A host that needs that trail keeps it where it keeps its own
+audit.
+
+**4. A pruned execution still counts.** The drained query counts it in its
+terminal arm exactly as before, because the counts are history (ADR-0012
+decision 3), and a pruned execution pins no chart, as no terminal one does
+(ADR-0012 decision 1). Keeping the row also keeps the execution id taken.
+
+**5. The positions table is not touched.** A position row belongs to a
+session, carries no end stamp, and is joined to no execution this package
+writes, so this package has no way to know that a session is finished.
+Deleting one is the host's call, made on its own knowledge of the session;
+`docs/retention.md` says what that costs and what it releases (the chart
+pin of ADR-0012 decision 1).
+
+**6. The cutoff is a `DateTime` the host supplies, and there is no
+default.** `prune/3` raises on anything else - a number of days, a
+`Duration`, a `Date` - so ADR-0012 decision 7 holds word for word: no call
+takes a duration, no window has a default, and nothing prunes on its own or
+on a schedule. When an execution's leftovers should go is the host's
+policy.
+
+**7. It is batched and idempotent.** Each batch is at most `batch_size:`
+executions, oldest end first, cleared as one atomic unit in the adapter,
+and committed on its own. A batch selects only executions that still hold
+something to clear, so a second call with the same cutoff answers zeros,
+and a call that fails part-way leaves the earlier batches pruned and is
+simply made again.
+
+**8. The adapter gains one optional callback and one predicate.**
+`supports_execution_pruning?/1` and `prune_executions/3` join
+`@optional_callbacks`, in the opt-in-by-export shape the other optional
+capabilities use. The facade is `Storage.prune_executions/3`, one batch,
+which answers `{:error, :execution_pruning_unsupported}` for an adapter
+that does not declare the capability, without calling it. Both shipped
+adapters declare it. The in-memory adapter keeps no input log, so its
+batches clear position blobs only. The Ecto adapter selects on V08's
+`ended_at` index, and on Postgres locks the batch's rows with
+`FOR UPDATE SKIP LOCKED`, so a row another transaction is writing is left
+for the next call and two prunes at once take disjoint batches.
+
+**9. A log or trace reader after a prune gets no distinct answer yet.**
+`Executions.inputs/2` answers `{:ok, []}`, and a load of the execution's
+position answers `{:error, :execution_position_missing}`. Neither is a
+distinct pruned answer: an empty log is also what an execution that took
+no input answers, and the missing position is also what an execution that
+failed at creation answers. A distinct answer - so that a replay reader
+can refuse a pruned execution rather than read an empty log as a complete
+one - needs the row to record that it was pruned, which decision 3 does
+not add. It is left for a later record. Until then a host that prunes
+knows which executions it pruned by their stamps and its own cutoff. No
+trace is stored by this package - its telemetry is emitted, not kept
+(ADR-0009) - so there is no trace to prune.
+
+**10. Encrypted blobs: the bytes go, the key stays.** Pruning removes the
+ciphertext from the live rows. It touches no key, and no copy of the rows
+the host keeps elsewhere, such as a backup. Dropping a key instead of the
+bytes is the host's key provider's business, and it makes every blob under
+that key unreadable, not only this execution's.
+
+**11. A parent and its durable children are each pruned on their own
+stamp, and pruning never cascades.** Decision 3 is what makes either order
+safe (ADR-0008's linkage lives in the kept `metadata`). A parent that has
+not settled yet reads a pruned child's status and answer from the kept row
+exactly as before, and a re-driven child create still finds the child by
+its id and adopts it rather than starting a second one. A pruned parent
+with a child still running is terminal, so the child's later answer is
+discarded before any position is loaded, as it always was.
+
+## Consequences
+
+**Every adapter written before this record stays conformant without a line
+of change.** It exports neither new function, the facade finds neither,
+and the prune refuses at open. The conformance suite generates its prune
+cases only for an adapter that exports `prune_executions/3`, and the input
+log case only for one that also exports `append_input/3`.
+
+**`docs/retention.md` is the host's page.** It names which rows a host may
+delete for a finished execution and which it must not, with the reason for
+each, because the schema declares no foreign key and will not stop a wrong
+delete.
+
+**A pruned execution cannot be told from an unpruned one by a read.**
+Decision 8 names the cost; the record that adds a pruned marker will also
+have to decide what `inputs/2` answers for one, and that is an additional
+arm a host matching exhaustively would see.
+
+**The telemetry callback vocabulary grows by two names,**
+`:supports_execution_pruning?` and `:prune_executions`, reported by the
+facade like every other adapter call. No new event.
+
+**No migration.** The columns this needs are V01's nullable
+`position_blob`, V05's inputs table and V08's `ended_at` and its index.

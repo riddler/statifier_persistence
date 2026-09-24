@@ -89,6 +89,7 @@ defmodule StatifierPersistence.Storage do
           | :content_hash_query_unsupported
           | :chart_retirement_unsupported
           | :tree_migration_unsupported
+          | :execution_pruning_unsupported
           | {:unsupported_format_version, term()}
           | {:identity_mismatch, Identity.t(), Identity.t() | nil}
 
@@ -1150,6 +1151,50 @@ defmodule StatifierPersistence.Storage do
       door: record.door,
       event: :erlang.binary_to_term(record.input_blob)
     }
+  end
+
+  @doc """
+  Whether `store`'s adapter can prune finished executions (ADR-0016).
+
+  True when the adapter exports the optional
+  `c:StatifierPersistence.Storage.Adapter.supports_execution_pruning?/1`
+  and `c:StatifierPersistence.Storage.Adapter.prune_executions/3` and the
+  first answers `true` - the shape `tree_migration_supported?/1` checks.
+  """
+  @spec execution_pruning_supported?(store :: t()) :: boolean()
+  def execution_pruning_supported?(%__MODULE__{} = store) do
+    Code.ensure_loaded?(store.adapter) and
+      function_exported?(store.adapter, :supports_execution_pruning?, 1) and
+      function_exported?(store.adapter, :prune_executions, 3) and
+      adapter_call(store.adapter, :supports_execution_pruning?, [], fn ->
+        store.adapter.supports_execution_pruning?(store.opts)
+      end) == true
+  end
+
+  @doc """
+  Prunes one batch of at most `limit` finished executions that ended
+  before `cutoff` (ADR-0016, the facade half of
+  `c:StatifierPersistence.Storage.Adapter.prune_executions/3`).
+
+  Each execution in the batch keeps its row and loses its position blob
+  and its input log. The callback's documentation says which executions
+  a batch takes. `StatifierPersistence.Retention.prune/3` calls this
+  until nothing is left, and is the door a host uses.
+
+  `{:error, :execution_pruning_unsupported}` for a store whose adapter
+  does not declare the capability, without calling it.
+  """
+  @spec prune_executions(store :: t(), cutoff :: DateTime.t(), limit :: pos_integer()) ::
+          {:ok, Adapter.prune_counts()} | {:error, error()}
+  def prune_executions(%__MODULE__{} = store, %DateTime{} = cutoff, limit)
+      when is_integer(limit) and limit > 0 do
+    if execution_pruning_supported?(store) do
+      adapter_call(store.adapter, :prune_executions, [], fn ->
+        store.adapter.prune_executions(store.opts, cutoff, limit)
+      end)
+    else
+      {:error, :execution_pruning_unsupported}
+    end
   end
 
   @doc """

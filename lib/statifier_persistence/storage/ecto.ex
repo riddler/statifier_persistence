@@ -1057,6 +1057,93 @@ if Code.ensure_loaded?(Ecto) do
     end
 
     @doc """
+    Declares execution pruning (the optional
+    `c:StatifierPersistence.Storage.Adapter.supports_execution_pruning?/1`,
+    ADR-0016) on every Ecto backend: the batch is a select, a delete and
+    an update over columns V05 and V08 give every backend.
+    """
+    @impl Adapter
+    @spec supports_execution_pruning?(Adapter.opts()) :: boolean()
+    def supports_execution_pruning?(_opts), do: true
+
+    @doc """
+    Prunes one batch of finished executions (the optional
+    `c:StatifierPersistence.Storage.Adapter.prune_executions/3`,
+    ADR-0016) in one transaction.
+
+    The batch is selected on the V08 index on `executions(ended_at)`,
+    oldest first, and its input log rows are deleted and its position
+    blobs nulled by id. On Postgres the selection locks its rows with
+    `FOR UPDATE SKIP LOCKED`: a row another transaction is writing is left
+    for the next call rather than waited on, and two prunes running at
+    once take disjoint batches. Off Postgres the backend's own write lock
+    serialises the transaction.
+
+    This transaction joins a caller's own when there is one. Nothing here
+    rolls back: every statement either runs or raises the driver's own
+    exception.
+    """
+    @impl Adapter
+    @spec prune_executions(Adapter.opts(), DateTime.t(), pos_integer()) ::
+            {:ok, Adapter.prune_counts()} | {:error, Adapter.error()}
+    def prune_executions(opts, %DateTime{} = cutoff, limit)
+        when is_integer(limit) and limit > 0 do
+      repo(opts).transaction(fn -> prune_batch(opts, cutoff, limit) end)
+    end
+
+    @spec prune_batch(Adapter.opts(), DateTime.t(), pos_integer()) :: Adapter.prune_counts()
+    defp prune_batch(opts, cutoff, limit) do
+      repo = repo(opts)
+      ids = repo.all(due_executions(opts, cutoff, limit))
+
+      {inputs, _returned} =
+        repo.delete_all(from(i in input_schema(opts), where: i.execution_id in ^ids))
+
+      {position_blobs, _returned} =
+        repo.update_all(
+          from(r in execution_schema(opts),
+            where: r.execution_id in ^ids,
+            where: not is_nil(r.position_blob)
+          ),
+          set: [position_blob: nil]
+        )
+
+      %{executions: length(ids), position_blobs: position_blobs, inputs: inputs}
+    end
+
+    # ADR-0016's selection: a terminal status, a stamp strictly before the
+    # cutoff, and something still to clear. The status is read as well as
+    # the stamp because a stamp stays on a row written back to a status
+    # that is not terminal, and that execution can still take a step.
+    @spec due_executions(Adapter.opts(), DateTime.t(), pos_integer()) :: Ecto.Query.t()
+    defp due_executions(opts, cutoff, limit) do
+      logged =
+        from(i in input_schema(opts),
+          where: i.execution_id == parent_as(:execution).execution_id,
+          select: 1
+        )
+
+      query =
+        from(r in execution_schema(opts),
+          as: :execution,
+          where: r.status in ^terminal_statuses(),
+          where: r.ended_at < type(^cutoff, :utc_datetime_usec),
+          where: not is_nil(r.position_blob) or exists(subquery(logged)),
+          order_by: [asc: r.ended_at, asc: r.execution_id],
+          limit: ^limit,
+          select: r.execution_id
+        )
+
+      if repo(opts).__adapter__() == Ecto.Adapters.Postgres,
+        do: from(r in query, lock: "FOR UPDATE SKIP LOCKED"),
+        else: query
+    end
+
+    @spec terminal_statuses() :: [String.t()]
+    defp terminal_statuses,
+      do: [encode_status(:completed), encode_status(:failed), encode_status(:cancelled)]
+
+    @doc """
     Per-test isolation (the optional
     `c:StatifierPersistence.Storage.Adapter.isolate/1`): checks out an
     `Ecto.Adapters.SQL.Sandbox` connection when this handle was built

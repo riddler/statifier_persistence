@@ -203,6 +203,7 @@ state
 | `StatifierPersistence.Executions` | The lifecycle: `create/4`, `step/5`, `fail/4`, in ADR-0004's fixed order |
 | `StatifierPersistence.Driver` | Drive-to-quiescence over `Executions`: performs the chart's `<invoke>` calls and steps each answer back in |
 | `StatifierPersistence.Executor` | The seam every effect crosses on its way to your host |
+| `StatifierPersistence.Retention` | `prune/3`: clears the position blob and input log of every execution that ended before a cutoff you choose, and keeps the row ([what a finished execution leaves behind](docs/retention.md)) |
 | `StatifierPersistence.Serialization` | The per-execution ordering strategy the fetch-to-persist tail runs inside; defaults to the adapter's own `lock_execution/3` |
 | `StatifierPersistence.Testing.StorageConformance` | The conformance suite - point it at your own adapter to hold it to the same bar |
 
@@ -1151,6 +1152,19 @@ capability alters those two columns in a migration of its own.
 
 There is no clock here. Nothing retires on its own or on a schedule, no
 call takes a duration, and when a chart should go is the host's policy.
+
+## Pruning finished executions
+
+A finished execution keeps its last position blob and, on an adapter that
+keeps one, its whole input log. `StatifierPersistence.Retention.prune/3`
+clears both for every execution that ended before a `DateTime` you pass,
+in batches, and keeps the execution row: its status, answer and
+`ended_at` stay, so the drained query still counts it and a parent can
+still read a child's answer. As with retirement, the cutoff is your
+policy and no call takes a duration.
+
+[What a finished execution leaves behind](docs/retention.md) says what a
+prune clears, which rows you may delete yourself and which you must not.
 
 ## Running the tests
 

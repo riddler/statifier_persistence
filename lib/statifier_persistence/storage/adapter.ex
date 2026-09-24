@@ -243,6 +243,21 @@ defmodule StatifierPersistence.Storage.Adapter do
         }
 
   @typedoc """
+  What one batch of `c:prune_executions/3` cleared (ADR-0016): how many
+  execution rows it selected, how many of those still held a position
+  blob that it nulled, and how many input log rows it deleted.
+
+  `executions` counts rows, and each row is kept: a pruned execution is
+  still stored, with its status, its answer and its end stamp. An
+  adapter that keeps no input log answers `inputs: 0`.
+  """
+  @type prune_counts :: %{
+          executions: non_neg_integer(),
+          position_blobs: non_neg_integer(),
+          inputs: non_neg_integer()
+        }
+
+  @typedoc """
   One write of a tree migration's unit (`c:write_tree_migration/2`,
   ADR-0015 decision 3).
 
@@ -933,6 +948,54 @@ defmodule StatifierPersistence.Storage.Adapter do
   @callback list_inputs(opts(), execution_id()) ::
               {:ok, [input_record()]} | {:error, error()}
 
+  @doc """
+  Optional declaration that this adapter can prune finished executions
+  (ADR-0016).
+
+  The same opt-in-by-export shape `supports_metadata?/1` uses: an adapter
+  exports it and answers `true`, the facade checks with
+  `function_exported?/3`, and an adapter that does not export it sees no
+  behaviour change. `StatifierPersistence.Storage.prune_executions/3`
+  answers `{:error, :execution_pruning_unsupported}` for such an adapter
+  without calling it.
+  """
+  @callback supports_execution_pruning?(opts()) :: boolean()
+
+  @doc """
+  Optional prune of one batch of finished executions (ADR-0016): the
+  position blob and the input log of at most `limit` executions that
+  ended before `cutoff`, cleared as one atomic unit.
+
+  An execution is in the batch when all three hold:
+
+  - its status is `:completed`, `:failed` or `:cancelled`. The end stamp
+    alone is not enough, because a stamp stays on a row a later write put
+    back to a status that is not terminal (`t:execution_record/0`), and
+    such an execution can still take a step;
+  - its `ended_at` is set and strictly before `cutoff`. A row with no
+    stamp is never in a batch, whatever its status;
+  - it still holds something to clear: a `position_blob` that is not
+    `nil`, or at least one input log row.
+
+  The oldest `ended_at` goes first. For each execution in the batch the
+  adapter writes `nil` to `position_blob` and deletes every input log
+  row, the closed marker included, and it writes nothing else: the row
+  stays, with its status, `failure`, `metadata`, `outcome_blob`,
+  `content_hash`, `identity_blob` and `ended_at` as they were.
+
+  The unit is the contract: the whole batch, or none of it, one
+  transaction on a database and one atomic state transition on an adapter
+  without one. The third condition is what makes a repeat call answer
+  zeros, and a batch that answers fewer than `limit` executions means
+  nothing more was due at `cutoff` when it ran.
+
+  An adapter that keeps no input log clears the position blobs alone and
+  answers `inputs: 0`. `cutoff` is the host's; this layer takes no
+  duration and computes no window (ADR-0012 decision 7).
+  """
+  @callback prune_executions(opts(), DateTime.t(), pos_integer()) ::
+              {:ok, prune_counts()} | {:error, error()}
+
   @optional_callbacks isolate: 1,
                       lock_execution: 3,
                       supports_metadata?: 1,
@@ -950,7 +1013,9 @@ defmodule StatifierPersistence.Storage.Adapter do
                       write_tree_migration: 2,
                       supports_input_log?: 1,
                       append_input: 3,
-                      list_inputs: 2
+                      list_inputs: 2,
+                      supports_execution_pruning?: 1,
+                      prune_executions: 3
 
   @doc """
   Folds one hash's counts into the shape a refusal carries
