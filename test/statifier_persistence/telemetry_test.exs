@@ -168,10 +168,10 @@ defmodule StatifierPersistence.TelemetryTest do
   describe "events/0 (ADR-0009 decision 8)" do
     # Sabotage: dropped @execution_lock from @events - the count assertion went
     # red, which is the whole point of a bridge attaching from this list.
-    test "returns all seventeen names, unique, under this package's prefix" do
+    test "returns all eighteen names, unique, under this package's prefix" do
       events = Telemetry.events()
 
-      assert length(events) == 17
+      assert length(events) == 18
       assert Enum.uniq(events) == events
 
       assert Enum.all?(events, fn [prefix | rest] ->
@@ -185,6 +185,7 @@ defmodule StatifierPersistence.TelemetryTest do
       assert Telemetry.events() == [
                [:statifier_persistence, :execution, :step, :start],
                [:statifier_persistence, :execution, :step, :stop],
+               [:statifier_persistence, :execution, :step, :exception],
                [:statifier_persistence, :execution, :lock],
                [:statifier_persistence, :adapter, :call],
                [:statifier_persistence, :identity, :refused],
@@ -316,6 +317,139 @@ defmodule StatifierPersistence.TelemetryTest do
 
       {:ok, _execution} = Executions.cancel(store, "execution-2")
       assert {_m, %{entry: :cancel}} = await([:statifier_persistence, :execution, :step, :stop])
+    end
+  end
+
+  describe "the step span's exception close (ADR-0009, the step-exception amendment)" do
+    # Sabotage: removed the try/catch around strategy.with_execution/3 in
+    # serialized/5 - red: no :exception event arrived and the span stayed
+    # open.
+    test "a raising executor closes the span with :exception and the raise reaches the caller",
+         %{store: store} do
+      machine = compile!(@log_error_source)
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      drain()
+
+      executor = fn effect, _context ->
+        if elem(effect, 0) == :log, do: raise(ArgumentError, "executor blew up"), else: :ok
+      end
+
+      assert_raise ArgumentError, "executor blew up", fn ->
+        Executions.step(store, "execution-1", machine, Event.external("go"), executor: executor)
+      end
+
+      {start_m, start_meta} = await([:statifier_persistence, :execution, :step, :start])
+      {exc_m, exc_meta} = await([:statifier_persistence, :execution, :step, :exception])
+
+      assert Map.keys(start_m) |> Enum.sort() == [:monotonic_time, :system_time]
+      assert Map.keys(exc_m) |> Enum.sort() == [:duration, :monotonic_time]
+      assert exc_m.duration >= 0
+
+      assert Map.keys(exc_meta) |> Enum.sort() == [
+               :entry,
+               :execution_id,
+               :kind,
+               :reason,
+               :span_ref,
+               :stacktrace
+             ]
+
+      assert exc_meta.span_ref == start_meta.span_ref
+      assert exc_meta.execution_id == "execution-1"
+      assert exc_meta.entry == :step
+      assert exc_meta.kind == :error
+      assert %ArgumentError{message: "executor blew up"} = exc_meta.reason
+      assert [_ | _] = exc_meta.stacktrace
+
+      refute_received {:telemetry, [:statifier_persistence, :execution, :step, :stop], _, _}
+    end
+
+    # Sabotage: removed the try/catch around strategy.with_execution/3 in
+    # serialized/5 - red: the builder's raise left start with no close.
+    test "a raising event builder closes the span with :exception and the raise reaches the caller",
+         %{store: store} do
+      {_source, machine} = Charts.chart_a()
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      drain()
+
+      builder = fn _machine_state -> raise RuntimeError, "builder blew up" end
+
+      assert_raise RuntimeError, "builder blew up", fn ->
+        Executions.step(store, "execution-1", machine, builder, executor: RecordingExecutor)
+      end
+
+      {_m, start_meta} = await([:statifier_persistence, :execution, :step, :start])
+      {_m, exc_meta} = await([:statifier_persistence, :execution, :step, :exception])
+
+      assert exc_meta.span_ref == start_meta.span_ref
+      assert exc_meta.entry == :step
+      assert exc_meta.kind == :error
+      assert %RuntimeError{message: "builder blew up"} = exc_meta.reason
+
+      refute_received {:telemetry, [:statifier_persistence, :execution, :step, :stop], _, _}
+    end
+
+    # Sabotage: emitted fields[:stacktrace] unchanged in
+    # execution_step_exception/2 - red: the failing clause's frame carried
+    # the builder's argument, the machine state and its datamodel.
+    test "carries no call argument in the stacktrace, and the caller keeps the original",
+         %{store: store} do
+      {_source, machine} = Charts.chart_a()
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      drain()
+
+      builder = fn %{never: :matches} -> :discard end
+
+      caught =
+        try do
+          Executions.step(store, "execution-1", machine, builder, executor: RecordingExecutor)
+        rescue
+          error in FunctionClauseError -> {error, __STACKTRACE__}
+        end
+
+      assert {%FunctionClauseError{}, [{_m, _f, caller_args, _loc} | _]} = caught
+      assert [%Statifier.MachineState{}] = caller_args
+
+      {_m, exc_meta} = await([:statifier_persistence, :execution, :step, :exception])
+      assert exc_meta.kind == :error
+      assert [_ | _] = exc_meta.stacktrace
+
+      assert Enum.all?(exc_meta.stacktrace, fn {_m, _f, arity, _loc} -> is_integer(arity) end)
+    end
+
+    # Sabotage: re-raised with :erlang.raise(:error, reason, ...) regardless
+    # of kind - red: the throw reached the caller as an ErlangError.
+    test "a throw closes the span with kind :throw and is re-thrown unchanged",
+         %{store: store} do
+      {_source, machine} = Charts.chart_a()
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      drain()
+
+      builder = fn _machine_state -> throw(:builder_threw) end
+
+      assert catch_throw(
+               Executions.step(store, "execution-1", machine, builder,
+                 executor: RecordingExecutor
+               )
+             ) == :builder_threw
+
+      {_m, exc_meta} = await([:statifier_persistence, :execution, :step, :exception])
+      assert exc_meta.kind == :throw
+      assert exc_meta.reason == :builder_threw
+
+      refute_received {:telemetry, [:statifier_persistence, :execution, :step, :stop], _, _}
     end
   end
 

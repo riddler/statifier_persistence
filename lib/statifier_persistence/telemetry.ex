@@ -30,12 +30,13 @@ defmodule StatifierPersistence.Telemetry do
   - **Measurements are numbers; metadata is everything else**, integer
     indexes included - `child_index` is metadata, because an opaque index
     has no numeric meaning to average.
-  - **The step seam is the one `:start`/`:stop` pair.** This package owns
-    an interval nobody else measures - lock, load, decode, identity-check,
-    advance, execute effects, persist - and the upstream macrostep span
-    nests inside it. `span_ref` is a fresh `make_ref/0` per span, carried
-    on both halves, and is the only pairing key (`st-ADR-0040` decision 2).
-    Everything else is a single point-in-time event.
+  - **The step seam is the one span.** This package owns an interval
+    nobody else measures - lock, load, decode, identity-check, advance,
+    execute effects, persist - and the upstream macrostep span nests
+    inside it. It opens with `:start` and closes with exactly one of
+    `:stop` or `:exception`. `span_ref` is a fresh `make_ref/0` per span,
+    carried on both halves, and is the only pairing key (`st-ADR-0040`
+    decision 2). Everything else is a single point-in-time event.
   - **`execution_id` is the identity key**, never `scope`; `session_id` rides
     only where a position has already been decoded and is explicitly `nil`
     otherwise.
@@ -59,6 +60,7 @@ defmodule StatifierPersistence.Telemetry do
   |---|---|---|
   | `[:statifier_persistence, :execution, :step, :start]` | `system_time`, `monotonic_time` | `execution_id`, `entry`, `span_ref` |
   | `[:statifier_persistence, :execution, :step, :stop]` | `duration`, `monotonic_time` | `execution_id`, `session_id`, `content_hash`, `entry`, `outcome`, `status`, `reason`, `span_ref`, `invoke_id`, `child_count` |
+  | `[:statifier_persistence, :execution, :step, :exception]` | `duration`, `monotonic_time` | `execution_id`, `entry`, `span_ref`, `kind`, `reason`, `stacktrace` |
   | `[:statifier_persistence, :execution, :lock]` | `duration`, `system_time` | `execution_id`, `strategy`, `outcome`, `reason` |
 
   `entry` is which public door was used: `:create`, `:step`,
@@ -73,6 +75,19 @@ defmodule StatifierPersistence.Telemetry do
   parent's behalf, so the step span carrying a fan-out's whole assembled
   answer is recognisable as that one (the ADR-0009 sp-8wv amendment).
   `child_count` is `nil` for a single-child subchart.
+
+  `:exception` closes the span in place of `:stop` when anything inside
+  the drive raises, throws or exits - a host executor, an event builder,
+  an adapter or the serialization strategy - and the raise then reaches
+  the caller unchanged, with its original stacktrace. Its keys are the
+  ones `:telemetry.span/3` puts on its own `:exception` event: the start
+  half's metadata plus `kind`, `reason` and `stacktrace`. `reason` is the
+  raised term, not this package's vocabulary, so it must be narrowed
+  before it becomes a dimension. `stacktrace` has each frame's argument
+  list replaced by its arity: a frame that failed to match can carry the
+  arguments it was called with, an event builder's included, and those
+  hold the datamodel this package never emits. The caller's re-raise keeps
+  the original stacktrace.
 
   ## The storage seam
 
@@ -181,6 +196,7 @@ defmodule StatifierPersistence.Telemetry do
 
   @execution_step_start [:statifier_persistence, :execution, :step, :start]
   @execution_step_stop [:statifier_persistence, :execution, :step, :stop]
+  @execution_step_exception [:statifier_persistence, :execution, :step, :exception]
   @execution_lock [:statifier_persistence, :execution, :lock]
   @adapter_call [:statifier_persistence, :adapter, :call]
   @identity_refused [:statifier_persistence, :identity, :refused]
@@ -200,6 +216,7 @@ defmodule StatifierPersistence.Telemetry do
   @events [
     @execution_step_start,
     @execution_step_stop,
+    @execution_step_exception,
     @execution_lock,
     @adapter_call,
     @identity_refused,
@@ -276,6 +293,49 @@ defmodule StatifierPersistence.Telemetry do
         child_count: fields[:child_count]
       }
     )
+  end
+
+  @doc """
+  Emits `[:statifier_persistence, :execution, :step, :exception]`, the
+  step span's close when the drive raised, threw or exited, `duration` in
+  `:native` units measured from `execution_step_start/3`'s reading.
+
+  The caller re-raises afterwards; this function only reports. The keys
+  follow `:telemetry.span/3`'s own `:exception` event. The `stacktrace`
+  field is emitted with every frame's argument list replaced by its arity,
+  so no call argument travels on the event.
+  """
+  @spec execution_step_exception(start_time :: integer(), fields :: fields()) :: :ok
+  def execution_step_exception(start_time, fields) do
+    monotonic_time = System.monotonic_time()
+
+    :telemetry.execute(
+      @execution_step_exception,
+      %{duration: monotonic_time - start_time, monotonic_time: monotonic_time},
+      %{
+        execution_id: fields[:execution_id],
+        entry: fields[:entry],
+        span_ref: fields[:span_ref],
+        kind: fields[:kind],
+        reason: fields[:reason],
+        stacktrace: without_arguments(fields[:stacktrace])
+      }
+    )
+  end
+
+  # A frame of a function-clause failure carries the call's arguments in
+  # place of its arity; anything else passes through unchanged.
+  @spec without_arguments(Exception.stacktrace() | nil) :: Exception.stacktrace() | nil
+  defp without_arguments(nil), do: nil
+
+  defp without_arguments(stacktrace) do
+    Enum.map(stacktrace, fn
+      {module, function, arguments, location} when is_list(arguments) ->
+        {module, function, length(arguments), location}
+
+      frame ->
+        frame
+    end)
   end
 
   @doc """
