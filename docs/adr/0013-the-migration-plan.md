@@ -701,3 +701,79 @@ What was re-read:
   unmapped (`transform.ex`).
 - **The walk.** ADR-0014 carries "A parked hold", the walk this Amendment
   reads.
+
+## Note (2026-09-23, sp-x1gx): what `migrate/4` answers, as built
+
+This Note decides nothing and changes no status line. It names every
+answer `Executions.migrate/4` gives, as the code on `main` decided them,
+and records that they stay as built: each arm below is public in 0.14.0
+and 0.15.0, and none of the files it is read from has changed since
+`v0.15.0`. Every cite below was read on `main` at `561b748`, in
+`lib/statifier_persistence/executions.ex` unless another file is named.
+
+The answer type is `migrate/4`'s `@spec`: `{:ok, execution, migrated}`,
+`{:parked, {:migration_refused, findings}}` or `{:error, reason}` with
+`reason` a `t:migrate_error/0`.
+
+- **`{:ok, execution, migrated}`.** The execution, now `:active` on the
+  plan's `to` hash, and a `t:migrated/0` map of `from_content_hash`,
+  `to_content_hash` and `dropped` (`migrated_answer/3`). It is the only
+  answer after which the one `[:statifier_persistence, :execution,
+  :migrated]` event is emitted (`migrated/2`).
+- **`{:parked, {:migration_refused, findings}}`.** Under `on_failure:
+  :park` only, when the validation against the execution refused; the one
+  write is the status `:needs_migration` with a `nil` failure
+  (`refuse/4`).
+- **`{:error, {:invalid_plan, findings}}`.** The static validation against
+  the two machines, `Plan.validate/3`'s findings (`static_check/3`).
+- **`{:error, {:chart_retired, info}}`.** The plan's `to` hash is
+  tombstoned (`StatifierPersistence.Storage.check_chart_retired/2`, called
+  from `plan_check/5`). The arm is the adapter's
+  (`lib/statifier_persistence/storage/adapter.ex`, `t:error/0`) and
+  reaches `t:migrate_error/0` through `t:error/0`.
+- **`{:error, {:no_pin_source, states}}`.** The plan leaves unmapped or
+  drops a state that could own a timer and no pin source was supplied
+  (`timer_check/4`).
+- **`{:error, {:terminal_execution, execution}}`.** The stored record is
+  `:completed`, `:failed` or `:cancelled`; `execution` is built from that
+  record (`check_record/2`).
+- **`{:error, {:not_on_from_chart, stored_content_hash, plan_from}}`.**
+  The record is stored on another hash than the plan's `from`
+  (`check_record/2`).
+- **`{:error, {:pin_source_failed, {module, reason}}}`.** A pin source did
+  not answer, `reason` a `t:StatifierPersistence.PinSource.reason/0`
+  (`ask_pin_sources/3`, through `ask_timer_sources/3`). The arm is in
+  `t:error/0`, the arm `retire_chart/4` answers.
+- **`{:error, {:migration_refused, findings}}`.** Under `on_failure:
+  :refuse`, the default, when the validation against the execution
+  refused, every finding a `t:migration_finding/0`
+  (`validate_execution/5`, `refuse/4`).
+- **`{:error, reason}` for any other `t:error/0` arm.** The serialization
+  strategy's own refusal passes through unchanged (`migrated/2`), and so
+  does an error from reading the record
+  (`StatifierPersistence.Storage.fetch_execution/2`), loading the position
+  through the identity guard (`Storage.load_execution_position/3`), or the
+  write (`Storage.update_execution/5` in `repin/5`,
+  `Storage.update_execution_status/4` in `refuse/4`).
+
+Two things are not answers of `migrate/4`. A missing or malformed
+`from_machine:` or `to_machine:`, an `on_failure:` other than `:refuse` or
+`:park`, and a `pin_sources:` that is not a list raise, before anything is
+read (`migrate/4`). And `Plan.new/1`'s refusal,
+`{:error, {:malformed_plan, field, reason}}`
+(`lib/statifier_persistence/migration/plan.ex`, `t:malformed/0`), comes
+from building a plan; `migrate/4` takes a `%Plan{}` that already exists and
+never answers it. The static validation's `{:invalid_plan, findings}` sits
+beside it and is the refusal of a well-formed plan against two machines.
+
+**The terminal refusal differs from the delivery doors' answer, and stays
+that way.** `step/5`, `fail/4` and `cancel/3` answer a terminal execution
+with `{:discarded, execution}` and emit
+`[:statifier_persistence, :execution, :discarded]` with the reason
+`:terminal_execution` (`discarded/5`, called from `step_tail/7`,
+`fail_tail/3` and `cancel_tail/2`). `migrate/4` answers the same stored
+status with `{:error, {:terminal_execution, execution}}`: inside the error
+arm, with no discarded event, writing nothing under either `on_failure:`
+value, as decision 4 lists it among the refusals that park nothing. The
+atom `:terminal_execution` is the same in both places; the answer shape is
+not, and the code keeps each as it is.
