@@ -10,6 +10,44 @@ fragment in [`changelog.d/`](https://github.com/riddler/statifier_persistence/bl
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
 
+## [0.15.1] 2026-09-23
+
+Patch release: fixes and telemetry gaps found after 0.15.0. A drive that
+raises now closes its step span with a new
+`[:statifier_persistence, :execution, :step, :exception]` event,
+`StatifierPersistence.Executions.unpark/3` reports itself on a new
+`[:statifier_persistence, :execution, :unparked]` event and on the lock
+event, and `StatifierPersistence.Telemetry.events/0` returns nineteen
+names. `migrate/4` and `migrate_tree/4` refuse a kept invocation whose
+stored ordinal names no `<invoke>` element, and `migrate_tree/4` answers
+a missing execution the same way on both shipped adapters.
+
+Upgrading: no schema migration, and no error shape a host matches is
+added or removed. The `statifier` floor stays `~> 2.6`.
+
+### Added
+
+- `StatifierPersistence.Executions.unpark/3` emits `[:statifier_persistence, :execution, :unparked]` (`execution_id`, `content_hash`) when it puts a `:needs_migration` execution back to `:active`, and `[:statifier_persistence, :execution, :lock]` for its wait on the execution's exclusion; `StatifierPersistence.Telemetry.events/0` returns nineteen names.
+- A telemetry event, `[:statifier_persistence, :execution, :step, :exception]`, closes the step span in place of `:stop` when a drive raises, throws or exits (a host executor or event builder included), carrying `execution_id`, `entry`, `span_ref`, `kind`, and a `reason` and `stacktrace` narrowed so no raised value or call argument travels; the raise still reaches the caller unchanged. `StatifierPersistence.Telemetry.events/0` returns eighteen names.
+- `StatifierPersistence.Telemetry.execution_step_exception/2`, the emitter of `[:statifier_persistence, :execution, :step, :exception]`.
+
+### Fixed
+
+- `StatifierPersistence.Executions.migrate_tree/4` on the Ecto adapter
+  answers `{:error, :execution_not_found}` for a unit naming an execution
+  that is not stored, as the in-memory adapter does, instead of
+  `{:error, {:adapter, :rollback}}`. That old answer came under the
+  default serialization, whose per-execution lock is a transaction; under
+  a serialization strategy that opens no transaction, 0.15.0 already
+  answered `{:error, :execution_not_found}`. The refusal writes nothing
+  and no longer aborts a caller's own enclosing transaction.
+- A raise from a host executor or event builder during a drive through `StatifierPersistence.Executions` or `StatifierPersistence.Driver` no longer leaves the `[:statifier_persistence, :execution, :step, :start]` span open with no closing event.
+- `StatifierPersistence.Executions.migrate/4` and `migrate_tree/4` refuse,
+  with `{:invocation_element_changed, key, target}`, a stored active
+  invocation whose ordinal names no `<invoke>` element of its state when the
+  plan keeps it at that ordinal, instead of carrying it onto whatever element
+  the new chart holds there. Repair the stored position.
+
 ## [0.15.0] 2026-09-23
 
 Feature release: a parent execution and the durable children it invoked
