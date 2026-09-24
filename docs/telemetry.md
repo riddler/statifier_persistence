@@ -279,7 +279,8 @@ process.
 `:supports_content_hash_query?`, `:count_executions_by_content_hash`,
 `:list_active_execution_ids_by_content_hash`, `:supports_chart_retirement?`,
 `:retire_chart`, `:supports_retired_info?`, `:fetch_retired_info`,
-`:supports_input_log?`, `:append_input`, `:list_inputs` - a closed vocabulary
+`:supports_input_log?`, `:append_input`, `:list_inputs`,
+`:supports_execution_pruning?`, `:prune_executions` - a closed vocabulary
 fixed by the behaviour. The behaviour's other two callbacks never appear:
 `isolate/1` is called by the conformance suite alone, and
 `lock_execution/3` is taken through the serialization strategy, which

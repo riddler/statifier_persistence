@@ -2270,6 +2270,237 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         end
       end
 
+      # -- Adapter level: pruning finished executions (ADR-0016) ---------
+      #
+      # Generated only when the adapter under test exports the optional
+      # prune_executions/3. An adapter that does not sees no behaviour
+      # change and generates none of these cases; the facade refuses it at
+      # open. The input log case is generated only when the adapter also
+      # keeps a log (append_input/3). Untagged: the selection, the delete
+      # and the update need nothing a backend other than Postgres lacks.
+
+      if Code.ensure_loaded?(conformance_adapter) and
+           function_exported?(conformance_adapter, :prune_executions, 3) do
+        # sabotage: in InMemory's prune_executions/3, replaced the record
+        # with one holding only its id and a nil position -> red; in the
+        # Ecto adapter's, nulled `failure` beside position_blob -> red,
+        # the kept fields no longer matched. Verified red on each
+        # conformance module, reverted from a copy.
+        test "adapter: prune_executions/3 nulls a finished execution's position and keeps its row",
+             %{store: store} do
+          ended = ~U[2026-01-01 00:00:00.000000Z]
+
+          prune_execution(store, "execution-conformance-prune-kept", :failed, ended,
+            failure: "boom"
+          )
+
+          assert {:ok, before} =
+                   Storage.fetch_execution(store, "execution-conformance-prune-kept")
+
+          assert is_binary(before.position_blob)
+
+          assert {:ok, %{executions: 1, position_blobs: 1}} =
+                   @conformance_adapter.prune_executions(
+                     store.opts,
+                     ~U[2026-02-01 00:00:00.000000Z],
+                     10
+                   )
+
+          assert {:ok, pruned} =
+                   Storage.fetch_execution(store, "execution-conformance-prune-kept")
+
+          assert pruned.position_blob == nil
+          assert Map.delete(pruned, :position_blob) == Map.delete(before, :position_blob)
+
+          assert {:error, :execution_position_missing} =
+                   Storage.load_execution_position(
+                     store,
+                     "execution-conformance-prune-kept",
+                     elem(Charts.chart_a(), 1)
+                   )
+        end
+
+        # sabotage: in each adapter's prune_executions/3, dropped the
+        # terminal-status clause -> red, the stamped row written back to
+        # :active was counted. And: compared the stamp with <= instead of
+        # < -> red, the row that ended exactly at the cutoff was pruned.
+        # And: let a terminal row with no stamp through -> red, the
+        # unstamped row was counted. Verified red on both conformance
+        # modules, reverted from a copy.
+        test "adapter: prune_executions/3 leaves what has not ended before the cutoff", %{
+          store: store
+        } do
+          cutoff = ~U[2026-02-01 00:00:00.000000Z]
+          prune_execution(store, "execution-conformance-prune-at-cutoff", :completed, cutoff)
+
+          prune_execution(
+            store,
+            "execution-conformance-prune-later",
+            :cancelled,
+            ~U[2026-03-01 00:00:00.000000Z]
+          )
+
+          prune_execution(store, "execution-conformance-prune-active", :active, nil)
+
+          # A row stamped when it ended and then written back to :active
+          # keeps its stamp (the execution record's rule) and is not
+          # finished, so a prune must not take its position.
+          reopened = "execution-conformance-prune-reopened"
+          prune_execution(store, reopened, :completed, ~U[2026-01-01 00:00:00.000000Z])
+
+          # A terminal row with no stamp - one that ended before its store
+          # could hold the field - has no end time to compare, so it is
+          # never pruned. Written through the adapter, because every
+          # facade writer stamps a terminal status.
+          assert {:ok, record} = Storage.fetch_execution(store, reopened)
+          unstamped = "execution-conformance-prune-unstamped"
+
+          assert :ok =
+                   @conformance_adapter.insert_execution(store.opts, %{
+                     record
+                     | execution_id: unstamped,
+                       ended_at: nil
+                   })
+
+          assert :ok = Storage.update_execution_status(store, reopened, :active)
+
+          assert {:ok, %{status: :active, ended_at: %DateTime{}}} =
+                   Storage.fetch_execution(store, reopened)
+
+          assert {:ok, %{executions: 0, position_blobs: 0, inputs: 0}} =
+                   @conformance_adapter.prune_executions(store.opts, cutoff, 10)
+
+          for id <- [
+                "execution-conformance-prune-at-cutoff",
+                "execution-conformance-prune-later",
+                "execution-conformance-prune-active",
+                reopened,
+                unstamped
+              ] do
+            assert {:ok, %{position_blob: blob}} = Storage.fetch_execution(store, id)
+            assert is_binary(blob), id
+          end
+        end
+
+        # sabotage: in each adapter's prune_executions/3, dropped the
+        # "something left to clear" clause -> red here, the second batch
+        # counted the pruned execution again, and red on the limit case
+        # below. Verified red on both conformance modules, reverted from a
+        # copy.
+        test "adapter: prune_executions/3 is idempotent - a second batch answers zeros", %{
+          store: store
+        } do
+          cutoff = ~U[2026-02-01 00:00:00.000000Z]
+
+          prune_execution(
+            store,
+            "execution-conformance-prune-once",
+            :completed,
+            ~U[2026-01-01 00:00:00.000000Z]
+          )
+
+          assert {:ok, %{executions: 1}} =
+                   @conformance_adapter.prune_executions(store.opts, cutoff, 10)
+
+          assert {:ok, %{executions: 0, position_blobs: 0, inputs: 0}} =
+                   @conformance_adapter.prune_executions(store.opts, cutoff, 10)
+        end
+
+        # sabotage: in each adapter's prune_executions/3, sorted newest end
+        # first -> red, the first batch of one took the later execution.
+        # Verified red on both conformance modules, reverted from a copy.
+        test "adapter: prune_executions/3 takes at most limit executions, oldest end first", %{
+          store: store
+        } do
+          cutoff = ~U[2026-02-01 00:00:00.000000Z]
+
+          prune_execution(
+            store,
+            "execution-conformance-prune-second",
+            :completed,
+            ~U[2026-01-20 00:00:00.000000Z]
+          )
+
+          prune_execution(
+            store,
+            "execution-conformance-prune-first",
+            :completed,
+            ~U[2026-01-10 00:00:00.000000Z]
+          )
+
+          assert {:ok, %{executions: 1}} =
+                   @conformance_adapter.prune_executions(store.opts, cutoff, 1)
+
+          assert {:ok, %{position_blob: nil}} =
+                   Storage.fetch_execution(store, "execution-conformance-prune-first")
+
+          assert {:ok, %{position_blob: second}} =
+                   Storage.fetch_execution(store, "execution-conformance-prune-second")
+
+          assert is_binary(second)
+
+          assert {:ok, %{executions: 1}} =
+                   @conformance_adapter.prune_executions(store.opts, cutoff, 1)
+
+          assert {:ok, %{executions: 0}} =
+                   @conformance_adapter.prune_executions(store.opts, cutoff, 1)
+        end
+
+        if function_exported?(conformance_adapter, :append_input, 3) do
+          # sabotage: in the Ecto adapter's prune_executions/3, skipped the
+          # input delete -> red, the pruned execution's log still listed
+          # its entries. And: deleted every input row rather than the
+          # batch's -> red, the unfinished execution's log was empty. Both
+          # red on the SQLite mirror too. Verified red, reverted from a copy.
+          test "adapter: prune_executions/3 deletes a pruned execution's input log and no other's",
+               %{store: store} do
+            cutoff = ~U[2026-02-01 00:00:00.000000Z]
+            finished = "execution-conformance-prune-logged"
+            running = "execution-conformance-prune-logged-active"
+            prune_execution(store, finished, :completed, ~U[2026-01-01 00:00:00.000000Z])
+            prune_execution(store, running, :active, nil)
+
+            for id <- [finished, finished, running] do
+              assert {:ok, _seq} =
+                       @conformance_adapter.append_input(store.opts, id, %{
+                         execution_id: id,
+                         seq: 0,
+                         door: "step",
+                         input_blob: <<1>>
+                       })
+            end
+
+            assert {:ok, %{executions: 1, position_blobs: 1, inputs: 2}} =
+                     @conformance_adapter.prune_executions(store.opts, cutoff, 10)
+
+            assert {:ok, []} = @conformance_adapter.list_inputs(store.opts, finished)
+            assert {:ok, [%{seq: 0}]} = @conformance_adapter.list_inputs(store.opts, running)
+          end
+        end
+
+        # Inserts one execution in `status`, stamped `ended_at` when that
+        # is terminal, with a stored position. Called from inside each case
+        # rather than from a `setup`, for the input log helper's reason.
+        defp prune_execution(store, execution_id, status, ended_at, opts \\ []) do
+          {_source, machine} = Charts.chart_a()
+
+          machine_state =
+            Statifier.MachineState.new(machine, session_id: "sess_" <> execution_id)
+
+          :ok =
+            Storage.insert_execution(
+              store,
+              execution_id,
+              machine_state,
+              status,
+              opts,
+              ended_at || DateTime.utc_now()
+            )
+
+          execution_id
+        end
+      end
+
       # -- Facade level --------------------------------------------------
 
       # sabotage: made StatifierPersistence.Storage's private ended_at/2

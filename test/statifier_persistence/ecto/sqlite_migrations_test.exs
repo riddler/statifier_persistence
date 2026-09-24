@@ -887,6 +887,48 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
     end
   end
 
+  describe "pruning finished executions on this adapter" do
+    # Mirrors the conformance suite's input log prune case, which the Ecto
+    # adapter passes against Postgres: the selection's EXISTS over the
+    # inputs table, and the absence of a row lock, are what this backend
+    # has to parse (ADR-0016).
+    #
+    # sabotage: gave Storage.Ecto's due_executions/3 its Postgres row
+    # lock on every backend -> red here, the batch raised on a lock
+    # clause SQLite does not have. Verified red, reverted from a copy.
+    test "Retention.prune/3 clears a finished execution's position and log and keeps its row" do
+      store = sqlite_store()
+      {:ok, machine} = Statifier.compile(@child_source)
+      finished = "execution_sqlite_prune_finished"
+      machine_state = MachineState.new(machine, session_id: "sess_" <> finished)
+
+      :ok =
+        Storage.insert_execution(
+          store,
+          finished,
+          machine_state,
+          :completed,
+          [],
+          ~U[2026-01-01 00:00:00.000000Z]
+        )
+
+      running = logged_execution(store, "execution_sqlite_prune_running")
+
+      assert {:ok, 0} = Storage.append_input(store, finished, :step, event("go"))
+      assert {:ok, 1} = Storage.append_input(store, finished, :step, event("go"))
+      assert {:ok, 0} = Storage.append_input(store, running, :step, event("go"))
+
+      assert {:ok, %{executions: 1, position_blobs: 1, inputs: 2}} =
+               StatifierPersistence.Retention.prune(store, ~U[2026-02-01 00:00:00.000000Z])
+
+      assert {:ok, %{status: :completed, position_blob: nil, ended_at: %DateTime{}}} =
+               Storage.fetch_execution(store, finished)
+
+      assert {:ok, []} = Storage.list_inputs(store, finished)
+      assert {:ok, [%{seq: 0}]} = Storage.list_inputs(store, running)
+    end
+  end
+
   defp event(name), do: %Event{name: name, type: :external}
 
   defp logged_execution(store, execution_id) do
