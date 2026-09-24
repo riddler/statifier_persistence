@@ -12,7 +12,9 @@
 > compatibility shim. Every such change is recorded in
 > [CHANGELOG.md](CHANGELOG.md) under a bold **Breaking** heading that says what
 > to do about it. Pinning to an exact minor - `~> X.Y.0` - is the recommended way
-> to consume the package until 1.0.
+> to consume the package until 1.0. What a host changes for each minor from 0.13
+> on is on one page:
+> [`docs/upgrading.md`](https://github.com/riddler/statifier_persistence/blob/main/docs/upgrading.md).
 
 Durable stepper and storage adapters for
 [Statifier](https://github.com/riddler/statifier-ex).
