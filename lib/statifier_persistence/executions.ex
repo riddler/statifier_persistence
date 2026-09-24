@@ -1857,14 +1857,20 @@ defmodule StatifierPersistence.Executions do
   Each is asked through `StatifierPersistence.PinSource.collect/3`, with
   a context carrying the ids of the `:active` executions on the hash,
   because a source such as a timer queue knows executions and never
-  knows content hashes (decision 4).
+  knows content hashes (decision 4). A `:needs_migration` execution is
+  not in that list (ADR-0014 decision 4): it already refuses the
+  retirement through its own count.
 
   ## What refuses
 
-  A non-zero count anywhere in decision 1's blocking set - an `:active`
-  execution row on the hash, a durable-child linkage pin naming it whose
-  parent is `:active`, a position row on it, or any source's non-zero
-  count - answers `{:error, {:pinned, counts}}` and writes nothing. The
+  A non-zero count anywhere in decision 1's blocking set, as ADR-0014
+  decision 4 reads it - an `:active` or `:needs_migration` execution row
+  on the hash, a durable-child linkage pin naming it whose parent is
+  `:active` or `:needs_migration`, a position row on it, or any source's
+  non-zero count - answers `{:error, {:pinned, counts}}` and writes
+  nothing. A parked execution pins its chart as an `:active` one does:
+  it is not terminal, and `unpark/3` puts it back to `:active` on the
+  chart it was already pinned to. The
   refusal carries every count it knows, this package's own under its own
   name and each source's under that source's module name, so a host
   learns everything holding the chart in one answer rather than one
