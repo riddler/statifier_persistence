@@ -1643,9 +1643,10 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # sabotage: in the adapter under test's write_tree_migration/2,
         # keep the writes made before a refusal - the in-memory adapter
         # replacing the state with the partial map, the Ecto adapter
-        # returning the error without rollback/1 -> red on both
-        # conformance suites: the first execution came back changed.
-        # Verified red, reverted from the copies.
+        # skipping tree_rows_stored/2 and returning the error without
+        # rollback/1 -> red on both conformance suites: the first
+        # execution came back changed. Verified red, reverted from the
+        # copies.
         test "adapter: a tree write that cannot land one write lands none", %{store: store} do
           first = insert_tree_execution(store, "tree-first", "sha256:tree-first-old", %{})
           repinned = %{first | content_hash: "sha256:tree-first-new", position_blob: <<21>>}

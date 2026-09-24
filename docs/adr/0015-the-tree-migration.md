@@ -477,3 +477,52 @@ resolve rule is checked for a live node absent from `plans` whose parent
 `plans` names; a node whose parent is not moved resolves as it did before
 the call (`unresolved_children/3`). Both decisions stay as written, and the
 sp-y3hj Note is how they are read.
+
+## Amendment (2026-09-23, sp-4bnu): a unit that cannot land answers the adapter's own reason on both shipped adapters
+
+Status of this amendment: proposed (2026-09-23, sp-4bnu). The record above
+stays accepted; this amendment is proposed until the operator accepts it.
+
+The sp-y3hj Note above records that on the Ecto adapter under the default
+serialization a unit that rolled back inside the lock's transaction reaches
+the caller as the lock's own `{:error, {:adapter, :rollback}}`, while the
+in-memory adapter answers the unit's own reason. The same failed unit had
+two answers, depending on the store. This amendment makes them one.
+
+**It amends decision 3's sentence on an enclosing transaction.** An adapter
+reached inside an enclosing transaction still never returns an error that
+would commit the writes it had already made. A refusal it can decide before
+its first write it returns as it is: nothing was written, so nothing is
+rolled back and the enclosing transaction is left open. Only a failure after
+a write rolls the enclosing transaction back. That is the shape the Ecto
+adapter's `retire_chart/3` already has: its refusals write nothing and call
+no `rollback/1` (`lib/statifier_persistence/storage/ecto.ex`,
+`retire_chart/3`).
+
+- **The Ecto adapter decides a missing execution before its first write.**
+  It reads every execution the writes name, and one that is not stored is
+  `{:error, :execution_not_found}` with nothing written
+  (`lib/statifier_persistence/storage/ecto.ex`, `tree_rows_stored/2`). A
+  write that still matches no row after that read rolls the transaction
+  back, as before (`tree_writes/3`).
+- **`migrate_tree/4` answers the same term on both shipped adapters.** A
+  unit that names an execution that is not stored answers
+  `{:error, :execution_not_found}` and writes no node, over the in-memory
+  and the Ecto adapter alike
+  (`test/statifier_persistence/executions_migrate_tree_test.exs`, "a
+  failure inside the one unit writes no node and answers the unit's
+  reason"). The term is one `t:StatifierPersistence.Executions.migrate_tree_error/0`
+  already admits through `t:StatifierPersistence.Executions.error/0`; no
+  error shape is added.
+- **Inside a host's own transaction that refusal no longer aborts it.** The
+  host's transaction stays open with nothing of the unit written, as it
+  does after a refused `retire_chart/3`. A failure after a write still
+  aborts it, and the caller then sees the enclosing transaction's own
+  rollback.
+- **The callback's contract says the same**
+  (`lib/statifier_persistence/storage/adapter.ex`,
+  `c:write_tree_migration/2`).
+
+The sp-y3hj Note's sentence on `{:error, {:adapter, :rollback}}` stays as
+written and is read as amended here: it now describes only a failure after
+a write.

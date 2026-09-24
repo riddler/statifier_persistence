@@ -1070,15 +1070,20 @@ if Code.ensure_loaded?(Ecto) do
     optional `c:StatifierPersistence.Storage.Adapter.write_tree_migration/2`,
     ADR-0015 decision 3).
 
-    Each write is one `update_all/3` keyed on `execution_id`, and a write
-    that matches no row is `{:error, :execution_not_found}`. Any refusal
-    rolls the transaction back with `rollback/1`, so the writes before it
-    are undone. Reached inside a caller's own transaction - the per-execution
-    lock's is one - the transaction joins it and the rollback aborts that
-    transaction too: a refusal must not return an error the enclosing
-    transaction would then commit (the callback's contract). The enclosing
-    transaction then answers its own rollback, which is how the lock reports
-    it.
+    Every execution the writes name is read first, and one that is not
+    stored is `{:error, :execution_not_found}` before any write is made:
+    that refusal writes nothing, so it is returned as it is and nothing is
+    rolled back, as `retire_chart/3` returns its refusals. Reached inside a
+    caller's own transaction - the per-execution lock's is one - the
+    transaction joins it, so the refusal reaches the caller as the
+    adapter's own reason and the enclosing transaction is left open.
+
+    Each write is then one `update_all/3` keyed on `execution_id`. A write
+    that still matches no row rolls the transaction back with
+    `rollback/1`, so the writes before it are undone; inside a caller's
+    own transaction that aborts the enclosing one too, which then answers
+    its own rollback: a failure after a write must not return an error the
+    enclosing transaction would then commit (the callback's contract).
     """
     @impl Adapter
     @spec write_tree_migration(Adapter.opts(), [Adapter.tree_write()]) ::
@@ -1088,15 +1093,45 @@ if Code.ensure_loaded?(Ecto) do
 
       transaction =
         repo.transaction(fn ->
-          case Enum.reduce_while(writes, :ok, &tree_step(opts, &1, &2)) do
-            :ok -> :ok
-            {:error, reason} -> repo.rollback(reason)
-          end
+          with :ok <- tree_rows_stored(opts, writes), do: tree_writes(repo, opts, writes)
         end)
 
       case transaction do
-        {:ok, :ok} -> :ok
+        {:ok, answer} -> answer
         {:error, _reason} = error -> error
+      end
+    end
+
+    # A refusal decided before the first write writes nothing, so it needs
+    # no `rollback/1`: returning it keeps the adapter's own reason, where a
+    # rollback inside the lock's transaction would reach the caller as the
+    # lock's `{:adapter, :rollback}` (ADR-0015's sp-4bnu Amendment).
+    @spec tree_rows_stored(Adapter.opts(), [Adapter.tree_write()]) ::
+            :ok | {:error, Adapter.error()}
+    defp tree_rows_stored(opts, writes) do
+      named = writes |> Enum.map(&tree_write_id/1) |> Enum.uniq()
+
+      stored =
+        repo(opts).all(
+          from(r in execution_schema(opts),
+            where: r.execution_id in ^named,
+            select: r.execution_id
+          )
+        )
+
+      if length(stored) == length(named), do: :ok, else: {:error, :execution_not_found}
+    end
+
+    defp tree_write_id({:repin, %{execution_id: execution_id}, _linkage_hash}), do: execution_id
+    defp tree_write_id({:park, execution_id}), do: execution_id
+
+    # A write that matches no row after `tree_rows_stored/2` has read every
+    # one rolls the unit back, undoing the writes before it.
+    @spec tree_writes(module(), Adapter.opts(), [Adapter.tree_write()]) :: :ok
+    defp tree_writes(repo, opts, writes) do
+      case Enum.reduce_while(writes, :ok, &tree_step(opts, &1, &2)) do
+        :ok -> :ok
+        {:error, reason} -> repo.rollback(reason)
       end
     end
 

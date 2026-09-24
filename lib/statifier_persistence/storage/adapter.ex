@@ -838,10 +838,14 @@ defmodule StatifierPersistence.Storage.Adapter do
   and the failure alone.
 
   An adapter reached inside an enclosing transaction - the Ecto adapter's
-  `c:lock_execution/3` is one - rolls that transaction back on a refusal
-  rather than returning an error that would commit the writes it had
-  already made. Like the other execution callbacks it decodes nothing,
-  validates no status transition and performs no identity check.
+  `c:lock_execution/3` is one - never returns an error that would commit
+  the writes it had already made. A refusal it can decide before its
+  first write, such as an execution that is not stored, it returns as it
+  is: nothing was written, so the enclosing transaction is left open and
+  the caller sees the adapter's own reason. A failure after a write
+  rolls the enclosing transaction back. Like the other execution
+  callbacks it decodes nothing, validates no status transition and
+  performs no identity check.
   """
   @callback write_tree_migration(opts(), [tree_write()]) :: :ok | {:error, error()}
 
