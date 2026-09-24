@@ -242,12 +242,17 @@ defmodule StatifierPersistence.Migration.Transform do
   # default trusts it, so a reordered or replaced element would otherwise
   # take the live invocation's finalize and autoforward. Only a key whose
   # target is in range reaches here; an out-of-range default is named by
-  # `invocation_out_of_range` alone.
+  # `invocation_out_of_range` alone. A key whose from ordinal names no
+  # element of the from state - `Position.import/2` resolves a key's state
+  # id and not its ordinal - has no element to be the same as, and is
+  # refused like any other element that is not its own (ADR-0013's
+  # 2026-09-23 Amendment on a missing source element).
   defp element_findings(pairs, from_machine, to_machine) do
     for {key, target, _invoke_id} <- pairs,
-        %Invoke{} = source <- [invoke_at(from_machine, key)],
-        %Invoke{} = element <- [invoke_at(to_machine, target)],
-        not same_element?({from_machine, source}, {to_machine, element}),
+        not same_element?(
+          {from_machine, invoke_at(from_machine, key)},
+          {to_machine, invoke_at(to_machine, target)}
+        ),
         do: {:invocation_element_changed, key, target}
   end
 

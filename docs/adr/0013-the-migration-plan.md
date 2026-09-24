@@ -777,3 +777,49 @@ arm, with no discarded event, writing nothing under either `on_failure:`
 value, as decision 4 lists it among the refusals that park nothing. The
 atom `:terminal_execution` is the same in both places; the answer shape is
 not, and the code keeps each as it is.
+
+## Amendment (2026-09-23, sp-qe8s): an invocation whose from ordinal names no `<invoke>` element is refused as an element that is not its own
+
+Status of this amendment: proposed (2026-09-23, sp-qe8s). The record above
+is accepted, and so are its two earlier 2026-09-23 Amendments; this one
+changes neither status line.
+
+The sp-i5ha Amendment's finding 1 compares the source element with the
+target element, and says what happens when the target does not exist: an
+ordinal out of range stays decision 3's `invocation_out_of_range` finding
+alone. It does not say what happens when the source does not exist. At
+`561b748` the comparison skipped such a pair, so the invocation crossed
+onto whatever element the to state held at that ordinal and `migrate/4`
+answered `:ok` (`lib/statifier_persistence/migration/transform.ex`,
+`element_findings/3`, read at `561b748`). That is the one place the
+identity rule failed open.
+
+**The case is reachable.** The engine never mints such a key, but a stored
+position can carry one. `Position.import/2` resolves the state id of each
+active invocation's key and not its ordinal (`Statifier.Position`,
+`import/2`, statifier 2.6.0, the version `mix.lock` resolves), and
+`Storage.update_execution/5` writes whatever position it is given
+(`lib/statifier_persistence/storage.ex`, `update_execution/5`, read at
+`561b748`). The plan's static validation range-checks the from ordinal
+only of a move the plan names in `invocations`
+(`lib/statifier_persistence/migration/plan.ex`, `invocation_findings/3`,
+read at `561b748`), so an invocation kept by the same-ordinal default
+reaches the element check unchecked. When the to state has an element at
+that ordinal, the target is in range and the comparison runs.
+
+**It amends the sp-i5ha Amendment's finding 1.** A source element that
+does not exist is never the same element as the target. The invocation
+is refused with the finding that already names an element that is not
+its own, `{:invocation_element_changed, {from_state_id, from_ordinal},
+{to_state_id, to_ordinal}}`, inside `{:migration_refused, findings}` with
+every other finding, before any write, and it parks under
+`on_failure: :park` as that finding always has. `t:migration_finding/0`
+gains no arm; its `invocation_element_changed` entry names this case
+(`lib/statifier_persistence/executions.ex`). A host that stored such a
+position repairs the position, or names the invocation's move in the
+plan's `invocations`, where the static validation refuses the from ordinal
+as `invocation_out_of_range` on the `:from` side.
+
+**A host can observe it as a change.** A migration that answered `:ok`
+before this amendment now refuses, or parks under `:park`, so the code
+change carries a changelog fragment that says so.

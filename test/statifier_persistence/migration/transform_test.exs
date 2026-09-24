@@ -466,5 +466,22 @@ defmodule StatifierPersistence.Migration.TransformTest do
                {:error,
                 [{:invocation_element_changed, {"awaiting_pickup", 0}, {"awaiting_pickup", 0}}]}
     end
+
+    # A position can name an ordinal its state has no `<invoke>` for:
+    # `Position.import/2` resolves the state id of each key and not its
+    # ordinal. The default keeps that ordinal, and the to state has an
+    # element there, so the element check is the one that sees it.
+    #
+    # sabotage: restored element_findings/3's filter that skipped a pair
+    # whose source element is missing (migration/transform.ex) -> red: the
+    # slip transformed onto the to chart's second element. Verified red,
+    # reverted from a copy.
+    test "an ordinal with no source element is refused, not skipped" do
+      active = %{{"awaiting_pickup", 0} => "notice", {"awaiting_pickup", 1} => "slip"}
+
+      assert transform_invocations(@notice, @notice <> @slip, active) ==
+               {:error,
+                [{:invocation_element_changed, {"awaiting_pickup", 1}, {"awaiting_pickup", 1}}]}
+    end
   end
 end
