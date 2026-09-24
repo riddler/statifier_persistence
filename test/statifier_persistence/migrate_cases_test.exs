@@ -56,6 +56,11 @@ defmodule StatifierPersistence.MigrateCasesTest do
     refused for each of the two, nothing written, and parks under
     `:park` (the same Amendment, finding 1). The plan that names both
     moves migrates.
+  - stored slip at an ordinal its state lacks refused - a position
+    written through Storage names an invocation at an ordinal its state
+    has no `<invoke>` for, and the to chart has an element there; it is
+    refused as an element that is not its own, nothing written, and parks
+    under `:park` (ADR-0013's Amendment on a missing source element).
 
   And the paths the invocation, history and lock rules add: an invocation
   whose same-ordinal default is out of range, two invocations that would
@@ -1138,6 +1143,44 @@ defmodule StatifierPersistence.MigrateCasesTest do
                migrate(ctx, "hold-slip-first", plan, :slip_first, on_failure: :park)
 
       assert snapshot(ctx, "hold-slip-first") == parked(before)
+    end
+
+    # sabotage: restored element_findings/3's filter that skipped a pair
+    # whose source element is missing (migration/transform.ex) -> red over
+    # both adapters: the hold migrated with the slip on the to chart's
+    # second element. Verified red, reverted from a copy.
+    test "stored slip at an ordinal its state lacks: refused, nothing written", ctx do
+      drive(ctx, "hold-phantom-slip", :no_slip, ["copy.available", "copy.routed"])
+      from_machine = machine(ctx, :no_slip)
+      to_machine = machine(ctx, :after)
+
+      # The stepper never mints this key: the revision without the slip has
+      # one `<invoke>` in `ready_for_pickup`. `Position.import/2` resolves a
+      # key's state id and not its ordinal, so it is written through
+      # Storage directly.
+      exported = exported(ctx, "hold-phantom-slip", :no_slip)
+      active = Map.put(exported.active_invocations, {"ready_for_pickup", 1}, "slip")
+
+      {:ok, phantom} =
+        Position.import(from_machine, %{exported | active_invocations: active})
+
+      :ok = Storage.update_execution(ctx.store, "hold-phantom-slip", phantom, :active)
+      before = snapshot(ctx, "hold-phantom-slip")
+
+      {:ok, plan} = Plan.new(from: hash(ctx, :no_slip), to: hash(ctx, :after))
+      findings = [{:invocation_element_changed, {"ready_for_pickup", 1}, {"ready_for_pickup", 1}}]
+
+      assert {:error, {:migration_refused, ^findings}} =
+               migrate_on(ctx.store, "hold-phantom-slip", plan, from_machine, to_machine, [])
+
+      assert snapshot(ctx, "hold-phantom-slip") == before
+
+      assert {:parked, {:migration_refused, ^findings}} =
+               migrate_on(ctx.store, "hold-phantom-slip", plan, from_machine, to_machine,
+                 on_failure: :park
+               )
+
+      assert snapshot(ctx, "hold-phantom-slip") == parked(before)
     end
   end
 end

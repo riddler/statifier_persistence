@@ -788,7 +788,9 @@ defmodule StatifierPersistence.Executions do
     must author none and the two elements' source text must be
     byte-equal. Its position is never the rule. Name the invocation's move
     onto its own element, or give an unnamed element an `id` before
-    editing it.
+    editing it. A stored invocation whose from ordinal names no `<invoke>`
+    element of its from state has no element to keep, and is refused this
+    way too (ADR-0013's 2026-09-23 Amendment on a missing source element).
   - `{:invocations_coincide, {to_state_id, ordinal}, sources}` - two or more
     active invocations would land on one key.
   - `{:invocation_outside_configuration, {state_id, ordinal}, {to_state_id,
