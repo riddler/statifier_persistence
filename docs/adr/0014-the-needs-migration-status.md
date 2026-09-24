@@ -323,7 +323,7 @@ status, must handle the new arm.
 
 ## Amendment (2026-09-23): an unpark emits `:unparked` and the lock event, and the park's event stays undecided
 
-Status of this amendment: proposed (2026-09-23). The record above stays
+Status of this amendment: accepted (2026-09-23). The record above stays
 accepted; this amendment is proposed until the operator accepts it.
 
 Decision 8 leaves open whether the park and the unpark emit telemetry of
@@ -383,3 +383,33 @@ calls its status write makes, and no step span is involved, because a
 migration takes none (ADR-0013 decision 5).
 
 No other decision moves.
+
+## Note (2026-09-24, sp-2wwq): the unpark telemetry Amendment is accepted
+
+The 2026-09-23 Amendment "an unpark emits `:unparked` and the lock event,
+and the park's event stays undecided" is accepted on 2026-09-24, under the
+operator's standing grant to flip a record whose code has shipped. The code
+that implements it shipped in statifier_persistence 0.15.1 (tag `v0.15.1`,
+`3e25271`). That Amendment's own status line flips in place from proposed
+to accepted, and the record above stays accepted. Its "this amendment is
+proposed until the operator accepts it" is met here and stays as written.
+Every cite below was read at `3e25271`, the tag, and again on `main` at
+`183a849`, where none of them changed.
+
+What was re-read before the flip:
+
+- **Decision 1.** `Executions.unpark/3` emits `:unparked` once, after its
+  serialization section returns, and only for the arm that wrote `:active`
+  (`lib/statifier_persistence/executions.ex`, `unparked/1`); its metadata
+  is `execution_id` and `content_hash`
+  (`lib/statifier_persistence/telemetry.ex`, `execution_unparked/1`).
+- **Decision 2.** An `:active`, terminal, absent or lock-refused unpark
+  passes through `unparked/1` unchanged and emits neither `:unparked` nor
+  `:discarded` (`unpark_tail/2`).
+- **Decision 3.** `unpark/3` emits the lock event through `emit_lock/5`
+  and `unlocked/4` and opens no step span.
+- **Decision 4.** The event carries an id and a content hash only.
+- **Decision 5.** `refuse/4` and `decide_tree/7` in `executions.ex` emit
+  no telemetry of their own.
+- **ADR-0009's catalogue.** ADR-0009's 2026-09-23 unpark Amendment carries
+  the name, accepted by that record's Note of this date.

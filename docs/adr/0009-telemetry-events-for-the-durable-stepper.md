@@ -801,7 +801,7 @@ now reads accepted.
 
 ## Amendment (2026-09-23): a raising drive closes the step span with an exception event
 
-Status of this amendment: proposed (2026-09-23). The record above stays
+Status of this amendment: accepted (2026-09-23). The record above stays
 accepted; this amendment is proposed until the operator accepts it.
 
 Decision 2 says that both halves of every span this package opens arrive
@@ -887,7 +887,7 @@ No other decision moves.
 
 ## Amendment (2026-09-23): an unpark gets one event of its own, and its wait is the lock event
 
-Status of this amendment: proposed (2026-09-23). The record above stays
+Status of this amendment: accepted (2026-09-23). The record above stays
 accepted; this amendment is proposed until the operator accepts it.
 
 ADR-0014 (`docs/adr/0014-the-needs-migration-status.md`, accepted) leaves
@@ -1022,3 +1022,72 @@ Two earlier decisions move, each only on these two `delivery` values: the
 sp-6neq Amendment's decision 1 (decision 2 above) and the sp-8wv
 Amendment's decision 3 (decision 3 above). Decision 8's count of event
 names does not change.
+
+## Note (2026-09-24, sp-2wwq): the step-exception Amendment is accepted
+
+The 2026-09-23 Amendment "a raising drive closes the step span with an
+exception event" is accepted on 2026-09-24, under the operator's standing
+grant to flip a record whose code has shipped. The code that implements it
+shipped in statifier_persistence 0.15.1 (tag `v0.15.1`, `3e25271`). That
+Amendment's own status line flips in place from proposed to accepted, and
+the record above stays accepted. Its "this amendment is proposed until the
+operator accepts it" is met here and stays as written. Every cite below was
+read at `3e25271`, the tag, and again on `main` at `183a849`, where none
+of them changed.
+
+What was re-read before the flip:
+
+- **Decision 1.** `serialized/5` in
+  `lib/statifier_persistence/executions.ex` catches a raise, throw or exit
+  from the strategy's `with_execution/3`, emits
+  `[:statifier_persistence, :execution, :step, :exception]` in place of the
+  stop, and re-raises with `:erlang.raise/3` and the original stacktrace.
+- **Decision 2.** The keys match `:telemetry.span/3`'s exception close in
+  telemetry 1.4.2, the version `mix.lock` resolves: `duration` and
+  `monotonic_time` as measurements, and `execution_id`, `entry` and
+  `span_ref` from the start plus `kind`, `reason` and `stacktrace`
+  (`lib/statifier_persistence/telemetry.ex`, `execution_step_exception/2`).
+- **Decision 3.** `reason` is the normalized exception module for an
+  `:error`, the atom for a throw or an exit, and `:redacted` otherwise
+  (`telemetry.ex`, `narrow_reason/3`); `stacktrace` keeps module,
+  function, arity, `:file` and `:line` (`telemetry.ex`,
+  `narrow_stacktrace/1`).
+- **Decision 4.** `@execution_step_exception` sits after the stop in
+  `@events`, and `docs/telemetry.md`'s step seam table carries the row.
+- **Not decided.** `open_macrostep/4` and `close_macrostep/6` in
+  `executions.ex` are unchanged by it.
+
+One sentence is superseded by a later dated record on `main` and stays as
+written. Decision 4's "The count is eighteen" held when this Amendment
+landed. The 2026-09-23 Amendment below it, "an unpark gets one event of its
+own, and its wait is the lock event", adds a nineteenth name, and `@events`
+lists nineteen at `3e25271`.
+
+## Note (2026-09-24, sp-2wwq): the unpark-event Amendment is accepted
+
+The 2026-09-23 Amendment "an unpark gets one event of its own, and its wait
+is the lock event" is accepted on 2026-09-24, under the operator's standing
+grant to flip a record whose code has shipped. The code that implements it
+shipped in statifier_persistence 0.15.1 (tag `v0.15.1`, `3e25271`). That
+Amendment's own status line flips in place from proposed to accepted, and
+the record above stays accepted. Its "this amendment is proposed until the
+operator accepts it" is met here and stays as written. Every cite below was
+read at `3e25271`, the tag, and again on `main` at `183a849`, where none
+of them changed.
+
+What was re-read before the flip:
+
+- **Decision 1.** `Executions.unpark/3` emits
+  `[:statifier_persistence, :execution, :unparked]` through
+  `Telemetry.execution_unparked/1` and opens no step span
+  (`lib/statifier_persistence/executions.ex`, `unparked/1`).
+- **Decision 2.** `unpark/3` reports its wait through `emit_lock/5` and
+  `unlocked/4`, the helpers `serialized/5` uses. `migrate/4` and
+  `with_exclusions/4` call the strategy's `with_execution/3` and emit no
+  lock event.
+- **Decision 3.** The event's metadata is `execution_id` and
+  `content_hash`, with `system_time` as its measurement
+  (`lib/statifier_persistence/telemetry.ex`, `execution_unparked/1`).
+- **Decision 4.** `@execution_unparked` sits after `@execution_migrated`
+  in `@events`, which lists nineteen names, and `docs/telemetry.md`'s
+  execution lifecycle table carries the row.

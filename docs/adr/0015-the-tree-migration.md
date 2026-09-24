@@ -480,7 +480,7 @@ sp-y3hj Note is how they are read.
 
 ## Amendment (2026-09-23, sp-4bnu): a unit that cannot land answers the adapter's own reason on both shipped adapters
 
-Status of this amendment: proposed (2026-09-23, sp-4bnu). The record above
+Status of this amendment: accepted (2026-09-23, sp-4bnu). The record above
 stays accepted; this amendment is proposed until the operator accepts it.
 
 The sp-y3hj Note above records that on the Ecto adapter under the default
@@ -526,3 +526,32 @@ no `rollback/1` (`lib/statifier_persistence/storage/ecto.ex`,
 The sp-y3hj Note's sentence on `{:error, {:adapter, :rollback}}` stays as
 written and is read as amended here: it now describes only a failure after
 a write.
+
+## Note (2026-09-24, sp-2wwq): the sp-4bnu Amendment is accepted
+
+The 2026-09-23 sp-4bnu Amendment is accepted on 2026-09-24, under the
+operator's standing grant to flip a record whose code has shipped. The code
+that implements it shipped in statifier_persistence 0.15.1 (tag `v0.15.1`,
+`3e25271`). That Amendment's own status line flips in place from proposed
+to accepted, and the record above stays accepted. Its "this amendment is
+proposed until the operator accepts it" is met here and stays as written.
+Every cite below was read at `3e25271`, the tag, and again on `main` at
+`183a849`, where none of them changed.
+
+What was re-read before the flip:
+
+- **Decision 3's sentence, as amended.** The Ecto adapter's
+  `write_tree_migration/2` reads every named execution first and answers
+  `{:error, :execution_not_found}` with nothing written and no rollback
+  (`lib/statifier_persistence/storage/ecto.ex`, `tree_rows_stored/2`). A
+  write that still matches no row rolls back (`tree_writes/3`).
+  `retire_chart/3` calls no `rollback/1` on a refusal.
+- **Both shipped adapters.** "a failure inside the one unit writes no node
+  and answers the unit's reason" in
+  `test/statifier_persistence/executions_migrate_tree_test.exs` runs over
+  the in-memory and the Ecto adapter and asserts
+  `{:error, :execution_not_found}`. `t:StatifierPersistence.Executions.migrate_tree_error/0`
+  admits the term through `t:StatifierPersistence.Executions.error/0`.
+- **The callback.** `c:write_tree_migration/2`'s doc in
+  `lib/statifier_persistence/storage/adapter.ex` says a refusal decided
+  before the first write is returned as it is.

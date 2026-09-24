@@ -780,7 +780,7 @@ not, and the code keeps each as it is.
 
 ## Amendment (2026-09-23, sp-qe8s): an invocation whose from ordinal names no `<invoke>` element is refused as an element that is not its own
 
-Status of this amendment: proposed (2026-09-23, sp-qe8s). The record above
+Status of this amendment: accepted (2026-09-23, sp-qe8s). The record above
 is accepted, and so are its two earlier 2026-09-23 Amendments; this one
 changes neither status line.
 
@@ -823,3 +823,34 @@ as `invocation_out_of_range` on the `:from` side.
 **A host can observe it as a change.** A migration that answered `:ok`
 before this amendment now refuses, or parks under `:park`, so the code
 change carries a changelog fragment that says so.
+
+## Note (2026-09-24, sp-2wwq): the sp-qe8s Amendment is accepted
+
+The 2026-09-23 sp-qe8s Amendment is accepted on 2026-09-24, under the
+operator's standing grant to flip a record whose code has shipped. The code
+that implements it shipped in statifier_persistence 0.15.1 (tag `v0.15.1`,
+`3e25271`). That Amendment's own status line flips in place from proposed
+to accepted. The record above and its two earlier 2026-09-23 Amendments
+stay accepted; the Amendment's "this one changes neither status line" is
+met here and stays as written. Every cite below was read at `3e25271`, the tag,
+and again on `main` at `183a849`, where none of them changed.
+
+What was re-read before the flip:
+
+- **The refusal.** A key whose from ordinal names no `<invoke>` element
+  finds no source element (`lib/statifier_persistence/migration/transform.ex`,
+  `invoke_at/2`), and `same_element?/2` answers false for it, so
+  `element_findings/3` names it `invocation_element_changed`.
+- **The finding.** `t:StatifierPersistence.Executions.migration_finding/0`
+  gains no arm, and its `invocation_element_changed` entry names the case
+  (`lib/statifier_persistence/executions.ex`).
+- **The reach.** `Position.import/2` in statifier 2.6.0, the version
+  `mix.lock` resolves, resolves each key's state id and not its ordinal
+  (`resolve_active_invocations/2`). The plan's static check range-checks
+  only the moves named in `invocations`
+  (`lib/statifier_persistence/migration/plan.ex`, `invocation_findings/3`).
+- **The case.** `test/statifier_persistence/migrate_cases_test.exs`
+  carries "stored slip at an ordinal its state lacks refused", which is
+  refused with nothing written and parks under `:park`.
+- **The changelog.** The 0.15.1 section of `CHANGELOG.md` names the
+  refusal under Fixed.
