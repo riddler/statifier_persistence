@@ -102,11 +102,12 @@ if Code.ensure_loaded?(Ecto.Migration) do
     execution names directly, and V06 is a no-op. Either way it is the
     version this package now expects.
 
-    Rolling back never renames anything: V06's `down/1` is a no-op
-    (RQ-SF041-25, ruled 2026-09-13). V01-V05 are rewritten to the
-    execution names and drop the tables under them, on both kinds of
-    database, so there is nothing a rename back would leave in a better
-    state - and a downgrade to pre-`0.12.0` code is unsupported, by the
+    Rolling back never renames anything: V06's `down/1` is a no-op, by
+    decision (item 2 of ADR-0011's acceptance Note of 2026-09-13).
+    V01-V05 are rewritten to the execution names and drop the tables under
+    them, on both kinds of database, so there is nothing a rename back
+    would leave in a better state - and a downgrade to pre-`0.12.0` code is
+    unsupported, by the
     record and by this package. `StatifierPersistence.Ecto.Migrations.V06`
     records the whole of it.
 
@@ -230,11 +231,11 @@ if Code.ensure_loaded?(Ecto.Migration) do
     with `from: N`, so the rollback stops at the cap instead of reaching
     versions a later migration has already rolled back - see the moduledoc.
 
-    Every version's `down/1` runs, unconditionally. V06's is a no-op
-    (RQ-SF041-25, ruled 2026-09-13): V01-V05 are rewritten to the execution
-    names and drop the tables under them, so there is nothing to rename
-    back first, and a rollback reaches the same end state under one call or
-    under one host migration per version.
+    Every version's `down/1` runs, unconditionally. V06's is a no-op, by
+    decision (item 2 of ADR-0011's acceptance Note of 2026-09-13): V01-V05
+    are rewritten to the execution names and drop the tables under them, so
+    there is nothing to rename back first, and a rollback reaches the same
+    end state under one call or under one host migration per version.
 
     Takes the same options as `up/1`.
     """
