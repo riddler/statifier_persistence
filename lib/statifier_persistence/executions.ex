@@ -2025,15 +2025,24 @@ defmodule StatifierPersistence.Executions do
   # Nothing inside any tail calls back into this function, so `with_execution/3`
   # never nests on one execution id.
   #
-  # This is also the step seam (ADR-0009 decision 5): the one `:start` /
-  # `:stop` pair this package emits brackets exactly this function, so the
-  # upstream macrostep span - opened inside `fun` - nests inside it by
-  # ordinary ambient context, and `st-ADR-0067` decision 5's "a span never
-  # crosses a persist boundary" holds structurally rather than by
-  # discipline. `[:statifier_persistence, :execution, :lock]`'s `duration` is
+  # This is also the step seam (ADR-0009 decision 5): the one span this
+  # package emits - `:start`, then `:stop` or `:exception` - brackets
+  # exactly this function, so the upstream macrostep span - opened inside
+  # `fun` - nests inside it by ordinary ambient context, and `st-ADR-0067`
+  # decision 5's "a span never crosses a persist boundary" holds
+  # structurally rather than by discipline.
+  # `[:statifier_persistence, :execution, :lock]`'s `duration` is
   # the *wait*, which is why it is measured from before `with_execution/3` to
   # the first line inside the body it runs rather than around the call:
   # the held time is the step, and the step already has a span.
+  #
+  # A raise, throw or exit from inside the strategy - a host executor or
+  # event builder, an adapter, the strategy itself - closes the span with
+  # `[:statifier_persistence, :execution, :step, :exception]` instead of the
+  # stop and is then re-raised with its own stacktrace, the way
+  # `:telemetry.span/3` closes a span (ADR-0009, the step-exception
+  # amendment). Nothing is rescued to a value: the caller sees the raise it
+  # would have seen without the span.
   @spec serialized(Storage.t(), execution_id(), entry(), keyword(), (-> result)) ::
           result | {:error, error()}
         when result: term()
@@ -2044,10 +2053,24 @@ defmodule StatifierPersistence.Executions do
     lock_start = System.monotonic_time()
 
     locked =
-      strategy.with_execution(config, execution_id, fn ->
-        emit_lock(lock_start, execution_id, strategy, :acquired, nil)
-        fun.()
-      end)
+      try do
+        strategy.with_execution(config, execution_id, fn ->
+          emit_lock(lock_start, execution_id, strategy, :acquired, nil)
+          fun.()
+        end)
+      catch
+        kind, reason ->
+          Telemetry.execution_step_exception(started_at,
+            execution_id: execution_id,
+            entry: entry,
+            span_ref: span_ref,
+            kind: kind,
+            reason: reason,
+            stacktrace: __STACKTRACE__
+          )
+
+          :erlang.raise(kind, reason, __STACKTRACE__)
+      end
 
     result = unlocked(locked, lock_start, execution_id, strategy)
 

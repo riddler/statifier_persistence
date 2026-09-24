@@ -188,6 +188,7 @@ and closes inside it.
 |---|---|---|---|
 | `[:statifier_persistence, :execution, :step, :start]` | `Executions`, immediately inside `serialized/5` | `system_time`, `monotonic_time` | `execution_id`, `entry`, `span_ref` |
 | `[:statifier_persistence, :execution, :step, :stop]` | the same call, on every return path | `duration`, `monotonic_time` | `execution_id`, `session_id`, `content_hash`, `entry`, `outcome`, `status`, `reason`, `span_ref`, `invoke_id`, `child_count` |
+| `[:statifier_persistence, :execution, :step, :exception]` | the same call, in place of the stop, when the drive raises, throws or exits | `duration`, `monotonic_time` | `execution_id`, `entry`, `span_ref`, `kind`, `reason`, `stacktrace` |
 | `[:statifier_persistence, :execution, :lock]` | `serialized/5`, after `strategy.with_execution/3` returns or refuses | `duration` (the wait, not the held time), `system_time` | `execution_id`, `strategy`, `outcome`, `reason` |
 
 `entry` is which public door was used: `:create`, `:step`,
@@ -210,6 +211,21 @@ folding it into a metric dimension must narrow it first.
 `session_id` is `nil` on the stop when the step never got as far as a
 decoded position: a terminal-execution discard reads the execution record
 only, and a lock refusal or an identity refusal never loads at all.
+
+A step span closes exactly once: with `:stop` on a return, or with
+`:exception` when anything inside the drive raises, throws or exits - the
+host's executor or event builder, an adapter, the serialization strategy.
+The raise then reaches the caller unchanged, with its original stacktrace;
+nothing is rescued to a return value. The keys are the ones
+`:telemetry.span/3` puts on its own `:exception` event: the start half's
+`execution_id`, `entry` and `span_ref`, plus `kind` (`:error`, `:throw` or
+`:exit`), `reason` (the raised term, as `catch` sees it) and `stacktrace`.
+Each stacktrace frame's argument list is replaced by its arity before the
+event is emitted, because a frame that failed to match can carry the
+arguments it was called with - an event builder's is the decoded machine
+state - and the datamodel is never on an event (see "Cardinality and
+disclosure" below). A bridge that closes a span on `:telemetry.span/3`'s
+exception can close this one the same way.
 
 `invoke_id` and `child_count` are the settlement dimensions, and they are
 `nil` on every ordinary drive. `StatifierPersistence.Driver` sets them
@@ -443,9 +459,10 @@ correlation id for a span or a log line, **never as a metric dimension** - the s
 vocabulary (`:discarded`, `:child, :refused`, the adapter arms) it is safe
 to dimension on. Where it carries an arbitrary executor or adapter error
 (`:effect, :failed`, `:adapter, :call`'s `{:adapter, term}`, the step
-stop), a consumer must narrow it before it becomes a dimension. A host
-executor returning a per-effect struct there will blow up any metric keyed
-on it, and no change here can prevent that.
+stop, the step exception's raised term), a consumer must narrow it before
+it becomes a dimension. A host executor returning a per-effect struct
+there will blow up any metric keyed on it, and no change here can prevent
+that.
 
 **Nothing host-opaque and nothing from the datamodel is ever on an event.**
 Never emitted, in any form - not truncated, not hashed, not "just the

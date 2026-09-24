@@ -798,3 +798,79 @@ emitter: once per re-pinned node, with the same keys (`executions.ex`,
 `tree_migrated/1`). `docs/telemetry.md` names both emitters. Second, the
 Amendment's opening calls ADR-0013 proposed, and ADR-0013's status line
 now reads accepted.
+
+## Amendment (2026-09-23): a raising drive closes the step span with an exception event
+
+Status of this amendment: proposed (2026-09-23). The record above stays
+accepted; this amendment is proposed until the operator accepts it.
+
+Decision 2 says that both halves of every span this package opens arrive
+inside one synchronous call, so there is no open-span entry for the bridge
+to leak, and decision 5 says both halves of the step span are emitted inside
+one function call. That held only for a drive that returns. The step span's
+start was emitted, the serialization strategy's `with_execution/3` ran the
+drive, and the stop was emitted after it returned, with nothing between to
+catch a raise (`lib/statifier_persistence/executions.ex`, `serialized/5`,
+read at `e3dda64`). The host's executor and event builder run inside that
+call, so a raising host callback left a start with no second half. The
+record was right and the code was wrong. This amendment adds the event that
+makes decisions 2 and 5 hold for a raise, a throw and an exit too. It is
+additive under decision 8: one new event name, no rename and no removal.
+
+**1. The step span closes with `:exception` in place of `:stop`.**
+`[:statifier_persistence, :execution, :step, :exception]` is emitted when
+anything inside the drive raises, throws or exits, and the stop is then not
+emitted. The raise reaches the caller unchanged, re-raised with its original
+stacktrace; nothing is rescued to a return value, so the repository's rule
+against rescuing to a default at a leaf is untouched. The event is emitted
+from `serialized/5` in the change that carries this amendment.
+
+**2. The keys are `:telemetry.span/3`'s.** That function closes a span on a
+raise with an `:exception` event carrying `duration` and `monotonic_time` as
+measurements and the start's metadata plus `kind`, `reason` and
+`stacktrace` (`deps/telemetry/src/telemetry.erl`, `span/3`, telemetry
+1.4.2 as locked). This event carries the same: `duration` and
+`monotonic_time`, and `execution_id`, `entry` and `span_ref` from the
+start, plus `kind`, `reason` and `stacktrace`. `span_ref` pairs it with its start as it pairs a
+stop. The stop's other keys are not on it: a raise leaves no return value
+to read `outcome`, `status` or a decoded `session_id` from, and decision 4
+forbids a lookup made to fill a field in.
+
+**3. Decision 7 holds, and the stacktrace is narrowed to keep it.** A
+stacktrace frame of a function-clause failure carries the arguments the
+function was called with, and an event builder is called with the decoded
+machine state, which holds the datamodel. So each frame's argument list is
+replaced by its arity before the event is emitted
+(`lib/statifier_persistence/telemetry.ex`, `execution_step_exception/2`, in
+this change). The caller's re-raise keeps the original stacktrace. `reason`
+is the raised term, as `catch` sees it: the raiser's own, not this
+package's vocabulary, with the standing an executor's error term already has
+on `[:statifier_persistence, :effect, :failed]`. A consumer narrows it
+before it becomes a dimension.
+
+**4. The count is eighteen.** Decision 8's frozen list grows from seventeen
+event names to **eighteen**. `@events` in
+`lib/statifier_persistence/telemetry.ex` holds seventeen names at
+`e3dda64`, and this change adds the eighteenth,
+`@execution_step_exception`, after the stop, with its emitter
+`execution_step_exception/2`. `StatifierPersistence.Telemetry.events/0`
+returns all eighteen, and `docs/telemetry.md`'s step seam table carries the
+new row. The earlier counts in this record and in `docs/adr/README.md`'s
+index row are corrected by this addition; this amendment edits none of them
+in place.
+
+Decision 5's "a `:start` / `:stop` pair" reads as a start and exactly one of
+a stop or an exception. There is still one span, and nothing else in family
+two becomes a span.
+
+A handler that matches the names `events/0` returns exhaustively needs a
+clause for the new one, and a bridge that checks a hand-copied list
+against `events/0` needs the name added.
+
+Not decided here: the family-one macrostep span this package opens around
+`Interpreter.handle_event/2` has the same shape, a start with nothing to
+close it if the advance raises (`lib/statifier_persistence/executions.ex`,
+`open_macrostep/4` and `close_macrostep/6`, read at `e3dda64`). Its event
+names are statifier-ex's under `st-ADR-0067`, and it is unchanged.
+
+No other decision moves.
