@@ -360,14 +360,21 @@ defmodule StatifierPersistence.ExecutionsMigrateTreeTest do
 
     # sabotage: had the in-memory adapter's write_tree_migration/2 keep
     # the executions written before the failing write, and the Ecto
-    # adapter's return {:error, reason} without rollback/1 -> red over
-    # both adapters: the hold's stored record came back changed. Verified
-    # red, reverted from the copies.
-    test "a failure inside the one unit writes no node", ctx do
+    # adapter's skip tree_rows_stored/2 and return {:error, reason}
+    # without rollback/1 -> red over both adapters: the hold's stored
+    # record came back changed. Verified red, reverted from the copies.
+    #
+    # sabotage: had the Ecto adapter's tree_rows_stored/2 answer :ok for
+    # every write list, so the missing row is found by its write and
+    # rolled back -> red over the Ecto adapter: the answer was the lock's
+    # {:adapter, :rollback}, not :execution_not_found. Had the in-memory
+    # adapter's tree_write/2 answer another reason -> red over the
+    # in-memory adapter. Verified red, reverted from the copies.
+    test "a failure inside the one unit writes no node and answers the unit's reason", ctx do
       {hold_before, notice_before} = waiting_tree(ctx)
       failing_store = FailingTreeWriteAdapter.wrap(ctx.store)
 
-      assert {:error, _reason} =
+      assert {:error, :execution_not_found} =
                Executions.migrate_tree(failing_store, ctx.hold_id, plans(ctx),
                  machines: machines(ctx)
                )
