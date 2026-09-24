@@ -836,17 +836,27 @@ stop. The stop's other keys are not on it: a raise leaves no return value
 to read `outcome`, `status` or a decoded `session_id` from, and decision 4
 forbids a lookup made to fill a field in.
 
-**3. Decision 7 holds, and the stacktrace is narrowed to keep it.** A
-stacktrace frame of a function-clause failure carries the arguments the
-function was called with, and an event builder is called with the decoded
-machine state, which holds the datamodel. So each frame's argument list is
-replaced by its arity before the event is emitted
+**3. Decision 7 holds, and `reason` and `stacktrace` are narrowed to keep
+it.** An event builder is called with the decoded machine state, which
+holds the datamodel, and a raise can carry any value the failing code held:
+a failed match on the state raises with the whole state as its reason, and a
+function-clause frame carries the call's arguments. So the two fields that
+could carry state are narrowed before the event is emitted
 (`lib/statifier_persistence/telemetry.ex`, `execution_step_exception/2`, in
-this change). The caller's re-raise keeps the original stacktrace. `reason`
-is the raised term, as `catch` sees it: the raiser's own, not this
-package's vocabulary, with the standing an executor's error term already has
-on `[:statifier_persistence, :effect, :failed]`. A consumer narrows it
-before it becomes a dimension.
+this change):
+
+- `reason` is the exception's module for an `:error`, a raw Erlang error
+  normalized first, so a failed match reports `MatchError`; for a `:throw`
+  or an `:exit` it is the thrown or exit atom, or `:redacted` for any other
+  term. The raised value never travels.
+- `stacktrace` keeps each frame's module and function, replaces an argument
+  list by its arity, and keeps only `:file` and `:line` of the location.
+
+Every other field is the start half's own: `execution_id`, `entry` and
+`span_ref`, and `kind` is one of three atoms. The caller's re-raise is
+untouched and sees the original reason and stacktrace. `reason` is
+therefore a bounded name, not the raised term `:telemetry.span/3` would
+carry; the key names are unchanged.
 
 **4. The count is eighteen.** Decision 8's frozen list grows from seventeen
 event names to **eighteen**. `@events` in

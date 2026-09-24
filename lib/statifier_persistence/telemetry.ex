@@ -81,13 +81,16 @@ defmodule StatifierPersistence.Telemetry do
   an adapter or the serialization strategy - and the raise then reaches
   the caller unchanged, with its original stacktrace. Its keys are the
   ones `:telemetry.span/3` puts on its own `:exception` event: the start
-  half's metadata plus `kind`, `reason` and `stacktrace`. `reason` is the
-  raised term, not this package's vocabulary, so it must be narrowed
-  before it becomes a dimension. `stacktrace` has each frame's argument
-  list replaced by its arity: a frame that failed to match can carry the
-  arguments it was called with, an event builder's included, and those
-  hold the datamodel this package never emits. The caller's re-raise keeps
-  the original stacktrace.
+  half's metadata plus `kind`, `reason` and `stacktrace`. The raised term
+  and its stacktrace can carry any value the failing code held - an event
+  builder's is the decoded machine state, datamodel included - so both are
+  narrowed before the event is emitted. `reason` is the exception's module
+  for an `:error` (a raw Erlang error is normalized first, so a failed match
+  reports `MatchError`), and for a `:throw` or `:exit` the thrown or exit
+  atom, or `:redacted` for any other term. `stacktrace` keeps each frame's
+  module and function, replaces an argument list by its arity, and keeps
+  only `:file` and `:line` of the location. The caller's re-raise keeps
+  the original reason and stacktrace.
 
   ## The storage seam
 
@@ -301,9 +304,10 @@ defmodule StatifierPersistence.Telemetry do
   `:native` units measured from `execution_step_start/3`'s reading.
 
   The caller re-raises afterwards; this function only reports. The keys
-  follow `:telemetry.span/3`'s own `:exception` event. The `stacktrace`
-  field is emitted with every frame's argument list replaced by its arity,
-  so no call argument travels on the event.
+  follow `:telemetry.span/3`'s own `:exception` event; the values of
+  `reason` and `stacktrace` are narrowed so no raised value, call argument
+  or location detail travels on the event (see the step seam section
+  above).
   """
   @spec execution_step_exception(start_time :: integer(), fields :: fields()) :: :ok
   def execution_step_exception(start_time, fields) do
@@ -317,26 +321,44 @@ defmodule StatifierPersistence.Telemetry do
         entry: fields[:entry],
         span_ref: fields[:span_ref],
         kind: fields[:kind],
-        reason: fields[:reason],
-        stacktrace: without_arguments(fields[:stacktrace])
+        reason: narrow_reason(fields[:kind], fields[:reason], fields[:stacktrace]),
+        stacktrace: narrow_stacktrace(fields[:stacktrace])
       }
     )
   end
 
+  # The raised term can hold any value the failing code held, so only a
+  # bounded name for it travels: the exception module for an error (after
+  # normalizing a raw Erlang error), a bare atom for a throw or an exit,
+  # and `:redacted` for anything else.
+  @spec narrow_reason(atom(), term(), Exception.stacktrace() | nil) :: atom()
+  defp narrow_reason(:error, reason, stacktrace) do
+    %module{} = Exception.normalize(:error, reason, stacktrace || [])
+    module
+  end
+
+  defp narrow_reason(_kind, reason, _stacktrace) when is_atom(reason), do: reason
+  defp narrow_reason(_kind, _reason, _stacktrace), do: :redacted
+
   # A frame of a function-clause failure carries the call's arguments in
-  # place of its arity; anything else passes through unchanged.
-  @spec without_arguments(Exception.stacktrace() | nil) :: Exception.stacktrace() | nil
-  defp without_arguments(nil), do: nil
+  # place of its arity, and a location can carry `:error_info` beside the
+  # file and line; only the module, the function, the arity and the file
+  # and line travel.
+  @spec narrow_stacktrace(Exception.stacktrace() | nil) :: Exception.stacktrace() | nil
+  defp narrow_stacktrace(nil), do: nil
 
-  defp without_arguments(stacktrace) do
+  defp narrow_stacktrace(stacktrace) do
     Enum.map(stacktrace, fn
-      {module, function, arguments, location} when is_list(arguments) ->
-        {module, function, length(arguments), location}
+      {module, function, arity_or_arguments, location} ->
+        {module, function, arity(arity_or_arguments), Keyword.take(location, [:file, :line])}
 
-      frame ->
-        frame
+      _frame ->
+        :redacted
     end)
   end
+
+  defp arity(arguments) when is_list(arguments), do: length(arguments)
+  defp arity(arity), do: arity
 
   @doc """
   Emits `[:statifier_persistence, :execution, :lock]`. `duration` is the wait
