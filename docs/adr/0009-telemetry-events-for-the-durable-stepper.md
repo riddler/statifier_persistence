@@ -944,3 +944,71 @@ clause for the new one, and a bridge that checks a hand-copied list
 against `events/0` needs the name added.
 
 No other decision moves.
+
+## Amendment (2026-09-23, sp-q0pp): `delivery` names the two ways an answer never reaches the parent's door
+
+Status of this amendment: proposed (2026-09-23, sp-q0pp). The record above
+stays accepted; this amendment is proposed until the operator accepts it.
+
+The sp-6neq Amendment gave `[:statifier_persistence, :child, :answered]` a
+`delivery` key saying what the parent's door answered, so that a refused
+automatic answer reaches the host. One step before the door was still
+silent. Before the automatic answer can call the parent's door it fetches
+the parent's own record and resolves the parent's chart through the
+driver's `chart_resolver:`, and a failure at either step was dropped with
+nothing emitted and nothing returned: the code called it "silently a
+no-op" (`lib/statifier_persistence/driver.ex`, `resolve_and_answer/4`, read
+at `a6e393f`). The child's own drive returns its own result whatever
+happens there (`maybe_answer_parent/3`, read at `a6e393f`), and the outside
+fail path's `Driver.resolve_and_answer_parent/3` returns `:ok` by its
+public `@spec` (read at `a6e393f`). So an answer that went nowhere looked,
+to the host, the same as one that was delivered: the lost answer the
+sp-6neq Amendment closed for a parked parent, arriving by another route.
+
+This amendment is additive under decision 8: two new values of an existing
+metadata key, no new key, no rename and no removal, and no new event name.
+
+**1. `delivery` gains `:parent_unfetched` and `:parent_chart_unresolved`.**
+`:parent_unfetched` is emitted when the parent's own record does not fetch;
+`:parent_chart_unresolved` when it fetched but the resolver did not return
+its chart. They are named apart because a host acts on them differently:
+the first is a storage fact about the parent's execution, the second is a
+chart the host's resolver does not hold for that execution's
+`content_hash`. The vocabulary of the sp-6neq Amendment's decision 1 reads
+as six values, and its framing widens to match: `delivery` says what
+became of the answer - what the door answered, or which of these two
+reasons kept it from the door.
+
+**2. The event fires where the answer stopped, on the same process.**
+It is emitted from the step that failed (`resolve_and_answer/4`, in this
+change), which is reached by the automatic answer and by
+`Driver.resolve_and_answer_parent/3`. The linkage has already been read at
+that point, so `child_execution_id`, `parent_execution_id`, `invoke_id` and
+`child_count` are the same values a delivered answer reports.
+
+**3. `outcome` is the child's own and `failed_count` is `nil`.** No door
+ran and, for a fan-out, no settlement was entered, so there is no
+assembled answer to take the invocation's aggregate from or to count.
+`outcome` is the child's `:done` or `:failed`, which is the same value it
+has on the single-child path.
+
+**4. Decision 7 holds.** Neither the fetch's error term nor anything the
+resolver returned travels; `delivery` stays an atom from a closed
+vocabulary, fit to be a metric dimension. The donedata is still not on the
+event.
+
+**5. No return value changes.** `Driver.resolve_and_answer_parent/3` still
+returns `:ok` and the automatic answer still returns the child's own
+result. Delivering the answer once the parent can be reached is the
+host's, through `Driver.answer_parent/3` with a driver over the parent's
+chart; nothing in this package holds the answer, as the sp-6neq
+Amendment's decision 4 already says.
+
+Not decided here: a failed read of the child's own record, which is where
+the linkage comes from, is still `:ok` from
+`Driver.resolve_and_answer_parent/3` with nothing emitted, because there is
+no linkage to name a parent from. The settlement section's own storage
+errors on a fan-out are likewise unchanged.
+
+No other decision moves, and decision 8's count of event names does not
+change.

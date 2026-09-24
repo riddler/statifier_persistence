@@ -699,10 +699,14 @@ defmodule StatifierPersistence.Driver do
   would step the parent against the wrong chart. Here the caller chose the
   driver, so the choice is theirs to make.
 
-  Never raises for an execution with no parent and never reports a storage error:
+  Never raises for an execution with no parent and never returns a storage error:
   `:no_parent` and a failed fetch are both `:ok`, exactly as the automatic
   path treats them. A caller that needs the answer's own result calls
-  `answer_parent/3`.
+  `answer_parent/3`. With a `chart_resolver:`, a parent that is linked but
+  never reached - its own record does not fetch, or the resolver does not
+  return its chart - is reported on `[:statifier_persistence, :child,
+  :answered]`, whose `delivery` is `:parent_unfetched` or
+  `:parent_chart_unresolved` (`docs/telemetry.md`).
   """
   @spec resolve_and_answer_parent(
           driver :: t(),
@@ -911,6 +915,30 @@ defmodule StatifierPersistence.Driver do
       child_count: linkage.child_count,
       failed_count: failed_count,
       delivery: delivery(result)
+    )
+  end
+
+  # An answer the automatic path could not take to the parent's door at all:
+  # the parent's record did not fetch, or its chart did not resolve. No door
+  # ran and no settlement was entered, so `outcome` is the child's own and a
+  # fan-out's `failed_count` is `nil` - there is no assembled answer to count.
+  # Nothing of the fetch's error or the resolver's answer travels, only the
+  # `delivery` atom (ADR-0009 decision 7).
+  @spec report_unreached(
+          Executions.execution_id(),
+          Linkage.t(),
+          {:done, term()} | {:failed, keyword()},
+          :parent_unfetched | :parent_chart_unresolved
+        ) :: :ok
+  defp report_unreached(child_execution_id, %Linkage{} = linkage, {outcome, _payload}, delivery) do
+    Telemetry.child_answered(
+      child_execution_id: child_execution_id,
+      parent_execution_id: linkage.parent_execution_id,
+      invoke_id: linkage.invoke_id,
+      outcome: outcome,
+      child_count: linkage.child_count,
+      failed_count: nil,
+      delivery: delivery
     )
   end
 
@@ -1393,9 +1421,12 @@ defmodule StatifierPersistence.Driver do
   # same store, the same `serialization:`, the same `effects` executor, the
   # same `dispatch` fun, the same `chart_resolver:` - only `machine` ever
   # differs, in both directions, so a grandparent is reached by this same
-  # construction recursing. Any failure resolving the parent's own record or
-  # its chart is silently a no-op: the child's own result is unaffected
-  # either way (`maybe_answer_parent/3`'s doc).
+  # construction recursing. A parent whose own record cannot be fetched, or
+  # whose chart the resolver does not return, is never reached, and the
+  # child's own result is unaffected either way (`maybe_answer_parent/3`'s
+  # doc). The answer that went nowhere is reported instead:
+  # `[:statifier_persistence, :child, :answered]` with a `delivery` saying
+  # which of the two it was (`report_unreached/4`).
   @spec resolve_and_answer(
           t(),
           Linkage.t(),
@@ -1404,10 +1435,31 @@ defmodule StatifierPersistence.Driver do
         ) ::
           :ok
   defp resolve_and_answer(driver, %Linkage{} = linkage, execution_id, payload) do
-    with {:ok, parent_record} <-
-           Storage.fetch_execution(driver.store, linkage.parent_execution_id),
-         {:ok, parent_machine} <- driver.chart_resolver.(parent_record.content_hash) do
-      answer_parent(%{driver | machine: parent_machine}, execution_id, payload)
+    case Storage.fetch_execution(driver.store, linkage.parent_execution_id) do
+      {:ok, parent_record} ->
+        answer_resolved_chart(driver, linkage, execution_id, payload, parent_record)
+
+      {:error, _reason} ->
+        report_unreached(execution_id, linkage, payload, :parent_unfetched)
+    end
+
+    :ok
+  end
+
+  @spec answer_resolved_chart(
+          t(),
+          Linkage.t(),
+          Executions.execution_id(),
+          {:done, term()} | {:failed, keyword()},
+          Adapter.execution_record()
+        ) :: :ok
+  defp answer_resolved_chart(driver, linkage, execution_id, payload, parent_record) do
+    case driver.chart_resolver.(parent_record.content_hash) do
+      {:ok, parent_machine} ->
+        answer_parent(%{driver | machine: parent_machine}, execution_id, payload)
+
+      _error ->
+        report_unreached(execution_id, linkage, payload, :parent_chart_unresolved)
     end
 
     :ok
