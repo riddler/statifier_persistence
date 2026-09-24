@@ -1,8 +1,9 @@
 # Quality configuration for statifier_persistence.
 #
 #   mix quality                 - full gate: format, compile, credo, dialyzer,
-#                                 deps audit, full test suite with coverage.
-#                                 Run before every commit.
+#                                 deps audit, docs, doc links, full test
+#                                 suite with coverage. Run before every
+#                                 commit.
 #
 #   mix quality --profile loop  - inner loop while implementing: skips dialyzer
 #                                 and coverage, runs only the tests covering
@@ -34,6 +35,19 @@
 
   credo: [
     strict: true
+  ],
+
+  # The two docs stages make `mix quality` the pre-publish check for this
+  # package's HexDocs, locally and in CI. The Docs stage runs `mix docs` and
+  # fails on any ExDoc warning. The doc_links stage fails on the link rules
+  # ExDoc accepts silently: a README relative link to a file not in the
+  # package files, a published relative link to a file that is not an extra,
+  # two extras sharing a basename, and a silent rewrite to a different extra.
+  docs: [
+    enabled: :auto
+  ],
+  doc_links: [
+    enabled: :auto
   ],
   profiles: [
     loop: [
