@@ -170,7 +170,11 @@ defmodule StatifierPersistence.Telemetry do
   answer whole, ADR-0014 decision 2) or `:error` (any other error). The
   automatic answer returns the child's own result whatever the door
   answered, so `:needs_migration` here is how a host learns that an answer
-  it must deliver again was refused.
+  it must deliver again was refused. Two more values say the answer never
+  reached a door: `:parent_unfetched` (the parent's own record did not
+  fetch) and `:parent_chart_unresolved` (the driver's `chart_resolver:`
+  did not return the parent's chart). On those two, `outcome` is the
+  child's own and `failed_count` is `nil`, because no settlement ran.
 
   ## Cardinality and disclosure
 
@@ -196,8 +200,16 @@ defmodule StatifierPersistence.Telemetry do
   @typedoc """
   What a parent's door answered to a child's answer - the `delivery`
   metadata of `[:statifier_persistence, :child, :answered]`.
+  `:parent_unfetched` and `:parent_chart_unresolved` are the two ways the
+  automatic answer never reached the door at all.
   """
-  @type delivery :: :delivered | :discarded | :needs_migration | :error
+  @type delivery ::
+          :delivered
+          | :discarded
+          | :needs_migration
+          | :error
+          | :parent_unfetched
+          | :parent_chart_unresolved
 
   @typedoc """
   A field list for one event: every key the contract names for it, in any
@@ -624,7 +636,8 @@ defmodule StatifierPersistence.Telemetry do
 
   `child_count` and `failed_count` are the invocation's, and are `nil` for
   a single-child subchart, which has no invocation to aggregate. `delivery`
-  is a `t:delivery/0`: what the parent's door answered.
+  is a `t:delivery/0`: what the parent's door answered, or which of the two
+  ways the answer never reached it.
   """
   @spec child_answered(fields :: fields()) :: :ok
   def child_answered(fields) do

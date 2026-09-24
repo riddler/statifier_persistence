@@ -395,7 +395,7 @@ Emitted on the parent's stepping process, at dispatch time.
 | `[:statifier_persistence, :child, :started]` | `Driver.start_child/3`, after `adopt_child/3` | `system_time` | `parent_execution_id`, `child_execution_id`, `invoke_id`, `child_index`, `content_hash`, `session_id` |
 | `[:statifier_persistence, :child, :refused]` | the same chain, on any refusal | `system_time` | `parent_execution_id`, `invoke_id`, `reason` |
 | `[:statifier_persistence, :child, :recorded]` | `Driver.record_and_settle/5`, after the child's own answer is written | `system_time` | `parent_execution_id`, `child_execution_id`, `invoke_id`, `child_index`, `outcome` |
-| `[:statifier_persistence, :child, :answered]` | `Driver.answer_parent/3`, after the parent's door returns | `system_time` | `child_execution_id`, `parent_execution_id`, `invoke_id`, `outcome`, `child_count`, `failed_count`, `delivery` |
+| `[:statifier_persistence, :child, :answered]` | `Driver.answer_parent/3`, after the parent's door returns; `Driver.resolve_and_answer_parent/3`, when the parent is never reached | `system_time` | `child_execution_id`, `parent_execution_id`, `invoke_id`, `outcome`, `child_count`, `failed_count`, `delivery` |
 | `[:statifier_persistence, :child, :settled]` | `Driver.settle/3`, once per decision | `system_time`, `child_count`, `completed`, `failed`, `cancelled`, `unstarted` | `parent_execution_id`, `invoke_id`, `policy`, `decision` |
 | `[:statifier_persistence, :child, :cascade_cancelled]` | `Executions.cascade_cancel/3`, after the sweep | `system_time`, `count`, `retained` | `parent_execution_id`, `invoke_id` |
 
@@ -440,6 +440,20 @@ through `Driver.answer_parent/3` once the parent leaves the arm is the
 host's. For a fan-out the children's recorded answers stay on their own
 executions, and answering again through any one child settles the
 invocation again (the ADR-0009 sp-6neq amendment).
+
+Two more `delivery` values say the answer never reached a door at all. The
+automatic answer, and `Driver.resolve_and_answer_parent/3` with a
+`chart_resolver:`, first fetch the parent's own record and then resolve its
+chart through the resolver; `:parent_unfetched` is a parent whose record did
+not fetch, and `:parent_chart_unresolved` is one whose chart the resolver did
+not return. Neither the fetch's error nor the resolver's answer travels. No
+door ran and no settlement was entered, so on these two `outcome` is the
+child's own (`:done` or `:failed`), `child_count` is the linkage's, and
+`failed_count` is `nil` even for a fan-out. The child's own drive still
+returns its own result, and `resolve_and_answer_parent/3` still returns
+`:ok`; delivering the answer once the parent can be reached is the host's,
+through `Driver.answer_parent/3` with a driver over the parent's chart (the
+ADR-0009 sp-q0pp amendment).
 
 `:recorded` and `:settled` are the fan-out settlement seam, and both are
 emitted **inside the parent's settlement exclusion**, which is what makes

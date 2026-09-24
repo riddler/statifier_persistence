@@ -1212,6 +1212,104 @@ defmodule StatifierPersistence.TelemetryTest do
       assert meta.delivery == :discarded
     end
 
+    # The automatic answer fetches the parent's own record before it can
+    # reach the door; a record that does not fetch used to drop the answer
+    # with nothing emitted, while the child's drive still said :completed.
+    #
+    # Sabotage: made resolve_and_answer/4's fetch-error arm return :ok
+    # without calling report_unreached/4 - red at the await; the lost
+    # answer was invisible again.
+    test "reports an automatic answer whose parent record does not fetch",
+         %{store: store} do
+      driver = subchart_driver(store, @parent_source, @child_done_source)
+      {:ok, _execution, _ms} = Driver.create(driver, "execution-1")
+      child_execution_id = Linkage.child_execution_id("execution-1", "call", 0)
+      forget_execution(store, "execution-1")
+      drain()
+
+      child_driver = %{driver | machine: compile!(@child_done_source)}
+
+      assert {:ok, %Execution{status: :completed}, _ms} =
+               Driver.send_event(child_driver, child_execution_id, Event.external("go"))
+
+      assert {m, meta} = await([:statifier_persistence, :child, :answered])
+      assert Map.keys(m) == [:system_time]
+
+      assert Map.keys(meta) |> Enum.sort() == [
+               :child_count,
+               :child_execution_id,
+               :delivery,
+               :failed_count,
+               :invoke_id,
+               :outcome,
+               :parent_execution_id
+             ]
+
+      assert meta.delivery == :parent_unfetched
+      assert meta.child_execution_id == child_execution_id
+      assert meta.parent_execution_id == "execution-1"
+      assert meta.invoke_id == "call"
+      assert meta.outcome == :done
+      assert meta.child_count == nil
+      assert meta.failed_count == nil
+    end
+
+    # Sabotage: folded the resolver-error arm into :parent_unfetched in
+    # answer_resolved_chart/5 - red; a chart the host's resolver does not
+    # hold is a different fix from a parent record that is gone.
+    test "reports an automatic answer whose parent chart does not resolve",
+         %{store: store} do
+      driver = subchart_driver(store, @parent_source, @child_done_source)
+      {:ok, _execution, _ms} = Driver.create(driver, "execution-1")
+      child_execution_id = Linkage.child_execution_id("execution-1", "call", 0)
+      drain()
+
+      child_driver = %{
+        driver
+        | machine: compile!(@child_done_source),
+          chart_resolver: fn _content_hash -> :error end
+      }
+
+      assert {:ok, %Execution{status: :completed}, _ms} =
+               Driver.send_event(child_driver, child_execution_id, Event.external("go"))
+
+      assert {_m, meta} = await([:statifier_persistence, :child, :answered])
+      assert meta.delivery == :parent_chart_unresolved
+      assert meta.child_execution_id == child_execution_id
+      assert meta.parent_execution_id == "execution-1"
+      assert meta.outcome == :done
+
+      # Nothing reached the parent: it still waits in the invoking state.
+      refute_received {:telemetry, [:statifier_persistence, :execution, :step, :start], _m,
+                       %{execution_id: "execution-1"}}
+    end
+
+    # The public form keeps its `:ok` and reports the same way, with the
+    # child's own outcome - the outside-fail path's caller.
+    #
+    # Sabotage: reported `outcome: :done` unconditionally in
+    # report_unreached/4 - red; a failed child read as a completed one.
+    test "resolve_and_answer_parent/3 stays :ok and reports an unreached parent",
+         %{store: store} do
+      driver = subchart_driver(store, @parent_source, @child_done_source)
+      {:ok, _execution, _ms} = Driver.create(driver, "execution-1")
+      child_execution_id = Linkage.child_execution_id("execution-1", "call", 0)
+      drain()
+
+      unresolving = %{driver | chart_resolver: fn _content_hash -> :error end}
+
+      assert :ok =
+               Driver.resolve_and_answer_parent(
+                 unresolving,
+                 child_execution_id,
+                 {:failed, reason: "gave_up"}
+               )
+
+      assert {_m, meta} = await([:statifier_persistence, :child, :answered])
+      assert meta.delivery == :parent_chart_unresolved
+      assert meta.outcome == :failed
+    end
+
     # Sabotage: made cancel_counted/3 tally an already-terminal execution as
     # neither cancelled nor retained - red on the replay, and ADR-0008
     # decision 5's retain semantics stopped being countable.
@@ -1405,6 +1503,41 @@ defmodule StatifierPersistence.TelemetryTest do
       assert {:ok, %{status: :needs_migration}} = Storage.fetch_execution(store, "execution-1")
     end
 
+    # A fan-out child whose parent's chart does not resolve never enters the
+    # settlement, so there is no assembled answer: the width is the
+    # linkage's and the failed count is nil.
+    #
+    # Sabotage: passed `failed_count: 0` in report_unreached/4 - red; a count
+    # of a settlement that never ran.
+    test "reports a fan-out child's answer whose parent chart does not resolve",
+         %{store: store} do
+      driver = fanout_driver(store)
+      start_children(driver, 2)
+      drain()
+
+      child = %{
+        fanout_driver_for_child(store)
+        | machine: compile!(@fanout_child_source),
+          chart_resolver: fn _content_hash -> :error end
+      }
+
+      {:ok, _execution, _ms} =
+        Driver.send_event(
+          child,
+          Linkage.child_execution_id("execution-1", "call", 0),
+          Event.external("go")
+        )
+
+      assert {_m, meta} = await([:statifier_persistence, :child, :answered])
+      assert meta.delivery == :parent_chart_unresolved
+      assert meta.outcome == :done
+      assert meta.child_count == 2
+      assert meta.failed_count == nil
+
+      refute_received {:telemetry, [:statifier_persistence, :child, :recorded], _m, _meta}
+      refute_received {:telemetry, [:statifier_persistence, :child, :settled], _m, _meta}
+    end
+
     # Sabotage: passed nil for invoke_id and child_count in answer_opts/1
     # - red;
     # the step span carrying a whole fan-out's assembled answer was
@@ -1473,6 +1606,14 @@ defmodule StatifierPersistence.TelemetryTest do
     after
       0 -> :ok
     end
+  end
+
+  # Removes an execution's stored record from the in-memory adapter, so a
+  # later fetch of it answers an error - a parent record that is gone.
+  defp forget_execution(%Storage{opts: opts}, execution_id) do
+    Agent.update(Keyword.fetch!(opts, :pid), fn state ->
+      update_in(state, [:executions], &Map.delete(&1, execution_id))
+    end)
   end
 
   defp compile!(source) do
