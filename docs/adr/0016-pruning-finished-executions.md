@@ -1,6 +1,6 @@
 # ADR-0016: Pruning a finished execution: `Retention.prune/3` clears the position blob and the input log of every terminal execution that ended before a host's cutoff, keeps the row, leaves the positions table alone, and takes no duration
 
-Status: proposed (2026-09-24, sp-yy7d)
+Status: accepted (2026-09-24, sp-yy7d)
 
 ## Context
 
@@ -187,3 +187,64 @@ facade like every other adapter call. No new event.
 
 **No migration.** The columns this needs are V01's nullable
 `position_blob`, V05's inputs table and V08's `ended_at` and its index.
+
+## Note (2026-09-24, sp-nvch): accepted, with the Consequences' "Decision 8 names the cost" read as decision 9
+
+The operator accepted this record on 2026-09-24. The code that implements
+it is in statifier_persistence 0.17.0 (tag `v0.17.0`, `174f48c`), which is
+tagged but not yet published on Hex: this record is accepted on the
+operator's word before the Hex publish. The status line at the top flips in
+place from proposed to accepted, and no other line of the record changes.
+Every cite below was read on `main` at `174f48c`, the tag. The premise
+surface's own files carry no commit after `341330a` other than the change
+that added this record.
+
+What was re-read before the flip, decision by decision:
+
+- **The premise surface.** Every premise cite still reads as quoted: the
+  inputs table's moduledoc on the missing foreign key
+  (`lib/statifier_persistence/ecto/migrations/v05.ex`), the stamp kept over
+  a later non-terminal write (`lib/statifier_persistence/executions.ex`,
+  `ended?/1`), the nullable `position_blob` and nullable `session_id` on the
+  executions table (`lib/statifier_persistence/ecto/migrations/v01.ex`,
+  `up/1`), the missing-position answer
+  (`lib/statifier_persistence/storage.ex`, `load_execution_position/3`),
+  the terminal discards before any load (`step_tail/7`, `fail/4`,
+  `cancel/3`) and the migration's refusal (`check_record/2`), the
+  diagnostic `inputs/2`, and the parent's read of a child's row
+  (`lib/statifier_persistence/driver.ex`, `entry/5`, `adopt_child/3`).
+- **Decisions 1, 6 and 7.** `StatifierPersistence.Retention.prune/3` raises
+  `ArgumentError` on any cutoff that is not a `DateTime` and on a
+  `batch_size:` that is not a positive integer, refuses an adapter without
+  the capability before any batch, and sums each batch's counts, stopping
+  at the first batch shorter than its limit
+  (`lib/statifier_persistence/retention.ex`, `prune/3`).
+- **Decisions 2, 3 and 7, per adapter.** The Ecto adapter selects a
+  terminal status, `ended_at` strictly before the cutoff and something
+  still to clear, oldest end first; deletes the batch's input rows by
+  `execution_id`; and sets `position_blob` to `nil` and nothing else, in
+  one transaction (`lib/statifier_persistence/storage/ecto.ex`,
+  `prune_executions/3`). The in-memory adapter applies the same selection
+  in one `Agent.get_and_update/2` and answers `inputs: 0`
+  (`lib/statifier_persistence/storage/in_memory.ex`, `prune_executions/3`).
+- **Decision 8.** The pair is in `@optional_callbacks`
+  (`lib/statifier_persistence/storage/adapter.ex`,
+  `supports_execution_pruning?/1`, `prune_executions/3`). The facade answers
+  `{:error, :execution_pruning_unsupported}` without calling an adapter
+  that does not declare it (`lib/statifier_persistence/storage.ex`,
+  `prune_executions/3`). On Postgres the selection takes
+  `FOR UPDATE SKIP LOCKED` (`storage/ecto.ex`, `due_executions/3`).
+- **Decisions 5, 9, 10 and 11** add no code: no prune path writes the
+  positions table, a key, or a second execution, and `docs/retention.md`
+  says what the host may and must not delete.
+- **Consequences.** The conformance cases are generated only for an
+  adapter that exports `prune_executions/3`, and the input log case only
+  for one that also exports `append_input/3`
+  (`lib/statifier_persistence/testing/storage_conformance.ex`). The two
+  callback names are in `docs/telemetry.md`'s closed vocabulary, reported
+  through the facade's adapter call. The release adds no schema version.
+
+**"Decision 8 names the cost" in the Consequences is read as decision 9.**
+The cost it means - a pruned execution cannot be told from an unpruned one
+by a read - is decision 9's; decision 8 is the adapter callback. The
+sentence stays as written, and this Note is how it is read.
