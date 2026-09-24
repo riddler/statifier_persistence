@@ -302,7 +302,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           position_blob: <<0, 255, 1, 2, 3, 0, 0, 254>>,
           failure: nil,
           metadata: %{},
-          outcome_blob: nil
+          outcome_blob: nil,
+          ended_at: nil
         }
 
         assert :ok = @conformance_adapter.insert_execution(store.opts, execution_record)
@@ -326,7 +327,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           position_blob: <<7, 8, 9>>,
           failure: nil,
           metadata: %{},
-          outcome_blob: nil
+          outcome_blob: nil,
+          ended_at: nil
         }
 
         assert :ok = @conformance_adapter.insert_execution(store.opts, execution_record)
@@ -358,7 +360,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           position_blob: nil,
           failure: "abandoned",
           metadata: %{},
-          outcome_blob: nil
+          outcome_blob: nil,
+          ended_at: nil
         }
 
         assert {:error, :execution_not_found} =
@@ -396,7 +399,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           position_blob: nil,
           failure: "budget_exhausted: 100 rounds",
           metadata: %{},
-          outcome_blob: nil
+          outcome_blob: nil,
+          ended_at: nil
         }
 
         assert :ok = @conformance_adapter.insert_execution(store.opts, execution_record)
@@ -427,7 +431,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           position_blob: <<7, 8, 9>>,
           failure: nil,
           metadata: %{},
-          outcome_blob: nil
+          outcome_blob: nil,
+          ended_at: nil
         }
 
         updated = %{
@@ -462,7 +467,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           position_blob: <<7, 8, 9>>,
           failure: nil,
           metadata: %{},
-          outcome_blob: nil
+          outcome_blob: nil,
+          ended_at: nil
         }
 
         assert :ok = @conformance_adapter.insert_execution(store.opts, inserted)
@@ -484,6 +490,91 @@ defmodule StatifierPersistence.Testing.StorageConformance do
 
         assert fetched.status == :cancelled
         assert fetched.position_blob == inserted.position_blob
+      end
+
+      # -- Adapter level: ended_at, first write wins ---------------------
+
+      # sabotage: in StatifierPersistence.Storage.InMemory's private
+      # carry_forward/2, swap the ended_at operands so the given record's
+      # stamp wins over the stored one -> red, the fetch after the second
+      # terminal update came back with the later stamp. Verified red on the
+      # InMemory conformance suite, reverted from a copy. Also verified on
+      # the Ecto side: made ended_update/2 set ended_at to the given stamp
+      # instead of COALESCE(ended_at, stamp) -> red the same way.
+      test "adapter: update_execution/2 keeps a stored ended_at over every later record's",
+           %{store: store} do
+        first = ~U[2026-09-24 10:00:00.000001Z]
+        later = ~U[2026-09-24 11:00:00.000002Z]
+
+        inserted = %{
+          execution_id: "execution-conformance-ended-at",
+          status: :active,
+          content_hash: "sha256:conformance-chart-a",
+          identity_blob: <<1, 2, 3>>,
+          position_blob: <<7, 8, 9>>,
+          failure: nil,
+          metadata: %{},
+          outcome_blob: nil,
+          ended_at: nil
+        }
+
+        assert :ok = @conformance_adapter.insert_execution(store.opts, inserted)
+
+        ended = %{inserted | status: :completed, ended_at: first}
+        assert :ok = @conformance_adapter.update_execution(store.opts, ended)
+
+        assert {:ok, ^ended} =
+                 @conformance_adapter.fetch_execution(
+                   store.opts,
+                   "execution-conformance-ended-at"
+                 )
+
+        # A second terminal write with its own stamp, and a write carrying
+        # none, both leave the first stamp where it is.
+        rewritten = %{ended | status: :failed, failure: "late", ended_at: later}
+        assert :ok = @conformance_adapter.update_execution(store.opts, rewritten)
+
+        assert {:ok, %{status: :failed, failure: "late", ended_at: ^first}} =
+                 @conformance_adapter.fetch_execution(
+                   store.opts,
+                   "execution-conformance-ended-at"
+                 )
+
+        unstamped = %{rewritten | ended_at: nil}
+        assert :ok = @conformance_adapter.update_execution(store.opts, unstamped)
+
+        assert {:ok, %{ended_at: ^first}} =
+                 @conformance_adapter.fetch_execution(
+                   store.opts,
+                   "execution-conformance-ended-at"
+                 )
+      end
+
+      # sabotage: in StatifierPersistence.Storage.InMemory's
+      # insert_execution/2, put ended_at to nil before storing -> red, the
+      # fetch came back without the stamp. Verified red on the InMemory
+      # conformance suite, reverted from a copy. Also verified on the Ecto
+      # side: dropped ended_at from to_execution_record/1's map -> red.
+      test "adapter: insert_execution/2 stores the ended_at it is given", %{store: store} do
+        inserted = %{
+          execution_id: "execution-conformance-ended-at-insert",
+          status: :failed,
+          content_hash: "sha256:conformance-chart-a",
+          identity_blob: <<1, 2, 3>>,
+          position_blob: nil,
+          failure: "failed at create",
+          metadata: %{},
+          outcome_blob: nil,
+          ended_at: ~U[2026-09-24 10:00:00.000003Z]
+        }
+
+        assert :ok = @conformance_adapter.insert_execution(store.opts, inserted)
+
+        assert {:ok, ^inserted} =
+                 @conformance_adapter.fetch_execution(
+                   store.opts,
+                   "execution-conformance-ended-at-insert"
+                 )
       end
 
       # -- Adapter level: the optional child enumeration (ADR-0008) -----
@@ -516,7 +607,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                 "invoke_id" => "call"
               }
             },
-            outcome_blob: nil
+            outcome_blob: nil,
+            ended_at: nil
           }
 
           other_parent = %{
@@ -576,7 +668,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
             position_blob: <<7, 8, 9>>,
             failure: nil,
             metadata: %{},
-            outcome_blob: nil
+            outcome_blob: nil,
+            ended_at: nil
           }
 
           assert :ok = @conformance_adapter.insert_execution(store.opts, inserted)
@@ -643,7 +736,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                   "policy" => "all"
                 }
               },
-              outcome_blob: nil
+              outcome_blob: nil,
+              ended_at: nil
             }
           end
 
@@ -1017,7 +1111,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                 Linkage.to_metadata(
                   Linkage.new("counts-pinned-parent", "call", 0, "sha256:counts-pin-hash")
                 ),
-              outcome_blob: nil
+              outcome_blob: nil,
+              ended_at: nil
             }
 
             assert :ok = @conformance_adapter.insert_execution(store.opts, record)
@@ -1077,7 +1172,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
               position_blob: <<7, 8, 9>>,
               failure: nil,
               metadata: Linkage.to_metadata(linkage),
-              outcome_blob: nil
+              outcome_blob: nil,
+              ended_at: nil
             }
 
             assert :ok = @conformance_adapter.insert_execution(store.opts, record)
@@ -1095,7 +1191,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
             position_blob: <<7, 8, 9>>,
             failure: nil,
             metadata: %{},
-            outcome_blob: nil
+            outcome_blob: nil,
+            ended_at: nil
           }
 
           assert :ok = @conformance_adapter.insert_execution(store.opts, record)
@@ -1264,7 +1361,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                          Linkage.to_metadata(
                            Linkage.new("retire-pin-parent", "call", 0, @retire_hash)
                          ),
-                       outcome_blob: nil
+                       outcome_blob: nil,
+                       ended_at: nil
                      })
 
             assert {:error, {:pinned, counts}} =
@@ -1310,7 +1408,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                          Linkage.to_metadata(
                            Linkage.new("retire-parked-parent", "call", 0, @retire_hash)
                          ),
-                       outcome_blob: nil
+                       outcome_blob: nil,
+                       ended_at: nil
                      })
 
             assert {:error, {:pinned, counts}} =
@@ -1558,7 +1657,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                      position_blob: <<7, 8, 9>>,
                      failure: nil,
                      metadata: %{},
-                     outcome_blob: nil
+                     outcome_blob: nil,
+                     ended_at: nil
                    })
         end
       end
@@ -1669,7 +1769,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
             position_blob: <<7, 8, 9>>,
             failure: nil,
             metadata: metadata,
-            outcome_blob: nil
+            outcome_blob: nil,
+            ended_at: nil
           }
 
           assert :ok = @conformance_adapter.insert_execution(store.opts, record)
@@ -2170,6 +2271,47 @@ defmodule StatifierPersistence.Testing.StorageConformance do
       end
 
       # -- Facade level --------------------------------------------------
+
+      # sabotage: made StatifierPersistence.Storage's private ended_at/2
+      # answer `now` for every status -> red, the :active insert came back
+      # stamped. Verified red on both conformance suites, reverted from a
+      # copy. And: made it answer nil for every status -> red, the
+      # :cancelled write came back unstamped.
+      test "facade: a terminal write stamps ended_at once, and no later write moves it", %{
+        store: store
+      } do
+        {_source, machine} = Charts.chart_a()
+        machine_state = Statifier.MachineState.new(machine, session_id: "sess_conformance_ended")
+        execution_id = "execution-conformance-facade-ended"
+
+        assert :ok = Storage.insert_execution(store, execution_id, machine_state, :active)
+        assert {:ok, %{ended_at: nil}} = Storage.fetch_execution(store, execution_id)
+
+        assert :ok = Storage.update_execution_status(store, execution_id, :cancelled)
+
+        assert {:ok, %{status: :cancelled, ended_at: %DateTime{} = stamp}} =
+                 Storage.fetch_execution(store, execution_id)
+
+        assert :ok = Storage.update_execution(store, execution_id, machine_state, :completed)
+
+        assert {:ok, %{status: :completed, ended_at: ^stamp}} =
+                 Storage.fetch_execution(store, execution_id)
+
+        assert :ok =
+                 Storage.update_execution_status(store, execution_id, :failed, failure: "late")
+
+        assert {:ok, %{status: :failed, ended_at: ^stamp}} =
+                 Storage.fetch_execution(store, execution_id)
+
+        failed_at_create = "execution-conformance-facade-ended-insert"
+
+        assert :ok =
+                 Storage.insert_execution(store, failed_at_create, machine_state, :failed,
+                   failure: "failed at create"
+                 )
+
+        assert {:ok, %{ended_at: %DateTime{}}} = Storage.fetch_execution(store, failed_at_create)
+      end
 
       # sabotage: in StatifierPersistence.Storage.save_position/3, drop the
       # store.adapter.save_position(store.opts, position_record) call so

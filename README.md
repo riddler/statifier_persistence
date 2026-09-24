@@ -1029,7 +1029,7 @@ wants the helper to build exactly what it wrote:
   there are none - in every table V01 and V05 create, instead of last.
   The default, `:trailing`, is the layout this package has always
   built. A column a later version adds (`metadata`, `outcome_blob`,
-  `retired_at`, `retired_by`) lands at the end either way.
+  `retired_at`, `retired_by`, `ended_at`) lands at the end either way.
 - **`column_collations: [name: collation]`** declares that package
   column with that collation wherever V01 or V05 creates it: above,
   `execution_id` is `COLLATE "C"` on both the executions and the inputs

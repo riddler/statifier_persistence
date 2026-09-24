@@ -50,7 +50,7 @@ if Code.ensure_loaded?(Ecto) do
 
     @behaviour StatifierPersistence.Storage.Adapter
 
-    import Ecto.Query, only: [exclude: 2, from: 2, subquery: 1]
+    import Ecto.Query, only: [exclude: 2, from: 2, subquery: 1, update: 3, where: 3]
 
     alias Ecto.Adapters.SQL.Sandbox
     alias Ecto.Changeset
@@ -372,12 +372,22 @@ if Code.ensure_loaded?(Ecto) do
     only when the given record carries one: a `nil` leaves the stored
     column alone, so an ordinary step of an execution that has already answered
     does not erase its answer.
+
+    `ended_at` is the third, and it is decided in the same statement: a
+    record carrying a stamp writes `COALESCE(ended_at, stamp)`, so a row
+    that already holds one keeps it, and a record carrying `nil` leaves
+    the column alone. No read comes first, so two writers racing to end
+    one execution cannot both stamp it.
     """
     @impl Adapter
     @spec update_execution(Adapter.opts(), Adapter.execution_record()) ::
             :ok | {:error, Adapter.error()}
     def update_execution(opts, %{execution_id: execution_id} = execution_record) do
-      query = from(r in execution_schema(opts), where: r.execution_id == ^execution_id)
+      query =
+        opts
+        |> execution_schema()
+        |> where([r], r.execution_id == ^execution_id)
+        |> ended_update(Map.get(execution_record, :ended_at))
 
       updates =
         [
@@ -398,6 +408,17 @@ if Code.ensure_loaded?(Ecto) do
     @spec outcome_update(binary() | nil) :: keyword()
     defp outcome_update(nil), do: []
     defp outcome_update(outcome_blob), do: [outcome_blob: outcome_blob]
+
+    # First write wins: the stamp lands only on a row whose column is still
+    # NULL, inside the one UPDATE, so the rule holds without a read.
+    @spec ended_update(Ecto.Query.t(), DateTime.t() | nil) :: Ecto.Query.t()
+    defp ended_update(query, nil), do: query
+
+    defp ended_update(query, %DateTime{} = ended_at) do
+      update(query, [r],
+        set: [ended_at: coalesce(r.ended_at, type(^ended_at, :utc_datetime_usec))]
+      )
+    end
 
     @doc """
     Declares outcome support (the optional
@@ -1148,7 +1169,11 @@ if Code.ensure_loaded?(Ecto) do
     # rewrite of the linkage pin (ADR-0008's 2026-09-23 Amendment); a park is
     # a status write, as `Storage.update_execution_status/4` makes one.
     defp tree_write(opts, {:repin, %{execution_id: execution_id} = record, linkage_hash}) do
-      query = from(r in execution_schema(opts), where: r.execution_id == ^execution_id)
+      query =
+        opts
+        |> execution_schema()
+        |> where([r], r.execution_id == ^execution_id)
+        |> ended_update(Map.get(record, :ended_at))
 
       updates =
         [
@@ -1271,7 +1296,8 @@ if Code.ensure_loaded?(Ecto) do
         position_blob: row.position_blob,
         failure: row.failure,
         metadata: row.metadata || %{},
-        outcome_blob: row.outcome_blob
+        outcome_blob: row.outcome_blob,
+        ended_at: row.ended_at
       }
     end
 

@@ -323,6 +323,38 @@ defmodule StatifierPersistence.DriverFanoutTest do
              ]
     end
 
+    # The settlement writes a child's row a second time after its own drive
+    # made it terminal - the answer beside the status it re-states - and
+    # that rewrite is exactly the write that must not move ended_at.
+    #
+    # sabotage: in StatifierPersistence.Storage.InMemory's private
+    # carry_forward/2, let the given record's ended_at win over the stored
+    # one -> red, the settlement's rewrite moved the child's stamp to its
+    # own later time. Verified red, reverted from a copy.
+    test "the settlement's rewrite of a finished child keeps the stamp its drive wrote", %{
+      store: store
+    } do
+      parent = start_parent(store)
+      start_children(parent, 1)
+      child_execution_id = Linkage.child_execution_id("execution_1", "call", 0)
+
+      # The drive stamps the row and hands the stamp back; the automatic
+      # settlement that follows it records the answer beside the status.
+      assert {:ok, %{status: :completed, ended_at: %DateTime{} = stamp}, _ms} =
+               Driver.send_event(
+                 child_driver(store, []),
+                 child_execution_id,
+                 Event.external("go")
+               )
+
+      assert leaves(reload_parent(store)) == ["approved"]
+
+      assert {:ok, %{status: :completed, outcome_blob: outcome, ended_at: ^stamp}} =
+               Storage.fetch_execution(store, child_execution_id)
+
+      refute is_nil(outcome)
+    end
+
     # sp-kl3, the concurrent settlement race, in its deterministic form: a
     # child's terminal STATUS is persisted by its own drive, and its answer
     # is recorded by the settlement that follows - two writes, in that

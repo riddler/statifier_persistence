@@ -37,6 +37,17 @@ defmodule StatifierPersistence.Storage do
   contract, not this package's. Nothing here proposes it, and this package
   offers no option to do it.
 
+  Every execution writer - `insert_execution/5`, `update_execution/5`,
+  `update_execution_status/4` - stamps `ended_at` on the record it writes
+  when the status it writes is terminal (`:completed`, `:failed` or
+  `:cancelled`), with `DateTime.utc_now/0`, and leaves it `nil` otherwise.
+  The adapter keeps a stamp already stored
+  (`c:StatifierPersistence.Storage.Adapter.update_execution/2`), so the
+  stamp an execution carries is the time of the first write that made it
+  terminal, and a later write of a terminal row cannot move it. A write
+  that is not terminal - `write_tree_migration/2`'s re-pins and parks
+  included - never clears one.
+
   Every function here returns an error tuple instead of throwing; nothing
   in this module ever downgrades a failure to a default value.
 
@@ -412,6 +423,28 @@ defmodule StatifierPersistence.Storage do
         %MachineState{} = machine_state,
         status,
         opts \\ []
+      ),
+      do: insert_execution(store, execution_id, machine_state, status, opts, DateTime.utc_now())
+
+  # `insert_execution/5` with the stamp chosen by the caller: the one
+  # `StatifierPersistence.Executions` uses, so the struct it hands back
+  # carries the same `ended_at` the row does. Not a host door.
+  @doc false
+  @spec insert_execution(
+          t(),
+          Adapter.execution_id(),
+          MachineState.t(),
+          Adapter.execution_status(),
+          [execution_write_opt()],
+          DateTime.t()
+        ) :: :ok | {:error, error()}
+  def insert_execution(
+        %__MODULE__{} = store,
+        execution_id,
+        %MachineState{} = machine_state,
+        status,
+        opts,
+        %DateTime{} = now
       ) do
     case Machine.identity(machine_state.machine) do
       nil ->
@@ -423,7 +456,9 @@ defmodule StatifierPersistence.Storage do
 
         with :ok <- check_metadata_supported(store, metadata),
              {:ok, position_blob} <- insert_position_blob(machine_state, position_opt(opts)) do
-          record = execution_record(execution_id, status, identity, position_blob, metadata, opts)
+          record =
+            execution_record(execution_id, status, identity, position_blob, metadata, opts, now)
+
           write(store, :insert_execution, keys, record)
         end
     end
@@ -462,6 +497,27 @@ defmodule StatifierPersistence.Storage do
         %MachineState{} = machine_state,
         status,
         opts \\ []
+      ),
+      do: update_execution(store, execution_id, machine_state, status, opts, DateTime.utc_now())
+
+  # `update_execution/5` with the stamp chosen by the caller, for
+  # `insert_execution/6`'s reason. Not a host door.
+  @doc false
+  @spec update_execution(
+          t(),
+          Adapter.execution_id(),
+          MachineState.t(),
+          Adapter.execution_status(),
+          [execution_write_opt()],
+          DateTime.t()
+        ) :: :ok | {:error, error()}
+  def update_execution(
+        %__MODULE__{} = store,
+        execution_id,
+        %MachineState{} = machine_state,
+        status,
+        opts,
+        %DateTime{} = now
       ) do
     case Machine.identity(machine_state.machine) do
       nil ->
@@ -472,7 +528,9 @@ defmodule StatifierPersistence.Storage do
 
         with {:ok, position_blob} <-
                update_position_blob(store, execution_id, machine_state, position_opt(opts)) do
-          record = execution_record(execution_id, status, identity, position_blob, %{}, opts)
+          record =
+            execution_record(execution_id, status, identity, position_blob, %{}, opts, now)
+
           write(store, :update_execution, keys, record)
         end
     end
@@ -503,14 +561,34 @@ defmodule StatifierPersistence.Storage do
           status :: Adapter.execution_status(),
           opts :: [execution_write_opt()]
         ) :: :ok | {:error, error()}
-  def update_execution_status(%__MODULE__{} = store, execution_id, status, opts \\ []) do
+  def update_execution_status(%__MODULE__{} = store, execution_id, status, opts \\ []),
+    do: update_execution_status(store, execution_id, status, opts, DateTime.utc_now())
+
+  # `update_execution_status/4` with the stamp chosen by the caller, for
+  # `insert_execution/6`'s reason. Not a host door.
+  @doc false
+  @spec update_execution_status(
+          t(),
+          Adapter.execution_id(),
+          Adapter.execution_status(),
+          [execution_write_opt()],
+          DateTime.t()
+        ) :: :ok | {:error, error()}
+  def update_execution_status(
+        %__MODULE__{} = store,
+        execution_id,
+        status,
+        opts,
+        %DateTime{} = now
+      ) do
     with {:ok, execution_record} <- fetch_execution(store, execution_id) do
-      updated = %{
-        execution_record
-        | status: status,
+      updated =
+        Map.merge(execution_record, %{
+          status: status,
           failure: Keyword.get(opts, :failure),
-          outcome_blob: Keyword.get(opts, :outcome_blob)
-      }
+          outcome_blob: Keyword.get(opts, :outcome_blob),
+          ended_at: ended_at(status, now)
+        })
 
       keys = [execution_id: execution_id, content_hash: execution_record.content_hash]
       write(store, :update_execution, keys, updated)
@@ -954,7 +1032,9 @@ defmodule StatifierPersistence.Storage do
 
       identity ->
         with {:ok, position_blob} <- Position.to_binary(machine_state) do
-          record = execution_record(execution_id, :active, identity, position_blob, %{}, [])
+          record =
+            execution_record(execution_id, :active, identity, position_blob, %{}, [], nil)
+
           {:ok, {:repin, record, linkage_hash}}
         end
     end
@@ -1128,9 +1208,10 @@ defmodule StatifierPersistence.Storage do
           Identity.t(),
           binary() | nil,
           Adapter.metadata(),
-          [execution_write_opt()]
+          [execution_write_opt()],
+          DateTime.t() | nil
         ) :: Adapter.execution_record()
-  defp execution_record(execution_id, status, identity, position_blob, metadata, opts) do
+  defp execution_record(execution_id, status, identity, position_blob, metadata, opts, now) do
     %{
       execution_id: execution_id,
       status: status,
@@ -1139,9 +1220,16 @@ defmodule StatifierPersistence.Storage do
       position_blob: position_blob,
       failure: Keyword.get(opts, :failure),
       metadata: metadata,
-      outcome_blob: Keyword.get(opts, :outcome_blob)
+      outcome_blob: Keyword.get(opts, :outcome_blob),
+      ended_at: ended_at(status, now)
     }
   end
+
+  # The stamp a write records: `now` for a terminal status, `nil` for any
+  # other. Whether it lands is the adapter's first-write-wins rule.
+  @spec ended_at(Adapter.execution_status(), DateTime.t() | nil) :: DateTime.t() | nil
+  defp ended_at(status, now) when status in [:completed, :failed, :cancelled], do: now
+  defp ended_at(_status, _now), do: nil
 
   # ADR-0006 decision 1's whole validation: a map with string keys. Values
   # are never inspected. A malformed option is a caller bug, so it raises

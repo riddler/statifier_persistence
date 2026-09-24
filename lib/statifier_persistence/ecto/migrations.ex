@@ -171,6 +171,21 @@ if Code.ensure_loaded?(Ecto.Migration) do
     including what the two `modify` changes do on a backend that is not
     Postgres.
 
+    V08 needs no recipe of its own: it adds the nullable `ended_at`
+    column to `executions` and indexes it, inside an ordinary transaction
+    and on every backend. An install already at V07 picks it up with
+
+        defmodule MyApp.Repo.Migrations.AddStatifierPersistenceEndedAt do
+          use Ecto.Migration
+
+          def up, do: StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, from: 8)
+          def down, do: StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence, version: 8)
+        end
+
+    Existing rows, terminal ones included, read `ended_at` as `nil`: the
+    version backfills nothing. `StatifierPersistence.Ecto.Migrations.V08`
+    records why.
+
     `expected_version/0` answers what that newest version is. A host that
     delegates its migrations here never needs it; a host whose schema is
     hand-written DDL has to check for itself that its tables are current,
@@ -192,7 +207,8 @@ if Code.ensure_loaded?(Ecto.Migration) do
       4 => StatifierPersistence.Ecto.Migrations.V04,
       5 => StatifierPersistence.Ecto.Migrations.V05,
       6 => StatifierPersistence.Ecto.Migrations.V06,
-      7 => StatifierPersistence.Ecto.Migrations.V07
+      7 => StatifierPersistence.Ecto.Migrations.V07,
+      8 => StatifierPersistence.Ecto.Migrations.V08
     }
 
     # Read off the map rather than written beside it: a version this module

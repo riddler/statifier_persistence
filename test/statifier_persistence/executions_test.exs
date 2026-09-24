@@ -1290,6 +1290,139 @@ defmodule StatifierPersistence.ExecutionsTest do
     end
   end
 
+  describe "ended_at and ended?/1" do
+    # sabotage: made tail_result/6 build the struct with ended_at nil
+    # whatever the status -> red, the completing step's struct came back
+    # unstamped and ended?/1 answered false. Verified red, reverted from a
+    # copy.
+    test "a completing step stamps the row, and the struct it hands back carries the same stamp",
+         %{store: store} do
+      machine = compile!(@final_chart_source)
+
+      assert {:ok, %Execution{status: :active, ended_at: nil} = created, _ms} =
+               Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      refute Executions.ended?(created)
+      assert {:ok, %{ended_at: nil}} = Storage.fetch_execution(store, "execution-1")
+
+      assert {:ok, %Execution{status: :completed, ended_at: %DateTime{} = stamp} = completed, _ms} =
+               Executions.step(store, "execution-1", machine, Event.external("finish"),
+                 executor: RecordingExecutor
+               )
+
+      assert Executions.ended?(completed)
+
+      assert {:ok, %{status: :completed, ended_at: ^stamp}} =
+               Storage.fetch_execution(store, "execution-1")
+    end
+
+    # sabotage: made fail_tail/3 build its struct from the fetched record
+    # without the stamp -> red, the struct came back with ended_at nil.
+    # Verified red, reverted from a copy.
+    test "fail/4 stamps once, and a later cancel is discarded with the stamp unmoved",
+         %{store: store} do
+      {_source, machine} = Charts.chart_a()
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      assert {:ok, %Execution{status: :failed, ended_at: %DateTime{} = stamp} = failed} =
+               Executions.fail(store, "execution-1", "operator: abandoned")
+
+      assert Executions.ended?(failed)
+      assert {:ok, %{ended_at: ^stamp}} = Storage.fetch_execution(store, "execution-1")
+
+      assert {:discarded, %Execution{status: :failed, ended_at: ^stamp}} =
+               Executions.cancel(store, "execution-1")
+
+      assert {:ok, %{status: :failed, ended_at: ^stamp}} =
+               Storage.fetch_execution(store, "execution-1")
+    end
+
+    # sabotage: made cancel_tail/2 build its struct from the fetched record
+    # without the stamp -> red, the struct came back with ended_at nil.
+    # Verified red, reverted from a copy.
+    test "cancel/3 stamps the row and the struct alike", %{store: store} do
+      {_source, machine} = Charts.chart_a()
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      assert {:ok, %Execution{status: :cancelled, ended_at: %DateTime{} = stamp}} =
+               Executions.cancel(store, "execution-1")
+
+      assert {:ok, %{status: :cancelled, ended_at: ^stamp}} =
+               Storage.fetch_execution(store, "execution-1")
+    end
+
+    # A row a host wrote back to :active over a terminal one keeps its
+    # stamp (the adapter's first-write-wins rule), so the repair's struct
+    # carries that stamp, not the time of the repair.
+    #
+    # sabotage: made step_loaded/8 pass DateTime.utc_now() as the stamp
+    # instead of stamp/1's answer -> red, the repair's struct carried a
+    # later time than the row kept. Verified red, reverted from a copy.
+    test "the terminal repair hands back the stamp the row kept", %{store: store} do
+      machine = compile!(@final_chart_source)
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      {:ok, %Execution{ended_at: %DateTime{} = stamp}, terminal_ms} =
+        Executions.step(store, "execution-1", machine, Event.external("finish"),
+          executor: RecordingExecutor
+        )
+
+      :ok = Storage.update_execution(store, "execution-1", terminal_ms, :active)
+
+      assert {:ok, %{status: :active, ended_at: ^stamp}} =
+               Storage.fetch_execution(store, "execution-1")
+
+      assert {:discarded, %Execution{status: :completed, ended_at: ^stamp}} =
+               Executions.step(store, "execution-1", machine, Event.external("finish"),
+                 executor: RecordingExecutor
+               )
+
+      assert {:ok, %{status: :completed, ended_at: ^stamp}} =
+               Storage.fetch_execution(store, "execution-1")
+    end
+
+    # sabotage: made ended?/1 answer from the status (terminal -> true)
+    # instead of the stamp -> red, the unstamped terminal struct answered
+    # true. Verified red, reverted from a copy.
+    test "ended?/1 reads the stamp, not the status" do
+      unstamped_terminal = %Execution{
+        execution_id: "execution-1",
+        status: :completed,
+        content_hash: "sha256:any",
+        ended_at: nil
+      }
+
+      refute Executions.ended?(unstamped_terminal)
+      assert Executions.ended?(%{unstamped_terminal | ended_at: ~U[2026-09-24 10:00:00.000000Z]})
+    end
+
+    # sabotage: made Execution.from_record/1 set ended_at to nil -> red,
+    # the struct built from the fetched record carried no stamp. Verified
+    # red, reverted from a copy.
+    test "from_record/1 carries a stored stamp, and a record without the key builds nil" do
+      record = %{
+        execution_id: "execution-1",
+        status: :completed,
+        content_hash: "sha256:any",
+        identity_blob: <<1>>,
+        position_blob: nil,
+        failure: nil,
+        metadata: %{},
+        outcome_blob: nil,
+        ended_at: ~U[2026-09-24 10:00:00.000000Z]
+      }
+
+      assert %Execution{ended_at: ~U[2026-09-24 10:00:00.000000Z]} = Execution.from_record(record)
+      assert %Execution{ended_at: nil} = Execution.from_record(Map.delete(record, :ended_at))
+    end
+  end
+
   describe "executions_on/2 (ADR-0012 decision 3)" do
     # sabotage: in StatifierPersistence.Executions.executions_on/2,
     # answer Storage.count_executions_by_content_hash(store, "") instead

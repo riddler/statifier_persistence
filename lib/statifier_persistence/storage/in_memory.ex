@@ -185,6 +185,7 @@ defmodule StatifierPersistence.Storage.InMemory do
       execution_record
       |> Map.put_new(:metadata, %{})
       |> Map.put_new(:outcome_blob, nil)
+      |> Map.put_new(:ended_at, nil)
 
     Agent.get_and_update(pid(opts), fn state ->
       if Map.has_key?(state.executions, execution_id) do
@@ -217,6 +218,9 @@ defmodule StatifierPersistence.Storage.InMemory do
   so the stored map is carried forward and the given record's `metadata`
   is ignored. `outcome_blob` is the second exception: a `nil` in the given
   record carries the stored value forward, and a binary sets it.
+  `ended_at` is the third: a stored stamp is kept whatever the given
+  record carries, and only a record with no stamp stored takes the given
+  one.
   """
   @impl Adapter
   @spec update_execution(Adapter.opts(), Adapter.execution_record()) ::
@@ -238,10 +242,12 @@ defmodule StatifierPersistence.Storage.InMemory do
           Adapter.execution_record()
   defp carry_forward(execution_record, stored) do
     outcome_blob = Map.get(execution_record, :outcome_blob) || Map.get(stored, :outcome_blob)
+    ended_at = Map.get(stored, :ended_at) || Map.get(execution_record, :ended_at)
 
     execution_record
     |> Map.put(:metadata, Map.get(stored, :metadata, %{}))
     |> Map.put(:outcome_blob, outcome_blob)
+    |> Map.put(:ended_at, ended_at)
   end
 
   @doc """

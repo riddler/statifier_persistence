@@ -432,7 +432,8 @@ defmodule StatifierPersistence.Executions do
           effects,
           executor,
           {:insert, metadata},
-          reporter
+          reporter,
+          DateTime.utc_now()
         )
       end)
     end
@@ -655,9 +656,22 @@ defmodule StatifierPersistence.Executions do
         discarded(execution_record, execution_id, :fail, :terminal_execution)
 
       {:ok, execution_record} ->
-        with :ok <- Storage.update_execution_status(store, execution_id, :failed, failure: reason) do
+        now = stamp(execution_record)
+
+        with :ok <-
+               Storage.update_execution_status(
+                 store,
+                 execution_id,
+                 :failed,
+                 [failure: reason],
+                 now
+               ) do
           terminated(execution_id, execution_record.content_hash, :failed, reason)
-          {:ok, Execution.from_record(%{execution_record | status: :failed, failure: reason})}
+
+          {:ok,
+           Execution.from_record(
+             Map.merge(execution_record, %{status: :failed, failure: reason, ended_at: now})
+           )}
         end
 
       {:error, _reason} = error ->
@@ -698,9 +712,22 @@ defmodule StatifierPersistence.Executions do
         discarded(execution_record, execution_id, :cancel, :terminal_execution)
 
       {:ok, execution_record} ->
-        with :ok <- Storage.update_execution_status(store, execution_id, :cancelled, failure: nil) do
+        now = stamp(execution_record)
+
+        with :ok <-
+               Storage.update_execution_status(
+                 store,
+                 execution_id,
+                 :cancelled,
+                 [failure: nil],
+                 now
+               ) do
           terminated(execution_id, execution_record.content_hash, :cancelled, nil)
-          {:ok, Execution.from_record(%{execution_record | status: :cancelled, failure: nil})}
+
+          {:ok,
+           Execution.from_record(
+             Map.merge(execution_record, %{status: :cancelled, failure: nil, ended_at: now})
+           )}
         end
 
       {:error, _reason} = error ->
@@ -1823,6 +1850,27 @@ defmodule StatifierPersistence.Executions do
     do: Storage.list_inputs(store, execution_id)
 
   @doc """
+  Whether `execution` has ended: `true` when it carries an `ended_at`
+  stamp, `false` when it does not.
+
+  The answer is read off the stamp, not the status. Every write that takes
+  an execution into `:completed`, `:failed` or `:cancelled` stamps
+  `ended_at`, and nothing clears or moves a stamp once written, so for an
+  execution this package carried into its terminal status the two agree.
+  They part only where no time is stored for when the execution ended: a
+  row that was already terminal before V08 of the migrations helper added
+  the column, or a record from an adapter that does not store the field.
+  Such an execution keeps its terminal status and reads `false` here.
+
+  Pure: `execution` is the struct any function in this module handed back,
+  or `StatifierPersistence.Execution.from_record/1` built from a fetched
+  record, and no store is read.
+  """
+  @spec ended?(execution :: Execution.t()) :: boolean()
+  def ended?(%Execution{ended_at: %DateTime{}}), do: true
+  def ended?(%Execution{}), do: false
+
+  @doc """
   Counts the executions on `content_hash`, per stored arm (ADR-0012
   decision 3).
 
@@ -2269,6 +2317,12 @@ defmodule StatifierPersistence.Executions do
       |> MachineState.put_invoke_types(opts[:invoke_types])
       |> MachineState.put_send_types(opts[:send_types])
 
+    # The stamp a terminal write here would record, and the struct would
+    # carry: the stored one where the row already holds one - the adapter
+    # keeps it over any later record's - and the time of this step where
+    # it does not.
+    stamp = stamp(execution_record)
+
     # Resolved here rather than at the entry point deliberately: a builder
     # reads the position this step is about to act on, under the exclusion
     # this step already holds, so nothing can move between the read and
@@ -2276,7 +2330,16 @@ defmodule StatifierPersistence.Executions do
     # a discard in the full sense - the position is untouched.
     case resolve_event(event, machine_state) do
       {:ok, event} ->
-        stepped(store, execution_id, machine_state, event, executor, entry, opts[:step_reporter])
+        stepped(
+          store,
+          execution_id,
+          machine_state,
+          event,
+          executor,
+          entry,
+          opts[:step_reporter],
+          stamp
+        )
 
       :discard ->
         discarded(execution_record, execution_id, entry, :builder_declined)
@@ -2297,10 +2360,11 @@ defmodule StatifierPersistence.Executions do
           Event.t(),
           Executor.t(),
           entry(),
-          step_reporter()
+          step_reporter(),
+          DateTime.t()
         ) ::
           {:ok, Execution.t(), MachineState.t()} | {:discarded, Execution.t()} | {:error, error()}
-  defp stepped(store, execution_id, machine_state, event, executor, entry, reporter) do
+  defp stepped(store, execution_id, machine_state, event, executor, entry, reporter, stamp) do
     session_id = session_id(machine_state)
     span = open_macrostep(machine_state, session_id, :event, event)
 
@@ -2309,11 +2373,20 @@ defmodule StatifierPersistence.Executions do
         close_macrostep(span, session_id, :event, stepped_state, event, effects)
 
         with :ok <- append_input(store, execution_id, entry, event) do
-          persist_tail(store, execution_id, stepped_state, effects, executor, :update, reporter)
+          persist_tail(
+            store,
+            execution_id,
+            stepped_state,
+            effects,
+            executor,
+            :update,
+            reporter,
+            stamp
+          )
         end
 
       {:error, :not_running} ->
-        repair_terminal(store, execution_id, machine_state, entry)
+        repair_terminal(store, execution_id, machine_state, entry, stamp)
     end
   end
 
@@ -2362,12 +2435,17 @@ defmodule StatifierPersistence.Executions do
   # failure-classed final. That is a narrow window - it needs a step whose
   # position write landed while its status write did not - and widening the
   # tag to a stored position is a later record's business, not this one's.
-  @spec repair_terminal(Storage.t(), execution_id(), MachineState.t(), entry()) ::
+  @spec repair_terminal(Storage.t(), execution_id(), MachineState.t(), entry(), DateTime.t()) ::
           {:discarded, Execution.t()} | {:error, error()}
-  defp repair_terminal(store, execution_id, machine_state, entry) do
+  defp repair_terminal(store, execution_id, machine_state, entry, now) do
     with :ok <-
-           Storage.update_execution(store, execution_id, machine_state, :completed,
-             position: :skip
+           Storage.update_execution(
+             store,
+             execution_id,
+             machine_state,
+             :completed,
+             [position: :skip],
+             now
            ) do
       identity = Machine.identity(machine_state.machine)
 
@@ -2391,7 +2469,7 @@ defmodule StatifierPersistence.Executions do
         reason: nil
       )
 
-      {:discarded, execution(execution_id, :completed, identity)}
+      {:discarded, execution(execution_id, :completed, identity, now)}
     end
   end
 
@@ -2408,9 +2486,10 @@ defmodule StatifierPersistence.Executions do
           [Statifier.Effect.t()],
           Executor.t(),
           {:insert, Adapter.metadata()} | :update,
-          step_reporter()
+          step_reporter(),
+          DateTime.t()
         ) :: {:ok, Execution.t(), MachineState.t()} | {:error, error()}
-  defp persist_tail(store, execution_id, machine_state, effects, executor, write, reporter) do
+  defp persist_tail(store, execution_id, machine_state, effects, executor, write, reporter, now) do
     case Machine.identity(machine_state.machine) do
       nil ->
         Telemetry.identity_refused(
@@ -2436,12 +2515,13 @@ defmodule StatifierPersistence.Executions do
         status = execution_status(machine_state, lifecycle)
         :ok = assert_quiescent(machine_state, lifecycle)
 
-        with :ok <- write_execution(write, store, execution_id, machine_state, status, lifecycle) do
+        with :ok <-
+               write_execution(write, store, execution_id, machine_state, status, lifecycle, now) do
           report_write(write, execution_id, seam.session_id, identity, status, lifecycle)
           report_halt(machine_state, seam.session_id, status, lifecycle)
 
           execution_id
-          |> tail_result(status, identity, lifecycle, machine_state)
+          |> tail_result(status, identity, lifecycle, machine_state, now)
           |> report_step(reporter, effects)
         end
     end
@@ -2707,9 +2787,10 @@ defmodule StatifierPersistence.Executions do
           Adapter.execution_status(),
           Identity.t(),
           [Statifier.Effect.t()],
-          MachineState.t()
+          MachineState.t(),
+          DateTime.t()
         ) :: {:ok, Execution.t(), MachineState.t()} | {:error, error()}
-  defp tail_result(execution_id, status, identity, lifecycle, machine_state) do
+  defp tail_result(execution_id, status, identity, lifecycle, machine_state, now) do
     case budget_effect(lifecycle) do
       nil ->
         {:ok,
@@ -2717,6 +2798,7 @@ defmodule StatifierPersistence.Executions do
            execution_id,
            status,
            identity,
+           ended_at(status, now),
            done_effect(lifecycle),
            failure_string(lifecycle)
          ), machine_state}
@@ -3102,20 +3184,26 @@ defmodule StatifierPersistence.Executions do
           execution_id(),
           MachineState.t(),
           Adapter.execution_status(),
-          [Statifier.Effect.t()]
+          [Statifier.Effect.t()],
+          DateTime.t()
         ) :: :ok | {:error, error()}
-  defp write_execution(write, store, execution_id, machine_state, status, lifecycle_effects) do
+  defp write_execution(write, store, execution_id, machine_state, status, lifecycle_effects, now) do
     position = if budget_exhausted?(lifecycle_effects), do: :skip, else: :persist
     opts = [position: position, failure: failure_string(lifecycle_effects)]
 
     case write do
       {:insert, metadata} ->
-        Storage.insert_execution(store, execution_id, machine_state, status, [
-          {:metadata, metadata} | opts
-        ])
+        Storage.insert_execution(
+          store,
+          execution_id,
+          machine_state,
+          status,
+          [{:metadata, metadata} | opts],
+          now
+        )
 
       :update ->
-        Storage.update_execution(store, execution_id, machine_state, status, opts)
+        Storage.update_execution(store, execution_id, machine_state, status, opts, now)
     end
   end
 
@@ -3128,20 +3216,39 @@ defmodule StatifierPersistence.Executions do
   # produce a `:failed` here at all - budget exhaustion returns an error
   # tuple instead of an execution - so the field had nothing to carry and was
   # hardcoded `nil`.
+  #
+  # `ended_at` is the same `now` the write just stamped, for the same
+  # reason: the struct and the row agree on when the execution ended.
   @spec execution(
           execution_id(),
           Adapter.execution_status(),
           Identity.t(),
+          DateTime.t() | nil,
           term(),
           String.t() | nil
         ) :: Execution.t()
-  defp execution(execution_id, status, identity, donedata \\ nil, failure \\ nil) do
+  defp execution(execution_id, status, identity, ended_at, donedata \\ nil, failure \\ nil) do
     %Execution{
       execution_id: execution_id,
       status: status,
       content_hash: identity.content_hash,
       failure: failure,
-      donedata: donedata
+      donedata: donedata,
+      ended_at: ended_at
     }
   end
+
+  # The stamp a terminal write from this module records: the row's own
+  # where it already holds one, since the adapter keeps a stored stamp over
+  # any later record's (`c:StatifierPersistence.Storage.Adapter.update_execution/2`),
+  # and now where it does not. Reading it off the record the writer already
+  # fetched is what keeps the struct handed back equal to the row.
+  @spec stamp(Adapter.execution_record()) :: DateTime.t()
+  defp stamp(execution_record), do: Map.get(execution_record, :ended_at) || DateTime.utc_now()
+
+  # The stamp a terminal write records, mirrored onto the struct the write
+  # hands back; `nil` for a status that is not terminal.
+  @spec ended_at(Adapter.execution_status(), DateTime.t()) :: DateTime.t() | nil
+  defp ended_at(status, now) when status in [:completed, :failed, :cancelled], do: now
+  defp ended_at(_status, _now), do: nil
 end
