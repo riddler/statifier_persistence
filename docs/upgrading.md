@@ -1,10 +1,9 @@
-# Upgrading a host from 0.13 to 0.16 and the next release
+# Upgrading a host from 0.13 to 0.17
 
 This page says what a host changes to move `statifier_persistence` from
-0.13.0 to 0.16.0, one minor at a time, and what the unreleased work on
-`main` will ask of it next. A host here is the code that embeds the
-package: the module that calls `use StatifierPersistence.Ecto`, the
-migrations it runs, the options it passes to
+0.13.0 to 0.17.0, one minor at a time. A host here is the code that
+embeds the package: the module that calls `use StatifierPersistence.Ecto`,
+the migrations it runs, the options it passes to
 `StatifierPersistence.Executions` and `StatifierPersistence.Driver`, the
 telemetry handlers it attaches, and any storage adapter of its own. What
 each release added is in [CHANGELOG.md](../CHANGELOG.md); this page lists
@@ -13,8 +12,8 @@ nothing.
 
 Take the minors in order, and move the pin with each one, as the README
 recommends: `{:statifier_persistence, "~> 0.14.0"}`, then `"~> 0.15.0"`,
-then `"~> 0.16.0"`. The `statifier` floor stays `~> 2.6` for every step on
-this page.
+then `"~> 0.16.0"`, then `"~> 0.17.0"`. The `statifier` floor stays
+`~> 2.6` for every step on this page.
 
 ## Before you start: the database is at V07
 
@@ -30,8 +29,8 @@ with its own migration,
     end
 
 and an install still short of V06 follows the V06 ordering rule in the
-`StatifierPersistence.Ecto.Migrations` documentation first. No release on
-this page adds a migration; the next one does (V08, at the end).
+`StatifierPersistence.Ecto.Migrations` documentation first. No release before
+0.17.0 adds a migration; 0.17.0 does (V08, at the end).
 
 ## 0.13 to 0.14
 
@@ -153,9 +152,9 @@ Schema: **NONE**.
   like `leading_columns:`, they apply only to tables V01 and V05 create,
   and their defaults are the layout earlier releases create.
 
-## 0.16 to the next release (unreleased, on main)
+## 0.16 to 0.17
 
-The next release adds `ended_at`, the time an execution ended, and
+0.17.0 adds `ended_at`, the time an execution ended, and
 migration V08, which adds the column and an index on it.
 
 - **Run V08 before you deploy the new version.** The execution schema the
