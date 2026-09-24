@@ -1,6 +1,6 @@
 # ADR-0015: The tree migration: one plan per node, every node validated before any is written, children first, one store unit across the tree, the parked tree, and a child's linkage pin that follows the child
 
-Status: proposed (2026-09-23, sp-3l2a)
+Status: accepted (2026-09-23, sp-3l2a)
 
 ## Context
 
@@ -419,3 +419,61 @@ shape without spelling it. Every cite is by anchor, in that change.
   `StatifierPersistence.Storage.update_execution/5` derives one, and
   `StatifierPersistence.Storage.tree_migration_supported?/1` is the
   declaration check, in the shape of `chart_retirement_supported?/1`.
+
+## Note (2026-09-23, sp-o2ev): accepted, with decisions 5 and 1 read as the sp-y3hj Note spells them
+
+The operator accepted this record on 2026-09-23, after the code that
+implements it shipped in statifier_persistence 0.15.0 (tag `v0.15.0`,
+`ae9c855`). The status line at the top flips in place from proposed to
+accepted, and no other line of the record changes. Every cite below was
+read on `main` at `ae9c855`.
+
+What was re-read before the flip, decision by decision:
+
+- **Decision 1.** `StatifierPersistence.Executions.migrate_tree/4` takes
+  the store, the root id, `plans` and options, with `machines:`,
+  `pin_sources:`, `on_failure:` and `serialization:`
+  (`lib/statifier_persistence/executions.ex`, `migrate_tree/4`). A plan
+  whose machine is absent is a static refusal (`tree_machine/2`), and an
+  id in `plans` outside the tree is refused before any write
+  (`check_named/2`). `migrate/4` keeps its behaviour: its checks are the
+  functions the tree command shares (`plan_check/5`, `check_record/2`,
+  `validate_execution/5`).
+- **Decision 2.** The tree is read through `Linkage.parent_match/1` and
+  `Storage.list_executions_by_metadata/2`, whatever each child's status
+  (`read_tree/2`). The exclusions of the named nodes are taken ancestor
+  first and siblings in ascending id, and held until the unit returns
+  (`with_exclusions/4`). The tree is read again under them, and the named
+  nodes are validated and written leaves up (`migrate_tree_locked/4`).
+- **Decision 3.** The optional pair is on the behaviour
+  (`lib/statifier_persistence/storage/adapter.ex`,
+  `supports_tree_migration?/1` and `write_tree_migration/2`) and on both
+  shipped adapters. The Ecto adapter rolls the enclosing transaction back
+  on a refusal (`lib/statifier_persistence/storage/ecto.ex`,
+  `write_tree_migration/2`). The in-memory adapter applies every write to
+  one copy in one state transition (`storage/in_memory.ex`,
+  `write_tree_migration/2`). An adapter without the pair is refused
+  before any read (`check_tree_unit/1`). `cascade_cancel/3` is unchanged.
+- **Decision 4.** The tree parks only on `{:migration_refused, _}` and
+  `{:child_unresolved, _, _}` (`parks_tree?/1`). A park writes every
+  named node in one unit and no absent node (`decide_tree/7`).
+- **Decision 5.** One `[:statifier_persistence, :execution, :migrated]`
+  event is emitted per re-pinned node, children first, after every
+  exclusion is released (`tree_migrated/1`). A refused or parked tree
+  emits none. `docs/telemetry.md` names `migrate_tree/4` as the event's
+  second emitter.
+- **Decision 6.** Each node's pin sources are asked under the exclusions
+  with that node's plan's `from` hash and its own id
+  (`validate_execution/5`).
+- **Consequences.** The release adds no schema version. The storage
+  conformance cases for the unit are in
+  `StatifierPersistence.Testing.StorageConformance`.
+
+**Decisions 5 and 1 are read as the sp-y3hj Note above states them**, as
+the operator accepted it. Decision 5's "the tree-level arm by itself" is
+answered unwrapped, as `{:error, arm}`, which is decision 3's own spelling
+for the unsupported adapter (`t:migrate_tree_error/0`). Decision 1's
+resolve rule is checked for a live node absent from `plans` whose parent
+`plans` names; a node whose parent is not moved resolves as it did before
+the call (`unresolved_children/3`). Both decisions stay as written, and the
+sp-y3hj Note is how they are read.

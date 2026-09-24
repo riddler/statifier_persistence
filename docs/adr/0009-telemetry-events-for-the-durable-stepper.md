@@ -669,7 +669,7 @@ No other decision moves.
 
 ## Amendment (2026-09-23, sp-6neq): `:answered` says what the parent's door answered
 
-Status of this amendment: proposed (2026-09-23, sp-6neq). The record above
+Status of this amendment: accepted (2026-09-23, sp-6neq). The record above
 stays accepted; this amendment is proposed until the operator accepts it.
 
 ADR-0014 (`docs/adr/0014-the-needs-migration-status.md`, accepted) decides
@@ -722,3 +722,43 @@ returns the child's own result.
 
 No other decision moves, and decision 8's count of event names does not
 change.
+
+## Note (2026-09-23, sp-o2ev): the sp-6neq Amendment is accepted
+
+The operator accepted the 2026-09-23 sp-6neq Amendment on 2026-09-23,
+after the code that implements it shipped in statifier_persistence 0.15.0
+(tag `v0.15.0`, `ae9c855`). That Amendment's own status line flips in
+place from proposed to accepted, and the record above stays accepted. Its
+"this amendment is proposed until the operator accepts it" is met here
+and stays as written. The 2026-09-23 sp-7a9 Amendment keeps its own
+status, because this flip does not cover it. Every cite below was read on
+`main` at `ae9c855`.
+
+What was re-read before the flip:
+
+- **Decisions 1 and 2.** `delivery` maps the door's answer onto the four
+  atoms, with the parked parent named apart
+  (`lib/statifier_persistence/driver.ex`, `delivery/1`). Both emit sites
+  set it after the door returns: the single child's
+  (`report_answered/4`) and a fan-out settlement's
+  (`report_settled_answer/4`). `outcome` keeps its meaning.
+  `lib/statifier_persistence/telemetry.ex`'s table lists the key on
+  `[:statifier_persistence, :child, :answered]`, and no event name was
+  added.
+- **Decision 3.** The event carries an atom and no execution, error term
+  or donedata. It is emitted in the caller's process before the caller's
+  call returns. A redelivery through `Driver.answer_parent/3` needs the
+  child's own answer, which that caller holds.
+- **Decision 4.** Nothing in the package queues a refused answer.
+  `maybe_answer_parent/3` still returns the child's own result.
+
+Decision 3's wording is looser than the code in two places. Residue
+sp-4zls tracks both, and they are recorded here without a change to the
+Amendment. First, an outside fail answers through
+`Driver.resolve_and_answer_parent/3` from `Executions.fail/4`, a path with
+no drive of the child. Second, a fan-out child's own answer is also stored
+on the child execution (`driver.ex`, `record_outcome/3`), while a single
+child's is not stored (`lib/statifier_persistence/execution.ex`, whose
+stored record carries no donedata). Neither makes the decision false: in
+both cases the event is emitted before the caller's call returns, and the
+caller holds the answer a redelivery needs.
