@@ -2039,7 +2039,7 @@ defmodule StatifierPersistence.Executions do
   # A raise, throw or exit from inside the strategy - a host executor or
   # event builder, an adapter, the strategy itself - closes the span with
   # `[:statifier_persistence, :execution, :step, :exception]` instead of the
-  # stop and is then re-raised with its own stacktrace, the way
+  # stop and is then re-raised with its own reason and stacktrace, the way
   # `:telemetry.span/3` closes a span (ADR-0009, the step-exception
   # amendment). Nothing is rescued to a value: the caller sees the raise it
   # would have seen without the span.

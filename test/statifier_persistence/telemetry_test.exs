@@ -361,7 +361,7 @@ defmodule StatifierPersistence.TelemetryTest do
       assert exc_meta.execution_id == "execution-1"
       assert exc_meta.entry == :step
       assert exc_meta.kind == :error
-      assert %ArgumentError{message: "executor blew up"} = exc_meta.reason
+      assert exc_meta.reason == ArgumentError
       assert [_ | _] = exc_meta.stacktrace
 
       refute_received {:telemetry, [:statifier_persistence, :execution, :step, :stop], _, _}
@@ -390,7 +390,7 @@ defmodule StatifierPersistence.TelemetryTest do
       assert exc_meta.span_ref == start_meta.span_ref
       assert exc_meta.entry == :step
       assert exc_meta.kind == :error
-      assert %RuntimeError{message: "builder blew up"} = exc_meta.reason
+      assert exc_meta.reason == RuntimeError
 
       refute_received {:telemetry, [:statifier_persistence, :execution, :step, :stop], _, _}
     end
@@ -424,6 +424,97 @@ defmodule StatifierPersistence.TelemetryTest do
       assert [_ | _] = exc_meta.stacktrace
 
       assert Enum.all?(exc_meta.stacktrace, fn {_m, _f, arity, _loc} -> is_integer(arity) end)
+    end
+
+    # Sabotage: emitted fields[:reason] raw in execution_step_exception/2 -
+    # red: the failed match carried the whole machine state, datamodel
+    # included, onto the event as {:badmatch, state}.
+    test "carries no raised value: a failed match on the state reports MatchError alone",
+         %{store: store} do
+      {_source, machine} = Charts.chart_a()
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      drain()
+
+      builder = fn state ->
+        %{never: :matches} = state
+        :discard
+      end
+
+      caught =
+        try do
+          Executions.step(store, "execution-1", machine, builder, executor: RecordingExecutor)
+        rescue
+          error in MatchError -> error
+        end
+
+      # The caller's raise still carries the state it failed on.
+      assert %MatchError{term: %Statifier.MachineState{}} = caught
+
+      {_m, exc_meta} = await([:statifier_persistence, :execution, :step, :exception])
+      assert exc_meta.kind == :error
+      assert exc_meta.reason == MatchError
+      refute carries_machine_state?(exc_meta)
+    end
+
+    # Sabotage: kept the whole location in narrow_stacktrace/1 - red: the
+    # BIF frame's :error_info reached the event.
+    test "keeps only file and line of each stacktrace location", %{store: store} do
+      {_source, machine} = Charts.chart_a()
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      drain()
+
+      builder = fn state -> :erlang.binary_to_integer(inspect(state.running)) end
+
+      caller_stacktrace =
+        try do
+          Executions.step(store, "execution-1", machine, builder, executor: RecordingExecutor)
+        rescue
+          ArgumentError -> __STACKTRACE__
+        end
+
+      # The fixture is discriminating only while the caller's frame carries
+      # more than a file and a line.
+      assert Enum.any?(caller_stacktrace, fn {_m, _f, _a, location} ->
+               Keyword.has_key?(location, :error_info)
+             end)
+
+      {_m, exc_meta} = await([:statifier_persistence, :execution, :step, :exception])
+      assert exc_meta.reason == ArgumentError
+
+      assert Enum.all?(exc_meta.stacktrace, fn {_m, _f, _a, location} ->
+               Keyword.keys(location) -- [:file, :line] == []
+             end)
+    end
+
+    # Sabotage: made narrow_reason/3's catch-all clause pass the term
+    # through - red: the thrown tuple reached the event whole.
+    test "reports a non-atom throw as :redacted", %{store: store} do
+      {_source, machine} = Charts.chart_a()
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      drain()
+
+      builder = fn state -> throw({:with_state, state}) end
+
+      assert {:with_state, %Statifier.MachineState{}} =
+               catch_throw(
+                 Executions.step(store, "execution-1", machine, builder,
+                   executor: RecordingExecutor
+                 )
+               )
+
+      {_m, exc_meta} = await([:statifier_persistence, :execution, :step, :exception])
+      assert exc_meta.kind == :throw
+      assert exc_meta.reason == :redacted
+      refute carries_machine_state?(exc_meta)
     end
 
     # Sabotage: re-raised with :erlang.raise(:error, reason, ...) regardless
@@ -1274,6 +1365,20 @@ defmodule StatifierPersistence.TelemetryTest do
   end
 
   # Drops every event emitted so far, so a phase asserts on its own.
+  # Whether a `%Statifier.MachineState{}` sits anywhere inside `term`.
+  defp carries_machine_state?(%Statifier.MachineState{}), do: true
+
+  defp carries_machine_state?(term) when is_map(term),
+    do: term |> Map.to_list() |> carries_machine_state?()
+
+  defp carries_machine_state?(term) when is_list(term),
+    do: Enum.any?(term, &carries_machine_state?/1)
+
+  defp carries_machine_state?(term) when is_tuple(term),
+    do: term |> Tuple.to_list() |> carries_machine_state?()
+
+  defp carries_machine_state?(_term), do: false
+
   defp drain do
     receive do
       {:telemetry, _name, _measurements, _metadata} -> drain()

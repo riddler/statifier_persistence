@@ -219,13 +219,25 @@ The raise then reaches the caller unchanged, with its original stacktrace;
 nothing is rescued to a return value. The keys are the ones
 `:telemetry.span/3` puts on its own `:exception` event: the start half's
 `execution_id`, `entry` and `span_ref`, plus `kind` (`:error`, `:throw` or
-`:exit`), `reason` (the raised term, as `catch` sees it) and `stacktrace`.
-Each stacktrace frame's argument list is replaced by its arity before the
-event is emitted, because a frame that failed to match can carry the
-arguments it was called with - an event builder's is the decoded machine
-state - and the datamodel is never on an event (see "Cardinality and
-disclosure" below). A bridge that closes a span on `:telemetry.span/3`'s
-exception can close this one the same way.
+`:exit`), `reason` and `stacktrace`. The raised term and its stacktrace can
+carry any value the failing code held - an event builder is called with
+the decoded machine state, and a failed match on it raises with the whole
+state, datamodel included - and the datamodel is never on an event (see
+"Cardinality and disclosure" below). So the two fields that could carry
+state are narrowed before the event is emitted, and every other field is
+the start half's own:
+
+- `reason` is the exception's module for an `:error`, a raw Erlang error
+  normalized first (a failed match reports `MatchError`); for a `:throw`
+  or an `:exit` it is the thrown or exit atom, or `:redacted` for any other
+  term. The raised value itself never travels.
+- `stacktrace` keeps each frame's module and function, replaces an
+  argument list by its arity, and keeps only `:file` and `:line` of the
+  location, dropping anything else a location carries.
+
+The caller's re-raise is untouched: it sees the original reason and
+stacktrace. A bridge that closes a span on `:telemetry.span/3`'s exception
+can close this one the same way.
 
 `invoke_id` and `child_count` are the settlement dimensions, and they are
 `nil` on every ordinary drive. `StatifierPersistence.Driver` sets them
@@ -459,8 +471,8 @@ correlation id for a span or a log line, **never as a metric dimension** - the s
 vocabulary (`:discarded`, `:child, :refused`, the adapter arms) it is safe
 to dimension on. Where it carries an arbitrary executor or adapter error
 (`:effect, :failed`, `:adapter, :call`'s `{:adapter, term}`, the step
-stop, the step exception's raised term), a consumer must narrow it before
-it becomes a dimension. A host executor returning a per-effect struct
+stop), a consumer must narrow it before it becomes a dimension. The step
+exception's `reason` is already narrowed to a module or an atom. A host executor returning a per-effect struct
 there will blow up any metric keyed on it, and no change here can prevent
 that.
 
