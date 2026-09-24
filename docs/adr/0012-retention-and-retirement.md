@@ -587,3 +587,64 @@ store needs exactly that answer.
 through the same `Storage.check_chart_retired/2`
 (`lib/statifier_persistence/executions.ex`, `migrate/4`, read at
 `d61ac4d`), so it takes the narrow read wherever `create/4` does.
+
+## Note (2026-09-23, sp-awfx): a source whose own repo work fails inside a caller's transaction still refuses, and that transaction is already lost
+
+Pure addition: nothing above is edited, and this record is read at the date
+its sections were decided. This Note decides nothing new about retirement;
+it records a limit of decision 4's refusal when `Executions.retire_chart/4`
+is called inside a transaction the caller opened, and what a host does
+about it.
+
+**Where the refusal is taken.** Decision 4's refusal for a source that
+raises is taken by `StatifierPersistence.PinSource.collect/3`, whose
+private `ask/3` rescues any exception into `{:raised, exception}`
+(`lib/statifier_persistence/pin_source.ex`, `ask/3`, read at `97ef1f7`).
+`Executions.retire_chart/4` asks its sources before
+`Storage.retire_chart/3` opens the transaction decision 5 gives it
+(`lib/statifier_persistence/executions.ex`, `retire_counted/4`, read at
+`97ef1f7`), so the only transaction a source can be asked inside is one
+the caller opened.
+
+**What a caller's transaction sees.** On the Ecto adapter, a source that
+reads through the caller's repo from the calling process reads inside the
+caller's transaction. When that read fails - a statement Postgres rejects,
+or a nested `Repo.transaction/2` that raises, which takes no savepoint
+(ADR-0004's sp-g7q Note) - the raise reaches `ask/3` after the caller's
+transaction has already failed. `retire_chart/4` still answers
+`{:error, {:pin_source_failed, {module, {:raised, exception}}}}` and writes
+nothing, and the caller's transaction is lost with it: every later
+statement in it raises, and it ends rolled back, answering
+`{:error, :rollback}` when the caller's function returns normally. A
+source that raises without touching the caller's repo leaves the
+transaction as it was, and the caller may go on and commit. (Observed
+against Postgres 17 at `97ef1f7`, all three cases; not pinned by a test.)
+
+**Why this is a limit and not a fix.** `collect/3` is handed the source
+modules, the content hash and the context, and no store and no repo
+(`lib/statifier_persistence/pin_source.ex`, `collect/3`, read at
+`97ef1f7`). It cannot tell a raise that aborted the caller's transaction
+from one that did not, and both are decision 4's supported way to say "I
+could not answer". Re-raising every raise seen inside a transaction would
+turn the second kind into a rolled-back caller transaction, changing what
+`retire_chart/4` answers for a source that aborted nothing; telling the
+two apart needs a question to the caller's connection that the
+adapter-neutral walk has no way to ask. The refusal itself stays sound:
+the chart is not retired, and nothing was written.
+
+**What a host does.** A host that calls `retire_chart/4` inside its own
+transaction, with a source that reads through the same repo, takes one of
+three courses: it calls `retire_chart/4` outside that transaction; or it
+brackets the source's reads in the explicit SQL savepoint ADR-0004's
+sp-g7q Note describes, so that a failed read is rolled back to the
+savepoint and the source raises over a transaction that is still usable;
+or it treats a `{:raised, _}` refusal inside its transaction as the end of
+that transaction, as the README's "Writing inside a caller's transaction"
+section already says of an `:execution_exists` refusal from `create/4`.
+
+**Scope.** `Executions.migrate/4` and `Executions.migrate_tree/4` ask
+their sources through the same walk, but under the execution's lock
+(`lib/statifier_persistence/executions.ex`, `validate_execution/5`, read
+at `97ef1f7`), which on the Ecto adapter is a transaction this package
+opens. This Note does not decide what a migration answers when a source's
+repo work fails there.
