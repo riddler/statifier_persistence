@@ -10,6 +10,52 @@ fragment in [`changelog.d/`](https://github.com/riddler/statifier_persistence/bl
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
 
+## [0.16.0] 2026-09-24
+
+Feature release: `use StatifierPersistence.Ecto` takes two new options,
+`timestamps_position:` and `column_collations:`, so the tables V01 and V05
+create can place `inserted_at` and `updated_at` right after the leading
+columns and declare a collation on a package text column. The release also
+reports a durable child's automatic answer to a parent whose record does not
+fetch, or whose chart does not resolve, on
+`[:statifier_persistence, :child, :answered]` instead of dropping it.
+
+**Breaking for a host whose telemetry handler matches `delivery` on
+`[:statifier_persistence, :child, :answered]` exhaustively**: `delivery`
+has two new values, `:parent_unfetched` and `:parent_chart_unresolved`, as
+Changed below lists.
+
+Upgrading: no schema migration. Both new options default to the layout
+earlier releases create, and they apply only to the tables V01 and V05
+create. The `statifier` floor stays `~> 2.6`.
+
+### Added
+
+- `use StatifierPersistence.Ecto` takes `timestamps_position: :leading`,
+  which places `inserted_at` and `updated_at` right after the leading
+  columns in every table V01 and V05 create; the default, `:trailing`,
+  keeps them last as before.
+- `use StatifierPersistence.Ecto` takes `column_collations: [name:
+  collation]`, which declares a package text column with that collation
+  in every V01 or V05 `CREATE TABLE` that declares it - `execution_id:
+  "C"`, for example.
+
+### Changed
+
+- **Breaking** for a host whose telemetry handler matches `delivery` on
+  `[:statifier_persistence, :child, :answered]` exhaustively: `delivery`
+  has two new values, `:parent_unfetched` and `:parent_chart_unresolved`,
+  and on them `outcome` is the child's own and `failed_count` is `nil`, even
+  for a fan-out. Add clauses for the two values or a catch-all.
+
+### Fixed
+
+- A durable child's automatic answer to a parent whose record does not
+  fetch, or whose chart the `chart_resolver:` does not return, reports
+  `[:statifier_persistence, :child, :answered]` with `delivery:
+  :parent_unfetched` or `:parent_chart_unresolved` instead of being dropped
+  with nothing emitted.
+
 ## [0.15.1] 2026-09-23
 
 Patch release: fixes and telemetry gaps found after 0.15.0. A drive that
