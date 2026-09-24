@@ -635,7 +635,10 @@ defmodule StatifierPersistence.Telemetry do
   Emits `[:statifier_persistence, :child, :answered]`.
 
   `child_count` and `failed_count` are the invocation's, and are `nil` for
-  a single-child subchart, which has no invocation to aggregate. `delivery`
+  a single-child subchart, which has no invocation to aggregate.
+  `failed_count` is also `nil` for a fan-out child whose answer never
+  reached the parent's door (`delivery` `:parent_unfetched` or
+  `:parent_chart_unresolved`), because no settlement ran. `delivery`
   is a `t:delivery/0`: what the parent's door answered, or which of the two
   ways the answer never reached it.
   """
