@@ -37,9 +37,11 @@ defmodule StatifierPersistence.MixProject do
   defp elixirc_paths(_), do: ["lib"]
 
   # Hexdocs configuration. These paths are read off the publisher's disk at
-  # `mix docs` time and need no entry in package()'s files: list - the docs
-  # tarball hexdocs hosts is built separately from the package tarball
-  # `mix deps.get` fetches.
+  # `mix docs` time - the docs tarball hexdocs hosts is built separately from
+  # the package tarball `mix deps.get` fetches. A guide the README links to
+  # relatively is ALSO listed in package()'s files: list, because hex.pm
+  # renders the README from the package tarball and resolves that link
+  # inside it; one relative link then works on GitHub, HexDocs and hex.pm.
   defp docs do
     [
       name: "StatifierPersistence",
@@ -51,7 +53,8 @@ defmodule StatifierPersistence.MixProject do
         "README.md",
         "CHANGELOG.md",
         "docs/restart-demo.md",
-        "docs/non-postgres-backends.md"
+        "docs/non-postgres-backends.md",
+        "docs/telemetry.md"
       ],
       groups_for_extras: [
         Guides: ~r{docs/}
@@ -64,7 +67,16 @@ defmodule StatifierPersistence.MixProject do
     [
       name: "statifier_persistence",
       licenses: ["MIT"],
-      files: ~w(lib mix.exs README.md LICENSE CHANGELOG.md),
+      files: ~w(
+        lib
+        mix.exs
+        README.md
+        LICENSE
+        CHANGELOG.md
+        docs/restart-demo.md
+        docs/non-postgres-backends.md
+        docs/telemetry.md
+      ),
       links: %{
         "GitHub" => @source_url,
         "Changelog" => "#{@source_url}/blob/main/CHANGELOG.md"
