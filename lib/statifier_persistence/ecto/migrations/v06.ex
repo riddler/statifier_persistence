@@ -82,7 +82,8 @@ if Code.ensure_loaded?(Ecto.Migration) do
     `0.12.0` and `"parent_execution_id"` from `0.12.0` on
     (`StatifierPersistence.Execution.Linkage`). V06 renames **no stored
     value**, by decision: it is a catalog operation and nothing here reads
-    or writes a row (RQ-SF041-22, ruled 2026-09-12).
+    or writes a row (ADR-0011 decision 3; the consequence below is item 1
+    of that record's acceptance Note of 2026-09-13).
 
     The consequence, stated plainly rather than left to be discovered: a
     child that was **in flight** when the host upgraded still carries the
@@ -97,11 +98,11 @@ if Code.ensure_loaded?(Ecto.Migration) do
     ## Rolling back
 
     `down/1` is a **no-op**, and that is a decision rather than an omission
-    (RQ-SF041-25, ruled 2026-09-13). ADR-0011 decision 3 describes the
-    earlier design, in which `down/1` renamed back and a rollback below V06
-    on an upgraded install was therefore unsupported; the ruling supersedes
-    both halves of that bullet, and the record's own dated Note is what
-    records it.
+    (item 2 of ADR-0011's acceptance Note of 2026-09-13). ADR-0011 decision 3
+    describes the earlier design, in which `down/1` renamed back and a
+    rollback below V06 on an upgraded install was therefore unsupported;
+    that Note supersedes both halves of that bullet: the down is a no-op,
+    and only a rollback to pre-`0.12.0` code stays unsupported.
 
     Under the full cutover there is nothing for it to restore. V01-V05 are
     rewritten to the execution names, so on `0.12.0` code every database
