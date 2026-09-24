@@ -38,8 +38,10 @@ if Code.ensure_loaded?(Ecto) do
     for it with the retired arm rather than with its bytes.
 
     The execution schema also carries `ended_at`, the column V08 adds:
-    `nil` until the execution first reaches a terminal status, then the
-    time it did, never rewritten afterwards.
+    `NULL` until the row takes its first terminal write with the column
+    in place, then that write's time, never moved or cleared afterwards
+    (`StatifierPersistence.Executions.ended?/1` names where that and the
+    status can disagree).
 
     The execution schema also carries `metadata`, the optional opaque map of
     host identities ADR-0006 grants, as a `jsonb` column (V02 of the

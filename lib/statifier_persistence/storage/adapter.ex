@@ -100,14 +100,19 @@ defmodule StatifierPersistence.Storage.Adapter do
   execution answered with, and a fan-out's settlement has to assemble N answers
   it did not witness.
 
-  `ended_at` is when the execution first reached a terminal status, and
-  `nil` for an execution that has not. It is stamped once: the record that
-  carries an execution into a terminal status carries the stamp, and
+  `ended_at` is the time of the first terminal write the row received
+  while it had no stamp, and `nil` until then. A record that carries an
+  execution into a terminal status carries the stamp, and
   `c:update_execution/2` keeps a stored stamp over any later record's, so
-  the value answers "when did this execution end" for as long as the row
-  exists, however often the row is written afterwards. This layer does
-  not decide what a stamp is - `StatifierPersistence.Storage`'s writers
-  choose it - and `c:insert_execution/2` stores the one it is given.
+  once written it does not move, however often the row is written
+  afterwards. Two cases follow from that rule rather than from the
+  status. A stamp stays when a later write puts the row back to a status
+  that is not terminal, so such a row carries a stamp while it is not
+  terminal. And a row that was already terminal before its store could
+  hold the field has no stamp until a later terminal write stamps it
+  with that write's time. This layer does not decide what a stamp is -
+  `StatifierPersistence.Storage`'s writers choose it - and
+  `c:insert_execution/2` stores the one it is given.
   """
   @type execution_record :: %{
           execution_id: execution_id(),
@@ -505,9 +510,10 @@ defmodule StatifierPersistence.Storage.Adapter do
   rather than nil-means-unchanged alone: a stored stamp is kept whatever
   the given record carries, and a row with no stamp takes the given
   record's `ended_at`, `nil` included. That is the rule that makes the
-  stamp the time an execution *first* ended - a later overwrite of a
-  terminal row, with the same status or another, cannot move it. The
-  shared conformance suite pins both halves.
+  stamp the time of the first terminal write the row took while it had
+  none - a later overwrite of a stamped row, with the same status or
+  another, cannot move it or clear it. The shared conformance suite pins
+  both halves.
 
   Like the other execution callbacks it decodes nothing,
   validates no status transition, and performs no identity check - the

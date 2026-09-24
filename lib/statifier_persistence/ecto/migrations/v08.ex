@@ -9,9 +9,10 @@ if Code.ensure_loaded?(Ecto.Migration) do
       type V07 gives `retired_at` on `charts`;
     - a non-unique index on `executions(ended_at)`.
 
-    `ended_at` is written once, when an execution first reaches a terminal
-    status, and never again: `c:StatifierPersistence.Storage.Adapter.update_execution/2`
-    keeps a stored stamp over whatever the record it is given carries.
+    `ended_at` is written once, by the first terminal write a row takes
+    while the column is `NULL`, and never again:
+    `c:StatifierPersistence.Storage.Adapter.update_execution/2` keeps a
+    stored stamp over whatever the record it is given carries.
     Before this version the only time an executions row carried was
     `updated_at`, which any later write moves, so "how long has this
     execution been finished" had no column that answered it and kept
@@ -21,8 +22,10 @@ if Code.ensure_loaded?(Ecto.Migration) do
     Every row that exists when this version runs gets a `NULL`, terminal
     rows included: the version adds a column and backfills nothing, because
     the time a row that is already terminal ended is not stored anywhere
-    to copy from. The stamp is written on the transition into a terminal
-    status, and such a row made that transition before the column existed.
+    to copy from. Such a row made its transition into a terminal status
+    before the column existed, so it reads `NULL` until a later terminal
+    write reaches it - a re-delivered settlement recording a child's
+    answer is one - and stamps it with that write's time.
 
     Both changes are ones every backend has, so nothing here is guarded
     by adapter, and the version runs inside an ordinary transaction.

@@ -3,8 +3,10 @@
 - An execution records when it ended: `ended_at` on the stored record and
   on `%StatifierPersistence.Execution{}` is stamped by the first write
   that takes the execution to `:completed`, `:failed` or `:cancelled`, and
-  no later write moves or clears it. It is `nil` for an execution that
-  has not ended, and for a row that was already terminal before V08.
+  no later write moves or clears it, even one that puts the row back to
+  `:active`. It is `nil` for an execution that has not ended, and for a
+  row that was already terminal before V08 until a later terminal write
+  stamps it with that write's time.
 - `StatifierPersistence.Executions.ended?/1` answers whether an
   execution carries that stamp.
 - V08 of the migrations helper adds the nullable `ended_at` column to the
