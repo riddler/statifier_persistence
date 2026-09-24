@@ -189,7 +189,7 @@ and closes inside it.
 | `[:statifier_persistence, :execution, :step, :start]` | `Executions`, immediately inside `serialized/5` | `system_time`, `monotonic_time` | `execution_id`, `entry`, `span_ref` |
 | `[:statifier_persistence, :execution, :step, :stop]` | the same call, on every return path | `duration`, `monotonic_time` | `execution_id`, `session_id`, `content_hash`, `entry`, `outcome`, `status`, `reason`, `span_ref`, `invoke_id`, `child_count` |
 | `[:statifier_persistence, :execution, :step, :exception]` | the same call, in place of the stop, when the drive raises, throws or exits | `duration`, `monotonic_time` | `execution_id`, `entry`, `span_ref`, `kind`, `reason`, `stacktrace` |
-| `[:statifier_persistence, :execution, :lock]` | `serialized/5`, after `strategy.with_execution/3` returns or refuses | `duration` (the wait, not the held time), `system_time` | `execution_id`, `strategy`, `outcome`, `reason` |
+| `[:statifier_persistence, :execution, :lock]` | `serialized/5`, after `strategy.with_execution/3` returns or refuses; `Executions.unpark/3`, the same way, outside any step span | `duration` (the wait, not the held time), `system_time` | `execution_id`, `strategy`, `outcome`, `reason` |
 
 `entry` is which public door was used: `:create`, `:step`,
 `:done_invocation`, `:failed_invocation`, `:answer_parent`, `:fail`,
@@ -257,7 +257,9 @@ surface. `strategy` is the serialization module
 `:acquired` or `:unavailable`; `reason` on `:unavailable` is the
 `{:serialization, term}` payload, including
 `{:serialization, :not_supported}` for an adapter that exports no
-`lock_execution/3`.
+`lock_execution/3`. `Executions.unpark/3` takes the same exclusion and
+emits the same event, with nothing around it: an unpark is not a step and
+opens no step span (ADR-0014's telemetry amendment).
 
 ### The storage seam
 
@@ -318,6 +320,7 @@ through its own span table, with no propagation machinery involved.
 | `[:statifier_persistence, :execution, :terminated]` | `Executions.create/4`, `Executions.step/5`, `Executions.fail/4`, `Executions.cancel/3`, on any terminal write | `system_time` | `execution_id`, `session_id`, `content_hash`, `status`, `driven_by`, `reason` |
 | `[:statifier_persistence, :execution, :discarded]` | `Executions.step_tail/7`, `step_loaded/8`, `repair_terminal/4`, and `fail`/`cancel`'s terminal arms | `system_time` | `execution_id`, `entry`, `reason`, `repaired?` |
 | `[:statifier_persistence, :execution, :migrated]` | `Executions.migrate/4`, after its serialization section returns; `Executions.migrate_tree/4`, once per node it re-pins, children first, after every exclusion is released | `system_time` | `execution_id`, `from_content_hash`, `to_content_hash`, `dropped` |
+| `[:statifier_persistence, :execution, :unparked]` | `Executions.unpark/3`, after its serialization section returns, when it wrote `:active` | `system_time` | `execution_id`, `content_hash` |
 | `[:statifier_persistence, :effect, :failed]` | `execute_effects/3` and `reenter_failures/4` | `system_time` | `execution_id`, `session_id`, `content_hash`, `kind`, `executor`, `reason`, `reentered?` |
 | `[:statifier_persistence, :drive, :turns_exhausted]` | `Driver`'s turn loop, on `{:turns_exhausted, n}` | `system_time`, `turns` | `execution_id`, `entry` |
 
@@ -359,6 +362,18 @@ migration is not a step: it opens no step span and takes no `entry`. A
 refused or parked migration emits nothing from this family, and whether it
 should is left open by ADR-0013. A refused or parked tree emits nothing
 either, for any node.
+
+`[:statifier_persistence, :execution, :unparked]` is an unpark's own
+event, beside the lock event and its adapter calls: once per
+`Executions.unpark/3` that writes a `:needs_migration` execution back to
+`:active`, after the serialization section returns. `content_hash` is the chart the execution
+was parked on and goes on under, the one chart an unpark has in hand.
+`session_id` is not on it, because an unpark decodes no position. An
+unpark that writes nothing emits no `:unparked`: an `:active` execution,
+which answers `{:ok, execution}` unchanged, a terminal one, which is
+discarded with no `:discarded` event, an absent one, and a refused lock.
+An unpark is not a step: it opens no step span and takes no `entry`
+(ADR-0014's telemetry amendment).
 
 `[:statifier_persistence, :effect, :failed]` is where the executor seam's
 verdicts land. `kind` is the effect's kind atom, `executor` is the module
@@ -616,6 +631,9 @@ gets, with no OpenTelemetry anywhere:
 - a counter on `[:statifier_persistence, :execution, :migrated]` by
   `from_content_hash` and `to_content_hash` - how many executions a sweep
   over the drained query has moved off a chart;
+- a counter on `[:statifier_persistence, :execution, :unparked]` by
+  `content_hash` - how many parked executions a host put back to work
+  unmigrated;
 - counters and a `count` distribution on the child seam - fan-out,
   refusals, and how much a cascading cancel actually swept.
 

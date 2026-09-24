@@ -726,27 +726,57 @@ defmodule StatifierPersistence.Executions do
   answers `{:discarded, execution}`, as `fail/4` and `cancel/3` do.
 
   `opts` accepts `serialization:` only, with `cancel/3`'s default. The call
-  runs inside the execution's serialization strategy and emits no telemetry
-  event of its own.
+  runs inside the execution's serialization strategy and opens no step span.
+  It emits `[:statifier_persistence, :execution, :lock]` for the wait on
+  that exclusion, as the step seam does, and
+  `[:statifier_persistence, :execution, :unparked]` once the section has
+  returned, only when it wrote `:active`; an `:active`, terminal or refused
+  execution emits no `:unparked` (ADR-0014's telemetry amendment).
   """
   @spec unpark(store :: Storage.t(), execution_id :: execution_id(), opts :: keyword()) ::
           {:ok, Execution.t()} | {:discarded, Execution.t()} | {:error, error()}
   def unpark(%Storage{} = store, execution_id, opts \\ []) do
     {strategy, config} = Keyword.get(opts, :serialization, {AdapterLock, store})
+    lock_start = System.monotonic_time()
 
-    case strategy.with_execution(config, execution_id, fn -> unpark_tail(store, execution_id) end) do
-      {:ok, result} -> result
-      {:error, _reason} = error -> error
-    end
+    config
+    |> strategy.with_execution(execution_id, fn ->
+      emit_lock(lock_start, execution_id, strategy, :acquired, nil)
+      unpark_tail(store, execution_id)
+    end)
+    |> unlocked(lock_start, execution_id, strategy)
+    |> unparked()
   end
 
+  # The one event of an unpark, emitted after its section returns and only
+  # for the arm that wrote `:active`.
+  @spec unparked(
+          {:unparked, Execution.t()}
+          | {:ok, Execution.t()}
+          | {:discarded, Execution.t()}
+          | {:error, error()}
+        ) :: {:ok, Execution.t()} | {:discarded, Execution.t()} | {:error, error()}
+  defp unparked({:unparked, %Execution{} = execution}) do
+    Telemetry.execution_unparked(
+      execution_id: execution.execution_id,
+      content_hash: execution.content_hash
+    )
+
+    {:ok, execution}
+  end
+
+  defp unparked(result), do: result
+
   @spec unpark_tail(Storage.t(), execution_id()) ::
-          {:ok, Execution.t()} | {:discarded, Execution.t()} | {:error, error()}
+          {:unparked, Execution.t()}
+          | {:ok, Execution.t()}
+          | {:discarded, Execution.t()}
+          | {:error, error()}
   defp unpark_tail(store, execution_id) do
     case Storage.fetch_execution(store, execution_id) do
       {:ok, %{status: :needs_migration} = execution_record} ->
         with :ok <- Storage.update_execution_status(store, execution_id, :active, failure: nil) do
-          {:ok, Execution.from_record(%{execution_record | status: :active, failure: nil})}
+          {:unparked, Execution.from_record(%{execution_record | status: :active, failure: nil})}
         end
 
       {:ok, %{status: :active} = execution_record} ->

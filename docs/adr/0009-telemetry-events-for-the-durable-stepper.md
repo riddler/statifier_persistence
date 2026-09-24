@@ -884,3 +884,63 @@ close it if the advance raises (`lib/statifier_persistence/executions.ex`,
 names are statifier-ex's under `st-ADR-0067`, and it is unchanged.
 
 No other decision moves.
+
+## Amendment (2026-09-23): an unpark gets one event of its own, and its wait is the lock event
+
+Status of this amendment: proposed (2026-09-23). The record above stays
+accepted; this amendment is proposed until the operator accepts it.
+
+ADR-0014 (`docs/adr/0014-the-needs-migration-status.md`, accepted) leaves
+open, in its decision 8, whether the park and the unpark emit telemetry of
+their own, and its Amendment of this date decides the unpark's: one event,
+`[:statifier_persistence, :execution, :unparked]`, with `system_time` as
+its measurement and `execution_id` and `content_hash` as its metadata,
+emitted once per `StatifierPersistence.Executions.unpark/3` that writes a
+`:needs_migration` execution back to `:active`, and the existing
+`[:statifier_persistence, :execution, :lock]` for the unpark's wait. It
+leaves the park's event undecided. This amendment adds the event to the
+catalogue. It is additive under decision 8: one new name, no rename and no
+removal.
+
+**1. The event belongs to decision 3's third thing, this package's own
+verdicts on an execution.** An unpark is a host decision about an
+execution that no interpreter runs on, which is the reason decision 3
+gives for reporting `fail/4` and `cancel/3` here. The four things are
+still four; the third now includes an unpark. The event is a
+point-in-time event under decision 5, not a pair: an unpark is not a step,
+it opens no step span, and the step seam's `entry` vocabulary does not
+grow.
+
+**2. The lock event gains an emit site outside the step span.** Decision
+3's first thing names "the per-run exclusion wait ahead of" the durable
+step, `run` read as `execution` under the 2026-09-13 Note above.
+`unpark/3` takes the same exclusion, and reports its wait
+through the same event with the same keys (`execution_id`, `strategy`,
+`outcome`, `reason`) and the same `duration`, the wait and not the held
+time. Nothing brackets it: there is no step span around an unpark for the
+lock event to sit inside. `migrate/4` and `migrate_tree/4` also take the
+exclusion through the strategy directly and still emit no lock event
+(`lib/statifier_persistence/executions.ex`, `migrate/4` and
+`with_exclusions/4`, read at `a6e393f`); this amendment does not change
+them.
+
+**3. Decision 4 and decision 7 hold.** One chart identity is in hand, the
+chart the execution was parked on and goes on under, and it rides as
+`content_hash`. No position is decoded, so `session_id` is not on the
+event. Nothing from the datamodel, the blobs or the metadata map travels.
+
+**4. The count is nineteen.** Decision 8's frozen list grows from eighteen
+event names to **nineteen**. `@events` in
+`lib/statifier_persistence/telemetry.ex` holds eighteen names at
+`a6e393f`, and this change adds the nineteenth, `@execution_unparked`,
+after `@execution_migrated`, with its emitter `execution_unparked/1`.
+`StatifierPersistence.Telemetry.events/0` returns all nineteen, and
+`docs/telemetry.md`'s execution lifecycle table carries the new row. The
+earlier counts in this record and in `docs/adr/README.md`'s index row are
+corrected by this addition; this amendment edits none of them in place.
+
+A handler that matches the names `events/0` returns exhaustively needs a
+clause for the new one, and a bridge that checks a hand-copied list
+against `events/0` needs the name added.
+
+No other decision moves.

@@ -168,10 +168,10 @@ defmodule StatifierPersistence.TelemetryTest do
   describe "events/0 (ADR-0009 decision 8)" do
     # Sabotage: dropped @execution_lock from @events - the count assertion went
     # red, which is the whole point of a bridge attaching from this list.
-    test "returns all eighteen names, unique, under this package's prefix" do
+    test "returns all nineteen names, unique, under this package's prefix" do
       events = Telemetry.events()
 
-      assert length(events) == 18
+      assert length(events) == 19
       assert Enum.uniq(events) == events
 
       assert Enum.all?(events, fn [prefix | rest] ->
@@ -193,6 +193,7 @@ defmodule StatifierPersistence.TelemetryTest do
                [:statifier_persistence, :execution, :terminated],
                [:statifier_persistence, :execution, :discarded],
                [:statifier_persistence, :execution, :migrated],
+               [:statifier_persistence, :execution, :unparked],
                [:statifier_persistence, :effect, :failed],
                [:statifier_persistence, :drive, :turns_exhausted],
                [:statifier_persistence, :child, :started],
@@ -852,6 +853,93 @@ defmodule StatifierPersistence.TelemetryTest do
       assert {_m, terminated} = await([:statifier_persistence, :execution, :terminated])
       assert terminated.status == :completed
       assert terminated.driven_by == :chart
+    end
+  end
+
+  describe "[:statifier_persistence, :execution, :unparked] (ADR-0014's telemetry amendment)" do
+    # Sabotage: made unparked/1's written arm return {:ok, execution}
+    # without the emit - red at the await; the one host decision that puts a
+    # parked execution back to work was invisible.
+    test "reports an unpark that wrote :active, with its lock wait and no step span",
+         %{store: store} do
+      {_source, machine} = Charts.chart_a()
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      :ok = Storage.update_execution_status(store, "execution-1", :needs_migration)
+      {:ok, %{content_hash: content_hash}} = Storage.fetch_execution(store, "execution-1")
+      drain()
+
+      assert {:ok, %Execution{status: :active}} = Executions.unpark(store, "execution-1")
+
+      assert {m, meta} = await([:statifier_persistence, :execution, :unparked])
+      assert Map.keys(m) == [:system_time]
+      assert Map.keys(meta) |> Enum.sort() == [:content_hash, :execution_id]
+      assert meta.execution_id == "execution-1"
+      assert meta.content_hash == content_hash
+
+      assert {lock_m, lock_meta} = await([:statifier_persistence, :execution, :lock])
+      assert Map.keys(lock_m) |> Enum.sort() == [:duration, :system_time]
+      assert lock_m.duration >= 0
+      assert lock_meta.execution_id == "execution-1"
+      assert lock_meta.outcome == :acquired
+      assert lock_meta.reason == nil
+      assert lock_meta.strategy == StatifierPersistence.Serialization.AdapterLock
+
+      refute_received {:telemetry, [:statifier_persistence, :execution, :step, :start], _, _}
+      refute_received {:telemetry, [:statifier_persistence, :execution, :step, :stop], _, _}
+      refute_received {:telemetry, [:statifier_persistence, :execution, :unparked], _, _}
+    end
+
+    # Sabotage: made unpark_tail/2's :active arm answer {:unparked, _} - red
+    # at the first refute; an unpark that wrote nothing would have been
+    # counted as one that did.
+    test "reports no unparked for an :active, terminal or absent execution, and the lock for each",
+         %{store: store} do
+      {_source, machine} = Charts.chart_a()
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-2", machine, executor: RecordingExecutor)
+
+      {:ok, _execution} = Executions.cancel(store, "execution-2")
+      drain()
+
+      assert {:ok, %Execution{status: :active}} = Executions.unpark(store, "execution-1")
+      refute_received {:telemetry, [:statifier_persistence, :execution, :unparked], _, _}
+      assert {_m, active_lock} = await([:statifier_persistence, :execution, :lock])
+      assert active_lock.outcome == :acquired
+
+      assert {:discarded, %Execution{status: :cancelled}} =
+               Executions.unpark(store, "execution-2")
+
+      refute_received {:telemetry, [:statifier_persistence, :execution, :unparked], _, _}
+      refute_received {:telemetry, [:statifier_persistence, :execution, :discarded], _, _}
+      assert {_m, terminal_lock} = await([:statifier_persistence, :execution, :lock])
+      assert terminal_lock.execution_id == "execution-2"
+
+      assert {:error, :execution_not_found} = Executions.unpark(store, "execution-absent")
+      refute_received {:telemetry, [:statifier_persistence, :execution, :unparked], _, _}
+      assert {_m, absent_lock} = await([:statifier_persistence, :execution, :lock])
+      assert absent_lock.execution_id == "execution-absent"
+    end
+
+    # Sabotage: dropped the unlocked/4 pipe from unpark/3 and matched the
+    # strategy's envelope inline - red at the await; a refused unpark's lock
+    # was invisible.
+    test "reports a refused lock as :unavailable and no unparked" do
+      {:ok, store} = Storage.new(NoLockAdapter, [])
+      drain()
+
+      assert {:error, {:serialization, :not_supported}} = Executions.unpark(store, "execution-1")
+
+      assert {_m, meta} = await([:statifier_persistence, :execution, :lock])
+      assert meta.outcome == :unavailable
+      assert meta.reason == {:serialization, :not_supported}
+      refute_received {:telemetry, [:statifier_persistence, :execution, :unparked], _, _}
     end
   end
 
