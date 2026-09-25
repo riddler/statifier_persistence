@@ -14,17 +14,15 @@ defmodule StatifierPersistence.ExecutionsFailDriverDialyzerTest do
 
   alias StatifierPersistence.{Execution, Storage}
   alias StatifierPersistence.Test.Dialyzer.FailWithDriver
-  alias StatifierPersistence.Test.RecordingExecutor
   alias StatifierPersistence.Testing.Charts
 
   setup do
     {:ok, store} = Storage.new(Storage.InMemory, [])
-    start_supervised!(RecordingExecutor)
     {_source, machine} = Charts.chart_a()
 
     {:ok, _execution, _ms} =
       StatifierPersistence.Executions.create(store, "execution-1", machine,
-        executor: RecordingExecutor
+        executor: fn _effect, _context -> :ok end
       )
 
     %{store: store, machine: machine}
