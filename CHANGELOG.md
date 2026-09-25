@@ -10,6 +10,43 @@ fragment in [`changelog.d/`](https://github.com/riddler/statifier_persistence/bl
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
 
+## [0.18.0] 2026-09-25
+
+Feature release: the step stop event says whether the delivered event
+selected a transition, a host can fold the `error.communication` events a
+step re-entered after an executor failure, and a durable subchart's single
+child records its answer so one a parent refused can be delivered again.
+`selection` on `[:statifier_persistence, :execution, :step, :stop]` is
+`:selected` or `:none` whether or not tracing is on, the new
+`[:statifier_persistence, :execution, :step, :reentered]` reports each
+re-entry inside the step span, and
+`StatifierPersistence.Execution.from_record/1` reads a recorded answer's
+donedata back.
+
+**Breaking for a host that calls `StatifierPersistence.Executions.migrate/4`
+on a durable child, or matches `t:StatifierPersistence.Executions.migrate_error/0`
+exhaustively**: `migrate/4` refuses an execution that carries a linkage with
+`{:error, {:linked, execution}}` and writes nothing, as Changed below lists;
+move a child with `migrate_tree/4`. A fetched completed child of a durable
+subchart no longer reads `donedata: nil` when its answer was recorded.
+
+Upgrading: no schema migration. The `statifier` floor moves to `~> 2.9`.
+A handler that matches `StatifierPersistence.Telemetry.events/0`
+exhaustively adds the `:reentered` event; the "0.17 to 0.18" section of
+`docs/upgrading.md` lists each step.
+
+### Added
+
+- `[:statifier_persistence, :execution, :step, :reentered]`, emitted inside the step span once per `error.communication` the persist tail re-entered after an executor failure, carrying its `name`, `origin` and `opts` so a host folding its delivered events can reach the persisted position.
+- `selection` on `[:statifier_persistence, :execution, :step, :stop]`: `:selected` when the event the step delivered selected a transition, `:none` when it selected none, whether or not tracing is on, and `nil` on a stop that delivered no event (`:create`, `:fail`, `:cancel`) or returned no position.
+
+### Changed
+
+- `StatifierPersistence.Execution.from_record/1` no longer returns `donedata: nil` for every record: it reads a recorded `{:done, donedata}` answer back as `donedata`, so a fetched completed child of a durable subchart, a fan-out child's included, carries the donedata it answered its parent with. A host that matches `donedata: nil` on such a record sees the donedata instead.
+- A durable subchart's single child records its answer on its own execution record before its parent's door is tried, so an answer a parked or unreachable parent refused can be delivered again through `StatifierPersistence.Driver.answer_parent/3` from the child's fetched record; a single child that ended before this release has no recorded answer and still reads `donedata: nil`.
+- **Breaking** for a host that calls `StatifierPersistence.Executions.migrate/4` on a durable child, or matches `t:StatifierPersistence.Executions.migrate_error/0` exhaustively: `migrate/4` now refuses an execution that carries a linkage with `{:error, {:linked, execution}}` and writes nothing, under either `on_failure:` value. Move a child with `StatifierPersistence.Executions.migrate_tree/4`, the child as the root, and add a clause for `{:linked, execution}`, or a catch-all, to every `case` over `migrate/4`'s refusals.
+- Requires `statifier ~> 2.9`, whose `MachineState.last_selection` the new `selection` key is read from.
+
 ## [0.17.0] 2026-09-24
 
 Feature release: an execution records when it ended, and a host can clear
