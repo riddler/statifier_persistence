@@ -439,8 +439,8 @@ defmodule StatifierPersistence.DriverSubchartTest do
     end
   end
 
-  # sp-y7n / RQ-SF035-9: a child failed from *outside* the interpreter,
-  # through `Executions.fail/4`, answers its parent when it is handed a driver -
+  # sp-y7n (ruled by the operator, 2026-09-06): a child failed from
+  # *outside* the interpreter, through `Executions.fail/4`, answers its parent when it is handed a driver -
   # the seam ADR-0008's note of 2026-09-06 records. The Ecto and SQLite
   # variants of the first case live in `DriverSubchartEctoTest` and
   # `Ecto.SqliteMigrationsTest`; everything here runs over `InMemory`.

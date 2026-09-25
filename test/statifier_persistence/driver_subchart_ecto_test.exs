@@ -114,8 +114,9 @@ defmodule StatifierPersistence.DriverSubchartEctoTest do
     assert grandchild_record.position_blob == before_grandchild.position_blob
   end
 
-  # sp-y7n / RQ-SF035-9, the Postgres half of the pair whose SQLite half is
-  # `StatifierPersistence.Ecto.SqliteMigrationsTest`: a linked child failed
+  # sp-y7n (ruled by the operator, 2026-09-06), the Postgres half of the
+  # pair whose SQLite half is `StatifierPersistence.Ecto.SqliteMigrationsTest`:
+  # a linked child failed
   # from outside the interpreter through `Executions.fail/4` answers its parent.
   # What this backend adds over the in-memory case in
   # `StatifierPersistence.DriverSubchartTest` is the one thing that could

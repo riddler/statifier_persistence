@@ -1,0 +1,17 @@
+# Exact strings this repository allows past the maintainers' planning-id scan.
+# One string per line; an entry allows an id only where the entry covers it.
+#
+# test/statifier_persistence/shipped_prose_test.exs: invented ids, one per
+# private-id shape, that the shipped-prose guard's positive cases assert the
+# pattern matches. They name no real entry and are this repo's own fixtures.
+{"see RQ-XX999-99 for why", "RQ-XX999-99"}
+{"see RQ-999-9b for why", "RQ-999-9b"}
+{"under ruling R99-9, the", "R99-9"}
+{"under ruling R99.9, the", "R99.9"}
+{"as R99z has it", "R99z"}
+{"the ruling `D99-9` said", "D99-9"}
+{"under operator ruling R98, the", "R98"}
+{"behind epic `R97`", "R97"}
+{"open question Q99 asks", "Q99"}
+{"the R96 ruling of", "R96"}
+{"(R95, operator ruling 2026-01-01)", "R95"}
