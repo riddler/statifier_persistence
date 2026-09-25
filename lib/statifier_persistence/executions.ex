@@ -90,6 +90,10 @@ defmodule StatifierPersistence.Executions do
   single-wave per step: effects the re-entries emit are executed too, but
   their failures are not re-entered again, so a deterministically failing
   executor cannot loop this library.
+  Each re-entry delivered is reported, inside the step span, as
+  `[:statifier_persistence, :execution, :step, :reentered]` with the name,
+  origin and options it was delivered with, so a host folding the events it
+  delivered can replay it (`docs/telemetry.md`).
 
   Concurrent deliveries to one execution are ordered by a pluggable per-execution
   serialization strategy (ADR-0004 decision 5): every entry point runs its
@@ -2925,6 +2929,7 @@ defmodule StatifierPersistence.Executions do
          ) do
       {:ok, machine_state, wave_effects} ->
         close_macrostep(span, seam.session_id, :internal, machine_state, nil, wave_effects)
+        report_reentry(origin, opts, seam)
         report_effects(machine_state, wave_effects, seam)
 
         {wave_lifecycle, wave_executable} = Enum.split_with(wave_effects, &lifecycle_effect?/1)
@@ -2942,6 +2947,24 @@ defmodule StatifierPersistence.Executions do
       {:error, :not_running} ->
         {:halt, false, acc}
     end
+  end
+
+  # `[:statifier_persistence, :execution, :step, :reentered]` for one
+  # delivered re-entry: the name, origin and opts `deliver_internal/5` was
+  # just handed, so a host folding the events it delivered can hand them to
+  # it again and reach the persisted position. Emitted only once the
+  # re-entry was delivered, and inside the step span, since every
+  # `persist_tail/8` runs inside `serialized/5`.
+  @spec report_reentry(Statifier.Event.Cause.origin(), keyword(), seam()) :: :ok
+  defp report_reentry(origin, opts, seam) do
+    Telemetry.execution_step_reentered(
+      execution_id: seam.context.execution_id,
+      session_id: seam.session_id,
+      content_hash: seam.context.content_hash,
+      name: "error.communication",
+      origin: origin,
+      opts: opts
+    )
   end
 
   # The origin each re-entry carries, mirroring the shapes upstream's

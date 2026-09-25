@@ -15,14 +15,16 @@ defmodule StatifierPersistence.TelemetryTest do
 
   use ExUnit.Case, async: false
 
-  alias Statifier.Event
+  alias Ecto.Adapters.SQL.Sandbox
+  alias Statifier.{Event, Interpreter, MachineState}
   alias Statifier.Invoke.Types, as: InvokeTypes
   alias Statifier.Send.Routes
-  alias StatifierPersistence.{Driver, Execution, Executions, Storage, Telemetry}
+  alias StatifierPersistence.{Driver, EctoHosts, Execution, Executions, Storage, Telemetry}
   alias StatifierPersistence.Execution.Linkage
   alias StatifierPersistence.Storage.InMemory
   alias StatifierPersistence.Test.{NoChildListingAdapter, NoLockAdapter, RecordingExecutor}
   alias StatifierPersistence.Testing.Charts
+  alias StatifierPersistence.TestRepo
 
   # Reaches a top-level final on "finish": the chart-driven termination.
   @final_source """
@@ -47,6 +49,27 @@ defmodule StatifierPersistence.TelemetryTest do
           <transition event="error.communication" target="errored"/>
       </state>
       <state id="errored"/>
+  </scxml>
+  """
+
+  # Two immediate <send>s the executor can fail, whose re-entries only
+  # reach "d" in the order they were delivered: "one" moves b to c, and
+  # only c answers "two". Folded in the other order they stop in "c".
+  @ordered_error_source """
+  <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="a">
+      <state id="a">
+          <transition event="go" target="b">
+              <send id="one" event="ping" target="#_parent"/>
+              <send id="two" event="pong" target="#_parent"/>
+          </transition>
+      </state>
+      <state id="b">
+          <transition event="error.communication" cond="_event.sendid == 'one'" target="c"/>
+      </state>
+      <state id="c">
+          <transition event="error.communication" cond="_event.sendid == 'two'" target="d"/>
+      </state>
+      <state id="d"/>
   </scxml>
   """
 
@@ -168,10 +191,10 @@ defmodule StatifierPersistence.TelemetryTest do
   describe "events/0 (ADR-0009 decision 8)" do
     # Sabotage: dropped @execution_lock from @events - the count assertion went
     # red, which is the whole point of a bridge attaching from this list.
-    test "returns all nineteen names, unique, under this package's prefix" do
+    test "returns all twenty names, unique, under this package's prefix" do
       events = Telemetry.events()
 
-      assert length(events) == 19
+      assert length(events) == 20
       assert Enum.uniq(events) == events
 
       assert Enum.all?(events, fn [prefix | rest] ->
@@ -186,6 +209,7 @@ defmodule StatifierPersistence.TelemetryTest do
                [:statifier_persistence, :execution, :step, :start],
                [:statifier_persistence, :execution, :step, :stop],
                [:statifier_persistence, :execution, :step, :exception],
+               [:statifier_persistence, :execution, :step, :reentered],
                [:statifier_persistence, :execution, :lock],
                [:statifier_persistence, :adapter, :call],
                [:statifier_persistence, :identity, :refused],
@@ -1033,6 +1057,97 @@ defmodule StatifierPersistence.TelemetryTest do
     end
   end
 
+  describe "[:statifier_persistence, :execution, :step, :reentered]" do
+    # Sabotage: dropped deliver_reentry/4's report_reentry/3 call - red, no
+    # event arrived; and emitting `opts: []` - red on the sendid.
+    test "reports each delivered re-entry inside the step span, with name, origin and opts",
+         %{store: store} do
+      machine = compile!(@send_error_source)
+      executor = failing_executor([:send])
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: executor)
+
+      drain()
+
+      {:ok, _execution, _ms} =
+        Executions.step(store, "execution-1", machine, Event.external("go"),
+          executor: executor,
+          routes: Routes.new(parent?: true)
+        )
+
+      events = mailbox()
+      names = Enum.map(events, fn {name, _m, _meta} -> name end)
+      reentered = [:statifier_persistence, :execution, :step, :reentered]
+      start = Enum.find_index(names, &(&1 == [:statifier_persistence, :execution, :step, :start]))
+      at = Enum.find_index(names, &(&1 == reentered))
+      stop = Enum.find_index(names, &(&1 == [:statifier_persistence, :execution, :step, :stop]))
+
+      assert Enum.count(names, &(&1 == reentered)) == 1
+      assert start < at
+      assert at < stop
+
+      {_name, m, meta} = Enum.at(events, at)
+
+      assert Map.keys(m) == [:system_time]
+
+      assert Map.keys(meta) |> Enum.sort() == [
+               :content_hash,
+               :execution_id,
+               :name,
+               :opts,
+               :origin,
+               :session_id
+             ]
+
+      assert meta.execution_id == "execution-1"
+      assert meta.name == "error.communication"
+      assert {:content, c_index, _owner} = meta.origin
+      assert is_integer(c_index)
+      assert [sendid: sendid] = meta.opts
+      assert is_binary(sendid)
+      assert is_binary(meta.session_id)
+      assert is_binary(meta.content_hash)
+    end
+
+    # Sabotage: made reenter_one/3's :observational clause also call
+    # report_reentry/3 - red; a failure that never re-entered the chart
+    # would be folded by a host as if it had.
+    test "reports nothing for a failure that did not re-enter the chart", %{store: store} do
+      machine = compile!(@log_error_source)
+      executor = failing_executor([:log])
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, "execution-1", machine, executor: executor)
+
+      drain()
+
+      {:ok, _execution, _ms} =
+        Executions.step(store, "execution-1", machine, Event.external("go"), executor: executor)
+
+      assert {_m, %{reentered?: false}} = await([:statifier_persistence, :effect, :failed])
+      refute_received {:telemetry, [:statifier_persistence, :execution, :step, :reentered], _, _}
+    end
+
+    # Sabotage: emitted `opts: []` from report_reentry/3 - red, the fold
+    # stopped in "b"; dropping the call - red the same way. The fold's own
+    # refutes pin the order: the same events folded reversed stop in "c".
+    test "a host fold over the delivered and re-entered events reaches the persisted position",
+         %{store: store} do
+      assert_fold_reproduces(store)
+    end
+
+    # Sabotage: the same two mutations as the in-memory fold - red.
+    test "a host fold reaches the persisted position on the Ecto adapter too" do
+      :ok = Sandbox.checkout(TestRepo)
+      {:ok, store} = Storage.new(Storage.Ecto, persistence: EctoHosts.Default, sandbox: true)
+      :ok = Storage.Ecto.isolate(store.opts)
+      drain()
+
+      assert_fold_reproduces(store)
+    end
+  end
+
   describe "[:statifier_persistence, :drive, :turns_exhausted]" do
     # Sabotage: dropped the emit from advance/6's max_turns clause - red;
     # the refusal is a return value nothing else reports.
@@ -1583,6 +1698,68 @@ defmodule StatifierPersistence.TelemetryTest do
     after
       0 -> flunk("no matching #{inspect(name)} event was emitted")
     end
+  end
+
+  # Every event in the mailbox, in arrival order, as `{name, measurements,
+  # metadata}` - for asserting where one event sits among the others.
+  defp mailbox, do: collect_mailbox([])
+
+  defp collect_mailbox(acc) do
+    receive do
+      {:telemetry, name, measurements, metadata} ->
+        collect_mailbox([{name, measurements, metadata} | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  # A host that event-sources the execution: it keeps the position the
+  # create persisted and the external event it delivered, and folds the
+  # `:reentered` events its handler received, in order, through the same
+  # interpreter call the persist tail made. The result must be the
+  # position the step persisted, and each wrong fold must miss it.
+  defp assert_fold_reproduces(store) do
+    machine = compile!(@ordered_error_source)
+    executor = failing_executor([:send])
+    routes = Routes.new(parent?: true)
+
+    {:ok, _execution, _ms} =
+      Executions.create(store, "execution-1", machine,
+        executor: executor,
+        initialize: [routes: routes]
+      )
+
+    {:ok, created} = Storage.load_execution_position(store, "execution-1", machine)
+    drain()
+
+    go = Event.external("go")
+
+    {:ok, _execution, _ms} =
+      Executions.step(store, "execution-1", machine, go, executor: executor, routes: routes)
+
+    reentered =
+      for {[:statifier_persistence, :execution, :step, :reentered], _m, meta} <- mailbox(),
+          do: meta
+
+    assert Enum.map(reentered, & &1.opts) == [[sendid: "one"], [sendid: "two"]]
+
+    {:ok, persisted} = Storage.load_execution_position(store, "execution-1", machine)
+
+    {:ok, delivered, _effects} =
+      Interpreter.handle_event(MachineState.put_routes(created, routes), go)
+
+    assert fold(delivered, reentered).configuration == persisted.configuration
+    refute fold(delivered, Enum.reverse(reentered)).configuration == persisted.configuration
+    refute delivered.configuration == persisted.configuration
+  end
+
+  defp fold(machine_state, reentered) do
+    Enum.reduce(reentered, machine_state, fn meta, acc ->
+      {:ok, acc, _effects} =
+        Interpreter.deliver_internal(acc, :platform, meta.name, meta.origin, meta.opts)
+
+      acc
+    end)
   end
 
   # Drops every event emitted so far, so a phase asserts on its own.

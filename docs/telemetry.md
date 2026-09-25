@@ -189,6 +189,7 @@ and closes inside it.
 | `[:statifier_persistence, :execution, :step, :start]` | `Executions`, immediately inside `serialized/5` | `system_time`, `monotonic_time` | `execution_id`, `entry`, `span_ref` |
 | `[:statifier_persistence, :execution, :step, :stop]` | the same call, on every return path | `duration`, `monotonic_time` | `execution_id`, `session_id`, `content_hash`, `entry`, `outcome`, `status`, `reason`, `span_ref`, `invoke_id`, `child_count` |
 | `[:statifier_persistence, :execution, :step, :exception]` | the same call, in place of the stop, when the drive raises, throws or exits | `duration`, `monotonic_time` | `execution_id`, `entry`, `span_ref`, `kind`, `reason`, `stacktrace` |
+| `[:statifier_persistence, :execution, :step, :reentered]` | `Executions`, once per `error.communication` re-entry the persist tail delivered, between the start and the stop | `system_time` | `execution_id`, `session_id`, `content_hash`, `name`, `origin`, `opts` |
 | `[:statifier_persistence, :execution, :lock]` | `serialized/5`, after `strategy.with_execution/3` returns or refuses; `Executions.unpark/3`, the same way, outside any step span | `duration` (the wait, not the held time), `system_time` | `execution_id`, `strategy`, `outcome`, `reason` |
 
 `entry` is which public door was used: `:create`, `:step`,
@@ -238,6 +239,28 @@ the start half's own:
 The caller's re-raise is untouched: it sees the original reason and
 stacktrace. A bridge that closes a span on `:telemetry.span/3`'s exception
 can close this one the same way.
+
+`[:statifier_persistence, :execution, :step, :reentered]` is for a host
+that event-sources an execution: it keeps the events it delivered and
+folds them to rebuild the position. An executor failure on an actionable
+effect re-enters the chart as `error.communication` inside the persist
+tail (ADR-0004 decision 4), and that event is one the host never
+delivered, so a fold over the host's own events alone diverges from the
+persisted position on that edge. This event exposes each such re-entry,
+once it has been delivered, with the three values it was delivered with:
+`name` (`"error.communication"`), `origin` (the
+`t:Statifier.Event.Cause.origin/0` tuple) and `opts` (`[sendid: id]` for a
+failed `<send>`, `[]` otherwise). It is emitted on the calling process
+after the step's start and before its stop, in delivery order, so a
+handler that appends each one after the event that drove the step, and
+folds them through
+`Statifier.Interpreter.deliver_internal(machine_state, :platform, name,
+origin, opts)`, reaches the persisted position. A failure whose re-entry
+was not delivered - an observational effect, a failure after the
+execution reached a final state, a failure after the macrostep budget ran
+out - emits none. The event carries no `span_ref`: it pairs with its step
+by `execution_id` and by arriving between that step's start and stop.
+`step/5`'s return value is unchanged.
 
 `invoke_id` and `child_count` are the settlement dimensions, and they are
 `nil` on every ordinary drive. `StatifierPersistence.Driver` sets them
@@ -491,11 +514,17 @@ bridge links instead, from `:started`.
 ## Cardinality and disclosure
 
 Every metadata key above is bounded by the chart or by a closed vocabulary,
-with two exceptions, both deliberate.
+with three exceptions, all deliberate.
 
 `execution_id` is host-supplied and unbounded. It is present as a
 correlation id for a span or a log line, **never as a metric dimension** - the same status
 `job_id` has in `statifier_oban` and `id` has in Oban itself.
+
+`opts` on `[:statifier_persistence, :execution, :step, :reentered]`
+carries a `<send>`'s `sendid`, which is the element's own `id` or one the
+interpreter generated for it, so it is unbounded like `execution_id`: a
+value for a fold to replay, never a metric dimension. `origin` beside it
+is indexes into the chart and is bounded by it.
 
 `reason` is a term on several events. Where this note names a closed
 vocabulary (`:discarded`, `:child, :refused`, the adapter arms) it is safe
