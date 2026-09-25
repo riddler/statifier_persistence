@@ -61,6 +61,7 @@ defmodule StatifierPersistence.Telemetry do
   | `[:statifier_persistence, :execution, :step, :start]` | `system_time`, `monotonic_time` | `execution_id`, `entry`, `span_ref` |
   | `[:statifier_persistence, :execution, :step, :stop]` | `duration`, `monotonic_time` | `execution_id`, `session_id`, `content_hash`, `entry`, `outcome`, `status`, `reason`, `span_ref`, `invoke_id`, `child_count` |
   | `[:statifier_persistence, :execution, :step, :exception]` | `duration`, `monotonic_time` | `execution_id`, `entry`, `span_ref`, `kind`, `reason`, `stacktrace` |
+  | `[:statifier_persistence, :execution, :step, :reentered]` | `system_time` | `execution_id`, `session_id`, `content_hash`, `name`, `origin`, `opts` |
   | `[:statifier_persistence, :execution, :lock]` | `duration`, `system_time` | `execution_id`, `strategy`, `outcome`, `reason` |
 
   `entry` is which public door was used: `:create`, `:step`,
@@ -93,6 +94,22 @@ defmodule StatifierPersistence.Telemetry do
   module and function, replaces an argument list by its arity, and keeps
   only `:file` and `:line` of the location. The caller's re-raise keeps
   the original reason and stacktrace.
+
+  `:reentered` is a point-in-time event inside the span: one per
+  `error.communication` event the persist tail re-entered into the chart
+  after an executor failure (ADR-0004 decision 4), emitted on the calling
+  process after that re-entry was delivered and before the step's `:stop`,
+  in delivery order. `name` is `"error.communication"`, `origin` is the
+  `t:Statifier.Event.Cause.origin/0` tuple the event was raised with, and
+  `opts` is the keyword list it was raised with (`[sendid: id]` for a
+  failed `<send>`, `[]` otherwise). A host that folds the events it
+  delivered to rebuild a position folds each of these after the event of
+  the step that produced it, through
+  `Statifier.Interpreter.deliver_internal(machine_state, :platform, name,
+  origin, opts)`, and reaches the persisted position. A failure whose
+  re-entry was not delivered emits none. The event carries no `span_ref`:
+  it pairs with its step by `execution_id` and by arriving between that
+  step's `:start` and `:stop`.
 
   ## The storage seam
 
@@ -181,9 +198,11 @@ defmodule StatifierPersistence.Telemetry do
   Every metadata key is bounded by the chart or by a closed vocabulary
   except `execution_id` (and `parent_execution_id` / `child_execution_id`), which is
   host-supplied and is a correlation id for a span or a log line, **never
-  a metric dimension**, and `reason`, which carries an arbitrary executor
+  a metric dimension**, `reason`, which carries an arbitrary executor
   or adapter term on some events and must be narrowed before it becomes a
-  dimension.
+  dimension, and `opts` on `:reentered`, whose `sendid` is a `<send>`'s
+  own id or one the interpreter generated for it: a value to fold, never
+  a dimension.
 
   **Nothing host-opaque and nothing from the datamodel is ever on an
   event** (ADR-0009 decision 7): not the `chart_blob`, the
@@ -222,6 +241,7 @@ defmodule StatifierPersistence.Telemetry do
   @execution_step_start [:statifier_persistence, :execution, :step, :start]
   @execution_step_stop [:statifier_persistence, :execution, :step, :stop]
   @execution_step_exception [:statifier_persistence, :execution, :step, :exception]
+  @execution_step_reentered [:statifier_persistence, :execution, :step, :reentered]
   @execution_lock [:statifier_persistence, :execution, :lock]
   @adapter_call [:statifier_persistence, :adapter, :call]
   @identity_refused [:statifier_persistence, :identity, :refused]
@@ -243,6 +263,7 @@ defmodule StatifierPersistence.Telemetry do
     @execution_step_start,
     @execution_step_stop,
     @execution_step_exception,
+    @execution_step_reentered,
     @execution_lock,
     @adapter_call,
     @identity_refused,
@@ -347,6 +368,33 @@ defmodule StatifierPersistence.Telemetry do
         kind: fields[:kind],
         reason: narrow_reason(fields[:kind], fields[:reason], fields[:stacktrace]),
         stacktrace: narrow_stacktrace(fields[:stacktrace])
+      }
+    )
+  end
+
+  @doc """
+  Emits `[:statifier_persistence, :execution, :step, :reentered]` - one
+  `error.communication` event the persist tail re-entered into the chart
+  after an executor failure, emitted inside the step span that produced it
+  so a handler receives them in delivery order.
+
+  `name`, `origin` and `opts` are the three arguments the re-entry passed to
+  `Statifier.Interpreter.deliver_internal/5` beside `:platform`, unchanged,
+  so a host folding delivered events can pass them back to reproduce the
+  persisted position.
+  """
+  @spec execution_step_reentered(fields :: fields()) :: :ok
+  def execution_step_reentered(fields) do
+    :telemetry.execute(
+      @execution_step_reentered,
+      %{system_time: System.system_time()},
+      %{
+        execution_id: fields[:execution_id],
+        session_id: fields[:session_id],
+        content_hash: fields[:content_hash],
+        name: fields[:name],
+        origin: fields[:origin],
+        opts: fields[:opts]
       }
     )
   end

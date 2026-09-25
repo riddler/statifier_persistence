@@ -1091,3 +1091,76 @@ What was re-read before the flip:
 - **Decision 4.** `@execution_unparked` sits after `@execution_migrated`
   in `@events`, which lists nineteen names, and `docs/telemetry.md`'s
   execution lifecycle table carries the row.
+
+## Amendment (2026-09-24, sp-226): each re-entered `error.communication` gets an event inside the step span
+
+Status of this amendment: proposed (2026-09-24, sp-226). The record above
+stays accepted; this amendment is proposed until the operator accepts it.
+
+ADR-0004 decision 4 re-enters an executor failure on an actionable effect
+into the chart as `error.communication`, inside the persist tail. That event
+is one no host delivered, and until this change nothing outside the tail
+could see it whole: `[:statifier_persistence, :effect, :failed]` reports the
+effect's kind, the executor, its reason and whether a re-entry happened
+(`lib/statifier_persistence/executions.ex`, `report_failure/3`, read at
+`fe06c8d`), but not the cause origin and options the re-entry was raised
+with (`deliver_reentry/4`, read at `fe06c8d`). A host that event-sources an
+execution, folding the events it delivered to rebuild the position,
+therefore diverges from the persisted position on that edge. Ruled by the
+operator, 2026-09-24: expose each re-entry through one additive event, with
+the step's return untouched.
+
+This amendment is additive under decision 8: one new event name, no rename
+and no removal.
+
+**1. The event is `[:statifier_persistence, :execution, :step, :reentered]`,
+one per delivered re-entry.** It is emitted once the re-entry has been
+delivered to the chart, and only then (`report_reentry/3`, called from
+`deliver_reentry/4`, in this change). A failure whose re-entry was not
+delivered emits none: an observational effect's failure, a failure after a
+re-entry reached a final state, and a failure after the macrostep budget ran
+out. `[:statifier_persistence, :effect, :failed]` is unchanged and still
+fires for every failure.
+
+**2. It is a point-in-time event inside the step span, and decision 5
+holds.** Every persist tail runs inside `serialized/5` (`create/4` and
+`step/5`, read at `fe06c8d`), so the event is emitted on the calling
+process after the step's `:start` and before its `:stop` or `:exception`,
+in delivery order. It is not a third half of the span: it carries
+`system_time` alone, as decision 5's other point-in-time events do, and a
+handler that reads every `[:statifier_persistence, :execution, :step, _]`
+name as a span phase must not treat it as one. It carries no `span_ref`; it
+pairs with its step by `execution_id` and by arriving between that step's
+halves. Adding `span_ref` later is an amendment under decision 8.
+
+**3. The metadata is the three values the re-entry was delivered with, and
+decision 4's identity keys.** `name` is `"error.communication"`; `origin`
+is the `Statifier.Event.Cause.origin/0` tuple; `opts` is the keyword list,
+`[sendid: id]` for a failed `<send>`, delayed or not, and `[]` for
+every other effect (`reentry_origin/1`, read at `fe06c8d`). They are the
+arguments `Statifier.Interpreter.deliver_internal/5` received beside
+`:platform`, unchanged, so a host folding its delivered events and then
+these, in order, through that function reaches the persisted position. A
+position has been decoded, so `session_id` rides with `execution_id` and
+`content_hash`, as on `:effect, :failed`.
+
+**4. Decision 7 holds, and one key is unbounded.** `origin` is indexes into
+the chart and is bounded by it. `opts` carries a `<send>`'s `sendid`, which
+is the element's own `id` or one the interpreter generated for it: not a
+datamodel value, but unbounded, so it takes the status decision 7 gives the
+execution id - a value for a fold to replay, never a metric dimension.
+
+**5. The count is twenty.** Decision 8's frozen list grows from nineteen
+event names to **twenty**. `@events` in
+`lib/statifier_persistence/telemetry.ex` holds nineteen names at `fe06c8d`,
+and this change adds the twentieth, `@execution_step_reentered`, after
+`@execution_step_exception`, with its emitter `execution_step_reentered/1`.
+`docs/telemetry.md`'s step seam table carries the new row. The earlier
+counts in this record and in `docs/adr/README.md`'s index row are corrected
+by this addition; this amendment edits none of them in place.
+
+A handler that matches the names `events/0` returns exhaustively needs a
+clause for the new one, and a bridge that checks a hand-copied list against
+`events/0` needs the name added.
+
+No other decision moves.
