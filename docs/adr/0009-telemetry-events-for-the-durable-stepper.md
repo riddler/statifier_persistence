@@ -1190,14 +1190,13 @@ writes it in `Statifier.Interpreter.handle_event/2` on every external
 round, whether or not tracing is on (`handle_event/2`, statifier 2.9.0), so
 the dependency floor moves to `~> 2.9` in this change.
 
-**2. It is set wherever a delivered event ran a round.** Every door that
-carries an event into the interpreter reaches `handle_event/2` through
-`stepped/8` (read at `cfa460c`): `:step`, `:done_invocation`,
-`:failed_invocation`, and `:answer_parent`, which is the parent's own
-`done_invocation` or `failed_invocation` door taken on a child's behalf
-(`answer_opts/1` in `lib/statifier_persistence/driver.ex`, read at
-`cfa460c`). On an `:ok` stop from any of those four, `selection` is
-`:selected` or `:none`. It is the delivered event's own answer: the
+**2. It is set wherever a delivered event ran a round.** On an `:ok` stop
+whose `entry` is `:step`, `:done_invocation`, `:failed_invocation` or
+`:answer_parent`, `selection` is `:selected` or `:none`: each of those doors
+delivers its event to `handle_event/2` (`stepped/8`, read at `cfa460c`), and
+`:answer_parent` is the parent's own invocation door taken on a child's
+behalf (`answer_opts/1` in `lib/statifier_persistence/driver.ex`, read at
+`cfa460c`). It is the delivered event's own answer: the
 eventless and internal rounds that fold after it do not change it, and
 neither does an `error.communication` the persist tail re-enters through
 `Statifier.Interpreter.deliver_internal/5` (the field's typedoc,
@@ -1209,8 +1208,9 @@ position `Statifier.Interpreter.initialize/2` built, which reads `nil`; a
 `cancel_tail/2`, read at `cfa460c`); and every `:discarded` or `:error`
 stop returns none either (`stop_shape/1`, read at `cfa460c`). A step whose
 builder declined, or that reached a terminal position, discards before any
-round. The key is `nil` there rather than absent, so the stop's key set is
-the same on every return path, as decision 5 keeps it.
+round. The key is `nil` there, explicitly, rather than absent, as decision 4
+treats `session_id` where no position was decoded; this amendment's own rule
+is that the stop carries `selection` on every return path.
 
 **4. `:none` does not say why.** An event no transition names and one
 whose every matching transition's guard was false both read `:none`. That
