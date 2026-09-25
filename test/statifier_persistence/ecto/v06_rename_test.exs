@@ -5,7 +5,7 @@ defmodule StatifierPersistence.Ecto.V06RenameTest do
   where the table, both columns and the indexes over them move in place.
 
   And the three ways down, all of which end with nothing left behind,
-  because V06's `down/1` is a no-op (RQ-SF041-25, ruled 2026-09-13): a
+  because V06's `down/1` is a no-op (ruled by the operator, 2026-09-13): a
   fresh install rolled back in one call, an upgraded install rolled back in
   one call, and a fresh install rolled back one version per host migration
   - the capped pattern this package's own docs recommend, which is the
@@ -100,7 +100,7 @@ defmodule StatifierPersistence.Ecto.V06RenameTest do
   # older version to write. `mix ecto.rollback --all` then rolls back one
   # version per step, and no single `Migrations.down/1` call can see where
   # the rollback ends - the reason V06's `down/1` is a no-op rather than a
-  # conditional rename (RQ-SF041-25).
+  # conditional rename (ruled by the operator, 2026-09-13).
   for version <- 1..6 do
     defmodule Module.concat(__MODULE__, "MigrateCappedV0#{version}") do
       @moduledoc false
@@ -208,7 +208,7 @@ defmodule StatifierPersistence.Ecto.V06RenameTest do
     # database that has never held the retired names.
     #
     # sabotage: gave V06's `down/1` back its rename (restored the body the
-    # RQ-SF041-25 ruling removed) -> red here, V03's arm raised
+    # operator's 2026-09-13 ruling removed) -> red here, V03's arm raised
     # `index "kx_v06f_executions_metadata_gin_index" does not exist`
     # because V06 had just renamed it away. Verified red, reverted from a
     # copy.
@@ -309,8 +309,8 @@ defmodule StatifierPersistence.Ecto.V06RenameTest do
 
     # V06's `down/1` is a no-op, so `down(for: Host, version: 6)` on an
     # upgraded install leaves the execution names standing rather than
-    # restoring the retired ones (RQ-SF041-25). Rolling back below 0.12.0
-    # code is unsupported; the way down is the drop below.
+    # restoring the retired ones (ruled by the operator, 2026-09-13).
+    # Rolling back below 0.12.0 code is unsupported; the way down is the drop below.
     #
     # sabotage: gave V06's `down/1` back its rename -> red here, the
     # executions table was gone and `kx_v06u_runs` was back. Verified red,

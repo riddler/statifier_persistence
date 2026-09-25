@@ -483,7 +483,7 @@ defmodule StatifierPersistence.DriverFanoutTest do
     # The child's own drive reads the tag off its final's <donedata>,
     # persists :failed with "failed_final", and the driver's automatic
     # path answers the parent - which is what makes first_error fire.
-    # Campaign 031's fan-out proof had to translate this host-side; that
+    # An earlier fan-out proof had to translate this host-side; that
     # translation is what this case makes unnecessary.
     #
     # sabotage: in Executions.execution_status/2, drop the failure_classed_final?/1

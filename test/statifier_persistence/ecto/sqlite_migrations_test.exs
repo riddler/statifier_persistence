@@ -173,7 +173,7 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
   # failing on. `mix ecto.rollback --all` runs their `down`s newest-first,
   # one `Migrations.down/1` call per step, so no single call can see where
   # the rollback ends - the reason V06's `down/1` is a no-op rather than a
-  # conditional rename (RQ-SF041-25).
+  # conditional rename (ruled by the operator, 2026-09-13).
   for version <- 1..6 do
     defmodule Module.concat(__MODULE__, "MigratePerVersionV0#{version}") do
       @moduledoc false
@@ -465,8 +465,8 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
       assert rows("sq_up_executions") == before_rows
       assert rows("sq_up_inputs") == before_inputs
 
-      # V06's `down/1` is a no-op (RQ-SF041-25), so rolling this migration
-      # back leaves the execution names standing: a downgrade to
+      # V06's `down/1` is a no-op (ruled by the operator, 2026-09-13), so
+      # rolling this migration back leaves the execution names standing: a downgrade to
       # pre-`0.12.0` code is unsupported, and the way down is the drop the
       # cases below exercise, not a rename.
       :ok = migrate_capped(:down, @v06_version, MigrateSqliteV06)
@@ -715,8 +715,9 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
     end
   end
 
-  # sp-y7n / RQ-SF035-9, the SQLite half of the pair whose Postgres half is
-  # `StatifierPersistence.DriverSubchartEctoTest`. It asserts something
+  # sp-y7n (ruled by the operator, 2026-09-06), the SQLite half of the
+  # pair whose Postgres half is `StatifierPersistence.DriverSubchartEctoTest`.
+  # It asserts something
   # different from that half, because this backend can hold no linkage at
   # all: ADR-0008 decision 2 puts a child's parent in execution `metadata`, and
   # `Storage.Ecto` declares metadata support only on Postgres, so the

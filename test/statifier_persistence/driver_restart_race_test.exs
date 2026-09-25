@@ -1,8 +1,8 @@
 defmodule StatifierPersistence.DriverRestartRaceTest do
   @moduledoc """
   The cancel-versus-completion race across a restart: the acceptance
-  criterion the async-invocation seam was granted on (sp-e50, campaign-024
-  ruling R-c).
+  criterion the async-invocation seam was granted on (sp-e50, ruled by the
+  operator, 2026-09-01).
 
   A call dispatched `:pending` outlives the process that started it. Two
   things can then happen to it in either order, on any node: the chart can
