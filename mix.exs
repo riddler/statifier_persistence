@@ -33,7 +33,12 @@ defmodule StatifierPersistence.MixProject do
     ]
   end
 
-  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  # `test/dialyzer/` holds callers written the way a host writes them, for
+  # the Dialyzer stage to read: `mix dialyzer` runs in `:dev`, so it is
+  # compiled there as well as in `:test`. Never in `:prod`, and never in the
+  # package's `files:`.
+  defp elixirc_paths(:test), do: ["lib", "test/support", "test/dialyzer"]
+  defp elixirc_paths(:dev), do: ["lib", "test/dialyzer"]
   defp elixirc_paths(_), do: ["lib"]
 
   # Hexdocs configuration. These paths are read off the publisher's disk at
