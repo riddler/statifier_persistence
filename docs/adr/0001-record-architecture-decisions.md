@@ -17,7 +17,7 @@ sequentially, three sections (Context, Decision, Consequences), indexed in
 `docs/adr/README.md`. Citing a number ends re-argument; amending is
 explicit. Cross-repo citations carry the owning repo's beads prefix
 (`st-ADR-0052`); a bare `ADR-NNNN` is always this repository's own
-(umbrella decision D8).
+(a family-wide convention).
 
 ## Decision
 

@@ -62,7 +62,7 @@ service container in CI. Rejected alternatives:
   migration suite proven against a database no host will run proves
   little.
 
-  **Note, 2026-09-06 (campaign-033, `sp-kka`):** "a database no host will
+  **Note, 2026-09-06 (`sp-kka`):** "a database no host will
   run" has been overtaken by events and should be read as scoped to the
   *harness* question this decision answers, not as a claim about hosts.
   `statifier_examples`, this family's reference embedder, runs SQLite by
@@ -77,7 +77,7 @@ service container in CI. Rejected alternatives:
   The gap between "hosts do run it" and "the lock callback cannot be honored
   there" is what `sp-msr` documents: a first-class decline-the-callback
   opt-out plus the conformance suite tagging the lock pair Postgres-only
-  (fleet ruling RQ-033-8, 2026-09-06). This Note adds a scope; it removes
+  (ruled by the operator, 2026-09-06). This Note adds a scope; it removes
   nothing and changes no decision.
 
 - An in-memory fake: the conformance suite exists to test adapters

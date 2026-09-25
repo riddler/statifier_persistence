@@ -107,7 +107,7 @@ the way the top of this file says.
    from a campaign journal, which is written in UTC. The two differ for part
    of every day, and a section dated a day ahead of the commit that wrote it
    reads as a backdated release. Take the date from `date +%F` at the moment
-   you write the heading (fleet ruling RQ-033-15, 2026-09-06).
+   you write the heading (ruled by the operator, 2026-09-06).
 3. Write a short lead paragraph between the heading and the first `### `
    sub-heading, saying what the release is. Unlike some sibling repos this one
    carries a lead on **every** released section, from `0.1.0` on, so it is the

@@ -1061,7 +1061,7 @@ puts there, not in `lib/`.
 **File**: `test/statifier_persistence/driver_restart_race_test.exs`
 **Changes**: the moduledoc gains a paragraph naming the two durable-subchart
 scenarios and citing ADR-0008 decision 5 as their source, the way the existing
-text cites sp-e50 and campaign-024 ruling R-c.
+text cites sp-e50 and the operator's ruling.
 
 #### 3. Changelog
 

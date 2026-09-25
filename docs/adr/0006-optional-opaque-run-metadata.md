@@ -1,6 +1,6 @@
 # ADR-0006: Optional opaque run metadata: identities only, refusable by an adapter
 
-Status: accepted (2026-08-29, accepted under the operator campaign-015 direction-agent gate grant, PR 27)
+Status: accepted (2026-08-29, accepted under the operator's direction-agent gate grant, PR 27)
 
 ## Context
 
