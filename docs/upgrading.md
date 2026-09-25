@@ -1,7 +1,7 @@
-# Upgrading a host from 0.13 to 0.18
+# Upgrading a host from 0.13 to 0.19
 
 This page says what a host changes to move `statifier_persistence` from
-0.13.0 to 0.18.0, one minor at a time. A host here is the code that
+0.13.0 to 0.19.0, one minor at a time. A host here is the code that
 embeds the package: the module that calls `use StatifierPersistence.Ecto`,
 the migrations it runs, the options it passes to
 `StatifierPersistence.Executions` and `StatifierPersistence.Driver`, the
@@ -12,8 +12,9 @@ nothing.
 
 Take the minors in order, and move the pin with each one, as the README
 recommends: `{:statifier_persistence, "~> 0.14.0"}`, then `"~> 0.15.0"`,
-then `"~> 0.16.0"`, then `"~> 0.17.0"`, then `"~> 0.18.0"`. The `statifier`
-floor stays `~> 2.6` through 0.17.0; 0.18.0 moves it to `~> 2.9`.
+then `"~> 0.16.0"`, then `"~> 0.17.0"`, then `"~> 0.18.0"`, then
+`"~> 0.19.0"`. The `statifier` floor stays `~> 2.6` through 0.17.0;
+0.18.0 moves it to `~> 2.9`, and 0.19.0 keeps it there.
 
 ## Before you start: the database is at V07
 
@@ -31,7 +32,7 @@ with its own migration,
 and an install still short of V06 follows the V06 ordering rule in the
 `StatifierPersistence.Ecto.Migrations` documentation first. No release before
 0.17.0 adds a migration; 0.17.0 does (V08, under "0.16 to 0.17"), and
-0.18.0 adds none.
+0.18.0 and 0.19.0 add none.
 
 ## 0.13 to 0.14
 
@@ -235,3 +236,30 @@ Schema: **NONE**. 0.18.0 requires `statifier ~> 2.9`.
   `nil` on a stop that delivered no event or returned no position.
   **NONE** is required; a handler that matches the stop's metadata as a
   closed map accepts the new key.
+
+## 0.18 to 0.19
+
+Schema: **NONE**. The `statifier` floor stays `~> 2.9`.
+
+- **If you wrote a storage adapter of your own that prunes**, move its
+  optional `prune_executions/3` to
+  `c:StatifierPersistence.Storage.Adapter.prune_executions/4`. The fourth
+  argument is the scope, `[]` when the host gave none, and an adapter
+  still exporting only `prune_executions/3` is no longer counted as
+  declaring pruning: `StatifierPersistence.Retention.prune/3` answers
+  `{:error, :execution_pruning_unsupported}` for it. With `[]`, select
+  the batch as before. An adapter that can confine a batch to the scope's
+  column equalities carries them on every statement the batch runs; one
+  that cannot answers `{:error, :unscoped_adapter}` for any scope that is
+  not `[]` and clears nothing. A host whose adapters are the two this
+  package ships: **NONE**.
+- **If you match `t:StatifierPersistence.Storage.Adapter.error/0`
+  exhaustively**, add a clause for `:unscoped_adapter`, or a catch-all.
+  It is the refusal of a scope from an adapter that cannot confine a
+  batch to one partition; the in-memory adapter answers it for any
+  `scope:`.
+- `StatifierPersistence.Retention.prune/3` gains a `scope:` option that
+  confines a prune to the rows holding its column equalities, over
+  columns you placed with `:leading_columns` ("Pruning one partition" in
+  [`docs/retention.md`](retention.md#pruning-one-partition)). Left out,
+  the prune covers the whole store as before: **NONE** is required.
