@@ -463,7 +463,12 @@ beside the caller holding the child's result; delivering the answer again
 through `Driver.answer_parent/3` once the parent leaves the arm is the
 host's. For a fan-out the children's recorded answers stay on their own
 executions, and answering again through any one child settles the
-invocation again (the ADR-0009 sp-6neq amendment).
+invocation again (the ADR-0009 sp-6neq amendment). A single child's answer
+is recorded on its own execution too, before the parent's door is tried,
+so a host that no longer holds it reads it back:
+`StatifierPersistence.Execution.from_record/1` over the child's fetched
+record carries it as `donedata`, and a failed child's `failure` was always
+on the record (ADR-0008's 2026-09-24 Amendment).
 
 Two more `delivery` values say the answer never reached a door at all. The
 automatic answer, and `Driver.resolve_and_answer_parent/3` with a
@@ -491,7 +496,12 @@ surface those answers appear on.
 
 `:settled` fires once per decision the settlement section reaches, and not
 at all for a read that failed before reaching one. `decision` is `:answer`
-or `:not_yet`. The four tallies are read off the same states the decision
+or `:not_yet`, and it is the settlement's decision, not the parent's
+answer to it: `:answer` says every index is settled and the assembled list
+goes to the parent's door, and a parked parent that then refuses the list
+still reports `:answer` here. What the door answered is the `delivery` of
+the `:answered` event that follows (ADR-0008's 2026-09-24 Amendment). The
+four tallies are read off the same states the decision
 was made from, the `first_error` cancels included, and `unstarted` is the
 indexes with no execution of their own at all - which is what tells a
 fan-out still starting from one that is stuck. They partition `child_count` only

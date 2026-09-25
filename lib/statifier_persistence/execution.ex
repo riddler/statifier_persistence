@@ -36,11 +36,17 @@ defmodule StatifierPersistence.Execution do
   written before the field existed - builds a struct whose `ended_at` is
   `nil`.
 
-  `donedata` is always `nil` here: a stored record carries no donedata
-  (ADR-0008 decision 3) - a position that has reached a final state has no
-  configuration left to carry it, so it exists only on the step that
-  produced it, via `StatifierPersistence.Executions`' own construction of this
-  struct.
+  `donedata` is the execution's own recorded answer when the record carries
+  one: the `donedata` of a `{:done, donedata}` answer in its `outcome_blob`,
+  which `StatifierPersistence.Driver` records for a durable subchart's
+  child: a fan-out child's by its settlement, a single child's before its
+  parent's door is tried (ADR-0008's 2026-09-24 Amendment). It is `nil` for
+  every other record: one with no recorded answer, which is every execution
+  that is not such a child and every child that reached its terminal status
+  before its answer was recorded, and one whose recorded answer is a
+  failure. A position that has reached a final state has no configuration
+  left to carry donedata, so the recorded answer is the only place a stored
+  record keeps it.
   """
   @spec from_record(Adapter.execution_record()) :: t()
   def from_record(
@@ -56,8 +62,21 @@ defmodule StatifierPersistence.Execution do
       status: status,
       content_hash: content_hash,
       failure: failure,
-      donedata: nil,
+      donedata: donedata(Map.get(record, :outcome_blob)),
       ended_at: Map.get(record, :ended_at)
     }
+  end
+
+  # The recorded answer is `StatifierPersistence.Driver`'s encoding, the
+  # `:erlang.term_to_binary/1` of `{:done, donedata}` or `{:failed,
+  # failure}`; only the first carries donedata.
+  @spec donedata(binary() | nil) :: term() | nil
+  defp donedata(nil), do: nil
+
+  defp donedata(outcome_blob) when is_binary(outcome_blob) do
+    case :erlang.binary_to_term(outcome_blob) do
+      {:done, donedata} -> donedata
+      _failed -> nil
+    end
   end
 end

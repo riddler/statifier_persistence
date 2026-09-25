@@ -638,6 +638,23 @@ defmodule StatifierPersistence.Driver do
   answering a fan-out's parent with one child's donedata would complete
   the whole map block on the first child to finish.
 
+  A **single** child's answer is recorded on the child's own execution
+  record before the parent's door is tried, so the answer outlives a door
+  that refused it. It is recorded once: only when the child's stored
+  status is the terminal status the answer names (`:completed` for
+  `{:done, _}`, `:failed` for `{:failed, _}`), only when the record holds
+  no answer yet, and only on an adapter that stores one
+  (`StatifierPersistence.Storage.execution_outcome_supported?/1`). A write
+  that fails does not stop the answer. `StatifierPersistence.Execution.from_record/1`
+  reads a recorded `{:done, donedata}` back as `donedata`, so a host
+  delivering again fetches the child's record and answers through this
+  function with `{:done, execution.donedata}`, or `{:failed, reason:
+  execution.failure}` for a failed child, whose `failure` was always on
+  the record. A child that reached its terminal status before its answer
+  was recorded here holds none, and its record reads `donedata: nil`
+  exactly as before; its fetched record's `outcome_blob` is `nil`, and
+  delivering its answer again needs the answer the host held.
+
   Public so a host with no `chart_resolver:` can call it explicitly with a
   driver built over the parent's own chart - the same construction the
   automatic path (wired into `create/3`, `send_event/4`, `done_invocation/5`
@@ -664,6 +681,7 @@ defmodule StatifierPersistence.Driver do
       when is_binary(child_execution_id) do
     case parent_link(driver.store, child_execution_id) do
       {:ok, %Linkage{child_count: nil} = linkage} ->
+        record_single_answer(driver, child_execution_id, donedata_or_failure)
         result = respond_to_parent(driver, linkage, donedata_or_failure)
         report_answered(child_execution_id, linkage, donedata_or_failure, result)
         result
@@ -706,7 +724,10 @@ defmodule StatifierPersistence.Driver do
   never reached - its own record does not fetch, or the resolver does not
   return its chart - is reported on `[:statifier_persistence, :child,
   :answered]`, whose `delivery` is `:parent_unfetched` or
-  `:parent_chart_unresolved` (`docs/telemetry.md`).
+  `:parent_chart_unresolved` (`docs/telemetry.md`). A single child's answer
+  is still recorded on its own execution record then, under the same
+  conditions `answer_parent/3` records it, so it can be delivered again
+  once the parent can be reached.
   """
   @spec resolve_and_answer_parent(
           driver :: t(),
@@ -1133,7 +1154,9 @@ defmodule StatifierPersistence.Driver do
   end
 
   # The payload is an opaque blob to storage, exactly as a position is, and
-  # this module is the only party that encodes or decodes one. A donedata
+  # this module is the only party that encodes one;
+  # `StatifierPersistence.Execution.from_record/1` is the one other party
+  # that decodes one, for the `donedata` it builds. A donedata
   # term is whatever the chart's author put in it, so the encoding has to
   # be total over Elixir terms rather than JSON-shaped.
   @spec encode_outcome({:done, term()} | {:failed, keyword()}) :: binary()
@@ -1440,7 +1463,7 @@ defmodule StatifierPersistence.Driver do
         answer_resolved_chart(driver, linkage, execution_id, payload, parent_record)
 
       {:error, _reason} ->
-        report_unreached(execution_id, linkage, payload, :parent_unfetched)
+        unreached(driver, linkage, execution_id, payload, :parent_unfetched)
     end
 
     :ok
@@ -1459,11 +1482,69 @@ defmodule StatifierPersistence.Driver do
         answer_parent(%{driver | machine: parent_machine}, execution_id, payload)
 
       _error ->
-        report_unreached(execution_id, linkage, payload, :parent_chart_unresolved)
+        unreached(driver, linkage, execution_id, payload, :parent_chart_unresolved)
     end
 
     :ok
   end
+
+  # A parent the answer never reached is the other case a host has to
+  # deliver again, so a single child records its answer here too, exactly
+  # as `answer_parent/3` does before the door. A fan-out child records
+  # nothing here: its answer is recorded by a settlement, and no
+  # settlement ran.
+  @spec unreached(
+          t(),
+          Linkage.t(),
+          Executions.execution_id(),
+          {:done, term()} | {:failed, keyword()},
+          :parent_unfetched | :parent_chart_unresolved
+        ) :: :ok
+  defp unreached(driver, %Linkage{child_count: nil} = linkage, execution_id, payload, delivery) do
+    record_single_answer(driver, execution_id, payload)
+    report_unreached(execution_id, linkage, payload, delivery)
+  end
+
+  defp unreached(_driver, %Linkage{} = linkage, execution_id, payload, delivery),
+    do: report_unreached(execution_id, linkage, payload, delivery)
+
+  # A single child's own answer, kept on its own execution record in the
+  # column a fan-out child's is kept in (`record_outcome/3`), so that an
+  # answer a parent refused, or never received, can be read back from the
+  # child's terminal record and delivered again (`answer_parent/3`'s doc).
+  #
+  # Unlike `record_outcome/3` it derives no status: it writes only when the
+  # stored status already is the terminal status the answer names, and
+  # re-states that status and its `failure` as stored, so an answer handed
+  # to `answer_parent/3` for a child that is not terminal, or not terminal
+  # that way, writes nothing. It writes only when no answer is recorded
+  # yet, so a host delivering again rewrites nothing. The answer itself
+  # goes to the parent's door whatever happened here, which is why a
+  # failed write is not returned.
+  @spec record_single_answer(
+          t(),
+          Executions.execution_id(),
+          {:done, term()} | {:failed, keyword()}
+        ) ::
+          :ok
+  defp record_single_answer(driver, child_execution_id, payload) do
+    with true <- Storage.execution_outcome_supported?(driver.store),
+         {:ok, %{outcome_blob: nil, status: status} = record} <-
+           Storage.fetch_execution(driver.store, child_execution_id),
+         true <- answer_names?(payload, status) do
+      Storage.update_execution_status(driver.store, child_execution_id, status,
+        failure: record.failure,
+        outcome_blob: encode_outcome(payload)
+      )
+    end
+
+    :ok
+  end
+
+  @spec answer_names?({:done, term()} | {:failed, keyword()}, Adapter.execution_status()) ::
+          boolean()
+  defp answer_names?({:done, _donedata}, status), do: status == :completed
+  defp answer_names?({:failed, _failure}, status), do: status == :failed
 
   # Both doors, which differ only in the answer they carry. The event is
   # built by a `t:StatifierPersistence.Executions.event_builder/0` rather than
