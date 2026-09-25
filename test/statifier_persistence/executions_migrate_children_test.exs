@@ -17,6 +17,11 @@ defmodule StatifierPersistence.ExecutionsMigrateChildrenTest do
   carries every invocation id across unchanged or is refused, so the
   parent's own position answers whether the child still resolves: no child
   row is read and no child's lock is taken.
+
+  The child itself is not `migrate/4`'s to move: it carries a linkage, so
+  `migrate/4` refuses it and writes nothing, and `migrate_tree/4` with the
+  child as the root moves it with its linkage pin (ADR-0015's 2026-09-24
+  Amendment).
   """
 
   use ExUnit.Case,
@@ -73,6 +78,18 @@ defmodule StatifierPersistence.ExecutionsMigrateChildrenTest do
   @pickup """
   <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="at_desk">
     <state id="at_desk">
+      <transition event="copy.collected" target="collected"/>
+    </state>
+    <final id="collected">
+      <donedata><content expr="'central'"/></donedata>
+    </final>
+  </scxml>
+  """
+
+  # The pickup after its own edit: `at_desk` is renamed `at_branch_desk`.
+  @pickup_after """
+  <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="at_branch_desk">
+    <state id="at_branch_desk">
       <transition event="copy.collected" target="collected"/>
     </state>
     <final id="collected">
@@ -189,6 +206,16 @@ defmodule StatifierPersistence.ExecutionsMigrateChildrenTest do
     end)
   end
 
+  # migrate/4 on the pickup child itself, with its own plan.
+  defp migrate_child(ctx, opts \\ []) do
+    Executions.migrate(
+      ctx.store,
+      ctx.child_id,
+      ctx.child_plan,
+      [from_machine: ctx.pickup_machine, to_machine: ctx.pickup_after] ++ opts
+    )
+  end
+
   describe "a hold whose pickup is a live durable child" do
     # sabotage: had repin/5 (executions.ex) cancel the parent's children
     # through cascade_cancel/3 with Linkage.parent_match/1 after its write
@@ -280,6 +307,96 @@ defmodule StatifierPersistence.ExecutionsMigrateChildrenTest do
 
       assert stored(ctx, @parent_id) == %{parent_before | status: :needs_migration}
       assert stored(ctx, ctx.child_id) == child_before
+    end
+  end
+
+  describe "migrate/4 on the pickup child, which carries a linkage" do
+    setup ctx do
+      {:ok, pickup_after} = Statifier.compile(@pickup_after)
+      :ok = Storage.save_chart(ctx.store, pickup_after, @pickup_after)
+      pickup_hash = ctx.pickup_machine.identity.content_hash
+      after_hash = pickup_after.identity.content_hash
+
+      {:ok, plan} =
+        Plan.new(from: pickup_hash, to: after_hash, states: %{"at_desk" => "at_branch_desk"})
+
+      %{pickup_after: pickup_after, child_plan: plan, after_hash: after_hash}
+    end
+
+    # sabotage: dropped check_unlinked/1 from migrate_tail/6
+    # (executions.ex) -> red over both adapters, this test and the next:
+    # the child migrated, answering {:ok, execution, migrated}. Verified
+    # red, reverted from a copy.
+    test "is refused with {:linked, execution}, and neither row changes", ctx do
+      {parent_before, child_before} = waiting_hold(ctx)
+
+      assert {:error, {:linked, execution}} = migrate_child(ctx)
+      assert execution.execution_id == ctx.child_id
+      assert execution.status == :active
+      assert execution.content_hash == ctx.pickup_machine.identity.content_hash
+
+      assert stored(ctx, ctx.child_id) == child_before
+      assert stored(ctx, @parent_id) == parent_before
+    end
+
+    # sabotage: had migrate_tail/6 (executions.ex) hand check_unlinked/1's
+    # refusal to refuse/4 -> red over both adapters: the answer was
+    # {:parked, {:linked, _}}, the child written :needs_migration.
+    # Verified red, reverted from a copy.
+    test "is refused under on_failure: :park too, and parks nothing", ctx do
+      {parent_before, child_before} = waiting_hold(ctx)
+
+      assert {:error, {:linked, _execution}} = migrate_child(ctx, on_failure: :park)
+
+      assert stored(ctx, ctx.child_id) == child_before
+      assert stored(ctx, @parent_id) == parent_before
+    end
+
+    # sabotage: moved check_unlinked/1 after check_record/2 in
+    # migrate_tail/6 (executions.ex) -> red over both adapters: the
+    # finished child answered {:terminal_execution, _}. Verified red,
+    # reverted from a copy.
+    test "a finished child answers the same refusal, before the terminal check", ctx do
+      waiting_hold(ctx)
+
+      {:ok, _child, _ms} =
+        ctx
+        |> driver(ctx.pickup_machine)
+        |> Driver.send_event(ctx.child_id, Event.external("copy.collected"))
+
+      child_before = stored(ctx, ctx.child_id)
+      assert child_before.status == :completed
+
+      assert {:error, {:linked, execution}} = migrate_child(ctx)
+      assert execution.status == :completed
+      assert stored(ctx, ctx.child_id) == child_before
+    end
+
+    # sabotage: had linkage_pin/3 (executions.ex) answer nil -> red over
+    # both adapters: the child's row moved and its linkage pin still named
+    # the old pickup chart. Verified red, reverted from a copy.
+    test "migrate_tree/4 with the child as the root moves it, and its pin follows", ctx do
+      {parent_before, _child_before} = waiting_hold(ctx)
+
+      machines = %{
+        ctx.pickup_machine.identity.content_hash => ctx.pickup_machine,
+        ctx.after_hash => ctx.pickup_after
+      }
+
+      assert {:ok, [{execution, _migrated}]} =
+               Executions.migrate_tree(ctx.store, ctx.child_id, %{ctx.child_id => ctx.child_plan},
+                 machines: machines
+               )
+
+      assert execution.content_hash == ctx.after_hash
+
+      child = stored(ctx, ctx.child_id)
+      assert child.content_hash == ctx.after_hash
+      assert {:ok, %Linkage{} = linkage} = Linkage.from_metadata(child.metadata)
+      assert linkage.content_hash == ctx.after_hash
+      assert linkage.parent_execution_id == @parent_id
+
+      assert stored(ctx, @parent_id) == parent_before
     end
   end
 end

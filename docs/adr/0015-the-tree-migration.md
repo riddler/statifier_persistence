@@ -555,3 +555,67 @@ What was re-read before the flip:
 - **The callback.** `c:write_tree_migration/2`'s doc in
   `lib/statifier_persistence/storage/adapter.ex` says a refusal decided
   before the first write is returned as it is.
+
+## Amendment (2026-09-24, sp-hpci): `migrate/4` refuses an execution that carries a linkage
+
+Status of this amendment: proposed (2026-09-24, sp-hpci). The record above
+stays accepted; this amendment is proposed until the operator accepts it.
+
+"What this record does not decide" leaves open whether `migrate/4` refuses,
+or re-routes, an execution that carries a linkage, and records that it
+re-pins such an execution's row and leaves its pin. The row then walks one
+chart while the pin names another, and the old chart stays pinned while
+the parent is `:active` (ADR-0012 decision 1). The operator ruled on
+2026-09-24 that `migrate/4` refuses. This amendment records that ruling
+and amends decision 1's sentence "`migrate/4` is unchanged by this
+record".
+
+**`migrate/4` refuses an execution that carries a linkage, and moves
+nothing.** Under the execution's exclusion, once the row is read, an
+execution whose metadata `Linkage.from_metadata/1` reads as a linkage is
+refused with `{:error, {:linked, execution}}`, `execution` the stored
+execution. The check comes before the terminal and from-chart checks, so a
+finished child answers the same refusal. Nothing is written: not the row,
+not the pin, not the position. Its code is `check_unlinked/1` in
+`lib/statifier_persistence/executions.ex`, landed with this amendment.
+
+- **It parks nothing.** The refusal is of the kind that writes nothing
+  under either `on_failure:` value, as a terminal execution is. ADR-0014's
+  arm is still reached by a refusal of the validation against the
+  execution, and a linked execution never reaches that validation.
+- **It emits no event.** A refused `migrate/4` emits none (ADR-0013
+  decision 5).
+- **The reason names the command that moves a child.** The typedoc of
+  `t:StatifierPersistence.Executions.migrate_error/0` says what
+  `{:linked, execution}` means and names `migrate_tree/4` with the child as
+  the root, which decision 1 already provides ("A child migrated on its own
+  is migrated by this command with the child as the root"). That command
+  rewrites the pin in the same unit as the row (decision 3; `linkage_pin/3`
+  in `lib/statifier_persistence/executions.ex`, read at `d72c92e`).
+- **A parent is not refused.** The linkage is stored on the child only
+  (`lib/statifier_persistence/execution/linkage.ex`, the struct, read at
+  `d72c92e`), so a parent with live children carries none, and ADR-0013
+  decision 7 still governs `migrate/4` on it. An execution that is both a
+  child and a parent carries a linkage and is refused.
+- **`migrate_tree/4` is unchanged.** Its nodes are checked by
+  `validate_node/3`, which does not ask the linkage check, so a child
+  named in `plans` moves with its pin as decision 3 says.
+
+**The error set grows.** `{:linked, Execution.t()}` is a new arm of
+`t:StatifierPersistence.Executions.migrate_error/0`, so a host that matches
+`migrate/4`'s refusals exhaustively needs a clause for it. It ships in a
+minor with a Breaking changelog line. `t:StatifierPersistence.Executions.tree_refusal/0`
+includes `migrate_error/0`, but `migrate_tree/4` never answers the arm.
+
+The tests are in
+`test/statifier_persistence/executions_migrate_children_test.exs`, under
+"migrate/4 on the pickup child, which carries a linkage", over both shipped
+adapters. `migrate/4` on the child answers `{:linked, execution}` under
+`:refuse` and under `:park`, and neither the child's stored record nor its
+parent's changes, and a finished child answers the same refusal.
+`migrate_tree/4` with the child as the root moves the child, and its
+linkage pin names the new chart.
+
+Decision 1's sentence "`migrate/4` is unchanged by this record" stays as
+written and is read as amended here. The "does not decide" entry on
+`migrate/4` and a linkage stays too, and this amendment decides it.
