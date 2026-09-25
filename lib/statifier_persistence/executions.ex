@@ -2242,7 +2242,15 @@ defmodule StatifierPersistence.Executions do
   # rather than measurements because they are dimensions of the span, not
   # quantities it measured, and `child_count` is `nil` for a single-child
   # subchart.
-  @spec step_stop_fields(execution_id(), entry(), reference(), term(), [opt()]) :: keyword()
+  #
+  # `opts` is whatever option list the entry point was handed, `keyword()`
+  # as `serialized/5` takes it, and not `[opt()]`: `fail/4` passes its own
+  # list through here, and its `driver:` is in neither `t:create_opt/0` nor
+  # `t:step_opt/0`. A narrower type here narrowed `fail/4`'s success typing
+  # below its own `keyword()` spec, so Dialyzer reported a host's
+  # `fail(store, id, reason, driver: driver)` as a call that never returns.
+  # Only `invoke_id:` and `child_count:` are read.
+  @spec step_stop_fields(execution_id(), entry(), reference(), term(), keyword()) :: keyword()
   defp step_stop_fields(execution_id, entry, span_ref, result, opts) do
     {session_id, content_hash, outcome, status, reason} = stop_shape(result)
 
