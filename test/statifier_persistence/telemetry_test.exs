@@ -36,6 +36,19 @@ defmodule StatifierPersistence.TelemetryTest do
   </scxml>
   """
 
+  # One transition "go" selects, one whose guard is always false, and
+  # nothing at all for any other event name - the three ways a delivered
+  # event can answer the step stop's `selection`.
+  @selection_source """
+  <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="a">
+      <state id="a">
+          <transition event="go" target="b"/>
+          <transition event="guarded" cond="false" target="b"/>
+      </state>
+      <state id="b"/>
+  </scxml>
+  """
+
   # An immediate <send> the executor can fail, with the error.communication
   # re-entry waiting in the target state.
   @send_error_source """
@@ -261,6 +274,7 @@ defmodule StatifierPersistence.TelemetryTest do
                :invoke_id,
                :outcome,
                :reason,
+               :selection,
                :session_id,
                :span_ref,
                :status
@@ -342,6 +356,68 @@ defmodule StatifierPersistence.TelemetryTest do
 
       {:ok, _execution} = Executions.cancel(store, "execution-2")
       assert {_m, %{entry: :cancel}} = await([:statifier_persistence, :execution, :step, :stop])
+    end
+  end
+
+  describe "the step stop's selection (the ADR-0009 sp-qrkx amendment)" do
+    # Sabotage: made selection/1 answer nil for every result - red at the
+    # first :none; an unmatched delivery was invisible without trace: true
+    # again. Answering :selected unconditionally - red at the same line.
+    test "says whether the delivered event selected a transition, with trace off",
+         %{store: store} do
+      assert_selection_reported(store)
+    end
+
+    # Sabotage: the same two mutations as the in-memory case - red.
+    test "says the same on the Ecto adapter" do
+      :ok = Sandbox.checkout(TestRepo)
+      {:ok, store} = Storage.new(Storage.Ecto, persistence: EctoHosts.Default, sandbox: true)
+      :ok = Storage.Ecto.isolate(store.opts)
+      drain()
+
+      assert_selection_reported(store)
+    end
+
+    # Sabotage: made selection/1 read `last_selection` off every result
+    # that carried a position and answer :none when it was nil - red at
+    # the :create stop; a create delivers no event and must not read as an
+    # unmatched one.
+    test "is nil on the doors that deliver no event, and on a discard", %{store: store} do
+      assert_selection_nil_without_a_round(store)
+    end
+
+    # Sabotage: the same mutation - red on the Ecto adapter too.
+    test "is nil on the same doors on the Ecto adapter" do
+      :ok = Sandbox.checkout(TestRepo)
+      {:ok, store} = Storage.new(Storage.Ecto, persistence: EctoHosts.Default, sandbox: true)
+      :ok = Storage.Ecto.isolate(store.opts)
+      drain()
+
+      assert_selection_nil_without_a_round(store)
+    end
+
+    # Sabotage: made step_stop_fields/5 pass `selection: nil` when `entry`
+    # is :answer_parent - red; the parent's own door delivered done.invoke
+    # and it selected a transition.
+    test "reports the parent's selection on the step a child answers through",
+         %{store: store} do
+      driver = subchart_driver(store, @parent_source, @child_done_source)
+      {:ok, _execution, _ms} = Driver.create(driver, "execution-1")
+      child_execution_id = Linkage.child_execution_id("execution-1", "call", 0)
+      child_driver = %{driver | machine: compile!(@child_done_source)}
+      drain()
+
+      assert {:ok, %Execution{status: :completed}, _ms} =
+               Driver.send_event(child_driver, child_execution_id, Event.external("go"))
+
+      assert {_m, meta} =
+               one(
+                 [:statifier_persistence, :execution, :step, :stop],
+                 &(&1.entry == :answer_parent)
+               )
+
+      assert meta.execution_id == "execution-1"
+      assert meta.selection == :selected
     end
   end
 
@@ -1776,6 +1852,77 @@ defmodule StatifierPersistence.TelemetryTest do
     do: term |> Tuple.to_list() |> carries_machine_state?()
 
   defp carries_machine_state?(_term), do: false
+
+  # Three deliveries to one execution created with `trace: false`, each
+  # read off its own step stop: an event no transition names, an event
+  # whose only transition's guard is false, and an event that selects.
+  defp assert_selection_reported(store) do
+    machine = compile!(@selection_source)
+
+    {:ok, _execution, _ms} =
+      Executions.create(store, "execution-1", machine,
+        executor: RecordingExecutor,
+        initialize: [trace: false]
+      )
+
+    drain()
+
+    for {name, expected} <- [{"unnamed", :none}, {"guarded", :none}, {"go", :selected}] do
+      {:ok, _execution, _ms} =
+        Executions.step(store, "execution-1", machine, Event.external(name),
+          executor: RecordingExecutor
+        )
+
+      assert {_m, meta} = await([:statifier_persistence, :execution, :step, :stop])
+      assert meta.entry == :step
+      assert meta.outcome == :ok
+      assert {name, meta.selection} == {name, expected}
+      drain()
+    end
+  end
+
+  # The doors that deliver no event - a create, a fail, a cancel - and a
+  # discard, which returns no position: each stop carries the key, as nil.
+  defp assert_selection_nil_without_a_round(store) do
+    machine = compile!(@selection_source)
+
+    {:ok, _execution, _ms} =
+      Executions.create(store, "execution-1", machine, executor: RecordingExecutor)
+
+    assert {_m, %{entry: :create} = created} =
+             await([:statifier_persistence, :execution, :step, :stop])
+
+    assert Map.fetch!(created, :selection) == nil
+
+    {:ok, _execution, _ms} =
+      Executions.create(store, "execution-2", machine, executor: RecordingExecutor)
+
+    drain()
+
+    {:ok, _execution} = Executions.fail(store, "execution-1", "operator: abandoned")
+
+    assert {_m, %{entry: :fail} = failed} =
+             await([:statifier_persistence, :execution, :step, :stop])
+
+    assert Map.fetch!(failed, :selection) == nil
+
+    {:ok, _execution} = Executions.cancel(store, "execution-2")
+
+    assert {_m, %{entry: :cancel} = cancelled} =
+             await([:statifier_persistence, :execution, :step, :stop])
+
+    assert Map.fetch!(cancelled, :selection) == nil
+
+    assert {:discarded, _execution} =
+             Executions.step(store, "execution-1", machine, Event.external("go"),
+               executor: RecordingExecutor
+             )
+
+    assert {_m, %{outcome: :discarded} = discarded} =
+             one([:statifier_persistence, :execution, :step, :stop], fn _meta -> true end)
+
+    assert Map.fetch!(discarded, :selection) == nil
+  end
 
   defp drain do
     receive do

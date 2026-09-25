@@ -59,7 +59,7 @@ defmodule StatifierPersistence.Telemetry do
   | Event | Measurements | Metadata |
   |---|---|---|
   | `[:statifier_persistence, :execution, :step, :start]` | `system_time`, `monotonic_time` | `execution_id`, `entry`, `span_ref` |
-  | `[:statifier_persistence, :execution, :step, :stop]` | `duration`, `monotonic_time` | `execution_id`, `session_id`, `content_hash`, `entry`, `outcome`, `status`, `reason`, `span_ref`, `invoke_id`, `child_count` |
+  | `[:statifier_persistence, :execution, :step, :stop]` | `duration`, `monotonic_time` | `execution_id`, `session_id`, `content_hash`, `entry`, `outcome`, `status`, `reason`, `span_ref`, `invoke_id`, `child_count`, `selection` |
   | `[:statifier_persistence, :execution, :step, :exception]` | `duration`, `monotonic_time` | `execution_id`, `entry`, `span_ref`, `kind`, `reason`, `stacktrace` |
   | `[:statifier_persistence, :execution, :step, :reentered]` | `system_time` | `execution_id`, `session_id`, `content_hash`, `name`, `origin`, `opts` |
   | `[:statifier_persistence, :execution, :lock]` | `duration`, `system_time` | `execution_id`, `strategy`, `outcome`, `reason` |
@@ -78,6 +78,18 @@ defmodule StatifierPersistence.Telemetry do
   parent's behalf, so the step span carrying a fan-out's whole assembled
   answer is recognisable as that one (the ADR-0009 sp-8wv amendment).
   `child_count` is `nil` for a single-child subchart.
+
+  `selection` on the stop says whether the event the step delivered
+  selected a transition: `:selected` when it selected at least one and
+  `:none` when it selected none, whether or not the position was created
+  with `trace: true`. It is read off the returned position's
+  `t:Statifier.MachineState.last_selection/0`, so it is set on every
+  `:ok` step whose event ran an external round - `:step`,
+  `:done_invocation`, `:failed_invocation` and `:answer_parent` - and
+  `nil` on a `:create`, `:fail` or `:cancel` stop, which delivers no
+  event, and on every `:discarded` or `:error` stop. `:none` does not say
+  why: an event no transition names and one whose every guard was false
+  read the same (the ADR-0009 sp-qrkx amendment).
 
   `:exception` closes the span in place of `:stop` when anything inside
   the drive raises, throws or exits - a host executor, an event builder,
@@ -341,7 +353,8 @@ defmodule StatifierPersistence.Telemetry do
         reason: fields[:reason],
         span_ref: fields[:span_ref],
         invoke_id: fields[:invoke_id],
-        child_count: fields[:child_count]
+        child_count: fields[:child_count],
+        selection: fields[:selection]
       }
     )
   end

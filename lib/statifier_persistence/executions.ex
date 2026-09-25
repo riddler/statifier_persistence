@@ -2256,9 +2256,21 @@ defmodule StatifierPersistence.Executions do
       reason: reason,
       span_ref: span_ref,
       invoke_id: Keyword.get(opts, :invoke_id),
-      child_count: Keyword.get(opts, :child_count)
+      child_count: Keyword.get(opts, :child_count),
+      selection: selection(result)
     ]
   end
+
+  # Whether the event this step delivered selected a transition, read off
+  # the returned position's `last_selection` (the ADR-0009 sp-qrkx
+  # amendment). The interpreter writes it on every external round whether
+  # or not tracing is on, and nothing else in the drive writes it, so it is
+  # `:selected` or `:none` on a step whose event ran a round. A position
+  # this drive only initialized or decoded reads `nil`, and so does every
+  # return that carries no position at all.
+  @spec selection(term()) :: MachineState.last_selection()
+  defp selection({:ok, %Execution{}, %MachineState{last_selection: selection}}), do: selection
+  defp selection(_result), do: nil
 
   @spec stop_shape(term()) ::
           {String.t() | nil, String.t() | nil, :ok | :discarded | :error,

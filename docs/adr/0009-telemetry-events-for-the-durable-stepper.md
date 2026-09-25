@@ -1164,3 +1164,62 @@ clause for the new one, and a bridge that checks a hand-copied list against
 `events/0` needs the name added.
 
 No other decision moves.
+
+## Amendment (2026-09-25, sp-qrkx): the step stop says whether the delivered event selected a transition
+
+Status of this amendment: proposed (2026-09-25, sp-qrkx). The record above
+stays accepted; this amendment is proposed until the operator accepts it.
+
+A caller of `step/5` cannot tell a delivery that moved the chart from one
+that selected no transition at all unless the position was created with
+`trace: true`: the engine's selection trace reaches only the executor, and
+only when tracing is on. A router that wants to record such a delivery as
+unmatched has nothing to read. Ruled by the operator, 2026-09-24: `step/5`'s
+return stays as it is; the engine stamps the external round's selection on
+the `MachineState` it already returns, and this package adds a key to the
+step stop.
+
+This amendment is additive under decision 8: one new metadata key on an
+existing event, no rename and no removal. The event count does not move.
+
+**1. The key is `selection` on `[:statifier_persistence, :execution, :step,
+:stop]`.** Its value is `:selected`, `:none` or `nil`, read off the returned
+position's `last_selection` (`selection/1`, called from
+`step_stop_fields/5`, in this change). statifier 2.9.0 adds that field and
+writes it in `Statifier.Interpreter.handle_event/2` on every external
+round, whether or not tracing is on (`handle_event/2`, statifier 2.9.0), so
+the dependency floor moves to `~> 2.9` in this change.
+
+**2. It is set wherever a delivered event ran a round.** Every door that
+carries an event into the interpreter reaches `handle_event/2` through
+`stepped/8` (read at `cfa460c`): `:step`, `:done_invocation`,
+`:failed_invocation`, and `:answer_parent`, which is the parent's own
+`done_invocation` or `failed_invocation` door taken on a child's behalf
+(`answer_opts/1` in `lib/statifier_persistence/driver.ex`, read at
+`cfa460c`). On an `:ok` stop from any of those four, `selection` is
+`:selected` or `:none`. It is the delivered event's own answer: the
+eventless and internal rounds that fold after it do not change it, and
+neither does an `error.communication` the persist tail re-enters through
+`Statifier.Interpreter.deliver_internal/5` (the field's typedoc,
+`Statifier.MachineState`, statifier 2.9.0).
+
+**3. It is `nil` where no event ran a round.** A `:create` stop returns a
+position `Statifier.Interpreter.initialize/2` built, which reads `nil`; a
+`:fail` or `:cancel` stop returns no position (`fail_tail/3`,
+`cancel_tail/2`, read at `cfa460c`); and every `:discarded` or `:error`
+stop returns none either (`stop_shape/1`, read at `cfa460c`). A step whose
+builder declined, or that reached a terminal position, discards before any
+round. The key is `nil` there rather than absent, so the stop's key set is
+the same on every return path, as decision 5 keeps it.
+
+**4. `:none` does not say why.** An event no transition names and one
+whose every matching transition's guard was false both read `:none`. That
+is the engine's field as statifier 2.9.0 defines it, and this package
+passes it through without refinement.
+
+**5. Decision 7 holds.** The value is a closed vocabulary of three atoms and
+carries nothing from the datamodel. `step/5`'s return is unchanged: a
+caller holding the returned position can read `last_selection` from it
+directly, and the key exists for a caller that has only the event.
+
+No other decision moves.
