@@ -187,7 +187,7 @@ and closes inside it.
 | Event | Emitted from | Measurements | Metadata |
 |---|---|---|---|
 | `[:statifier_persistence, :execution, :step, :start]` | `Executions`, immediately inside `serialized/5` | `system_time`, `monotonic_time` | `execution_id`, `entry`, `span_ref` |
-| `[:statifier_persistence, :execution, :step, :stop]` | the same call, on every return path | `duration`, `monotonic_time` | `execution_id`, `session_id`, `content_hash`, `entry`, `outcome`, `status`, `reason`, `span_ref`, `invoke_id`, `child_count` |
+| `[:statifier_persistence, :execution, :step, :stop]` | the same call, on every return path | `duration`, `monotonic_time` | `execution_id`, `session_id`, `content_hash`, `entry`, `outcome`, `status`, `reason`, `span_ref`, `invoke_id`, `child_count`, `selection` |
 | `[:statifier_persistence, :execution, :step, :exception]` | the same call, in place of the stop, when the drive raises, throws or exits | `duration`, `monotonic_time` | `execution_id`, `entry`, `span_ref`, `kind`, `reason`, `stacktrace` |
 | `[:statifier_persistence, :execution, :step, :reentered]` | `Executions`, once per `error.communication` re-entry the persist tail delivered, between the start and the stop | `system_time` | `execution_id`, `session_id`, `content_hash`, `name`, `origin`, `opts` |
 | `[:statifier_persistence, :execution, :lock]` | `serialized/5`, after `strategy.with_execution/3` returns or refuses; `Executions.unpark/3`, the same way, outside any step span | `duration` (the wait, not the held time), `system_time` | `execution_id`, `strategy`, `outcome`, `reason` |
@@ -212,6 +212,24 @@ folding it into a metric dimension must narrow it first.
 `session_id` is `nil` on the stop when the step never got as far as a
 decoded position: a terminal-execution discard reads the execution record
 only, and a lock refusal or an identity refusal never loads at all.
+
+`selection` on the stop tells the caller whether the event the step
+delivered selected a transition, without `trace: true`: `:selected` when
+it selected at least one, `:none` when it selected none. It is read off
+the returned position's `last_selection`
+(`t:Statifier.MachineState.last_selection/0`, statifier 2.9), which the
+interpreter writes on every external round whether or not tracing is on.
+It is set on every `:ok` stop whose step delivered an event - `entry`
+`:step`, `:done_invocation`, `:failed_invocation` or `:answer_parent` - and
+it is the delivered event's own answer: the eventless and internal rounds
+that follow in the same macrostep, and an `error.communication` the
+persist tail re-enters, do not change it. It is `nil` on a `:create`,
+`:fail` or `:cancel` stop, where no event is delivered, and on every
+`:discarded` or `:error` stop, which returns no position. `:none` does not
+say why nothing was selected: an event no transition names and one whose
+every matching guard was false read the same. `step/5`'s return value is
+unchanged; a caller holding the returned position can read
+`last_selection` from it directly.
 
 A step span closes exactly once: with `:stop` on a return, or with
 `:exception` when anything inside the drive raises, throws or exits - the
