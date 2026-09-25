@@ -932,6 +932,11 @@ defmodule StatifierPersistence.Executions do
   - `{:pin_source_failed, {module, reason}}` - a pin source did not answer
     (`t:StatifierPersistence.PinSource.reason/0`), the same arm
     `retire_chart/4` answers.
+  - `{:linked, execution}` - the execution carries a linkage: it is a
+    durable child of another execution, and its linkage pins the chart it
+    walks. `migrate/4` moves no child; `migrate_tree/4` with the child as
+    the root moves it and its pin together (ADR-0015's 2026-09-24
+    Amendment). Only `migrate/4` answers it.
   - `{:terminal_execution, execution}` - the execution is `:completed`,
     `:failed` or `:cancelled`.
   - `{:not_on_from_chart, stored_content_hash, plan_from}` - the execution
@@ -944,6 +949,7 @@ defmodule StatifierPersistence.Executions do
   @type migrate_error ::
           {:invalid_plan, [Plan.finding()]}
           | {:no_pin_source, [Plan.state_id() | non_neg_integer()]}
+          | {:linked, Execution.t()}
           | {:terminal_execution, Execution.t()}
           | {:not_on_from_chart, Adapter.content_hash(), Adapter.content_hash()}
           | {:migration_refused, [migration_finding()]}
@@ -1017,8 +1023,13 @@ defmodule StatifierPersistence.Executions do
   and no child's lock is taken. Under `on_failure: :park` a refusal parks
   the parent only.
 
-  Migrating a child together with its linkage pin, or a tree of
-  executions together, is `migrate_tree/4`'s (ADR-0015).
+  A durable child is not this function's to move. An execution that
+  carries a linkage is refused with `{:linked, execution}` and nothing is
+  written, under either `on_failure:`: its row and its linkage pin name
+  one chart, and this function would re-pin the row alone. Migrating a
+  child together with its linkage pin, or a tree of executions together,
+  is `migrate_tree/4`'s, with the child as the root for a child moved on
+  its own (ADR-0015 and its 2026-09-24 Amendment).
 
   ## What it does
 
@@ -1027,9 +1038,10 @@ defmodule StatifierPersistence.Executions do
   (decision 3, static); a tombstoned `to` hash is refused; a plan that
   leaves unmapped or drops a state that could own a timer is refused when
   no pin source is supplied; then, under the execution's serialization,
-  the execution is read and refused if terminal or stored on another chart
-  than the plan's `from`; the pin sources are asked when the plan puts a
-  state that could own a timer at risk; its position is loaded
+  the execution is read and refused if it carries a linkage, is terminal,
+  or is stored on another chart than the plan's `from`; the pin sources
+  are asked when the plan puts a state that could own a timer at risk; its
+  position is loaded
   with the from machine through `StatifierPersistence.Storage.load_execution_position/3`;
   `Statifier.Position.export/1` translates it; the export is checked
   against the plan and transformed (decisions 2 and 3); and
@@ -1057,10 +1069,11 @@ defmodule StatifierPersistence.Executions do
     its position, content hash, identity, metadata and input log stay as
     they were, on the from chart (ADR-0014 decision 1). Every other refusal
     writes nothing under either value: a static one, a tombstoned `to`
-    hash, a missing pin source, a lock that could not be taken, a terminal
-    execution, one stored on another chart, and a pin source that did not
-    answer. The missing pin source and the source that did not answer are
-    ADR-0013's 2026-09-23 Amendment to decisions 3 and 4.
+    hash, a missing pin source, a lock that could not be taken, an
+    execution that carries a linkage, a terminal execution, one stored on
+    another chart, and a pin source that did not answer. The missing pin
+    source and the source that did not answer are ADR-0013's 2026-09-23
+    Amendment to decisions 3 and 4.
 
   A `:needs_migration` execution is migrated as an `:active` one is, and a
   successful migration writes it back at `:active` (ADR-0014 decision 3).
@@ -1182,8 +1195,21 @@ defmodule StatifierPersistence.Executions do
           | {:error, migrate_error()}
   defp migrate_tail(store, execution_id, plan, machines, timers, on_failure) do
     with {:ok, record} <- Storage.fetch_execution(store, execution_id),
+         :ok <- check_unlinked(record),
          :ok <- check_record(record, plan) do
       migrate_loaded(store, record, plan, machines, timers, on_failure)
+    end
+  end
+
+  # ADR-0015's 2026-09-24 Amendment: an execution that carries a linkage
+  # is refused and parks nothing, because re-pinning its row would leave
+  # its linkage pin on the old chart. `migrate_tree/4` moves both, and
+  # does not ask this check of its nodes.
+  @spec check_unlinked(Adapter.execution_record()) :: :ok | {:error, migrate_error()}
+  defp check_unlinked(record) do
+    case Linkage.from_metadata(record.metadata) do
+      {:ok, %Linkage{}} -> {:error, {:linked, Execution.from_record(record)}}
+      :no_linkage -> :ok
     end
   end
 
