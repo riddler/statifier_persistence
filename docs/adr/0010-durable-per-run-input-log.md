@@ -662,3 +662,55 @@ after V06 (`lib/statifier_persistence/ecto/migrations/v06.ex:2`, read at
 `71537dc`), and the reader is `StatifierPersistence.Executions.inputs/2`
 (`lib/statifier_persistence/executions.ex:720`, read at `71537dc`). The
 file name keeps `per-run` because a file name is a cite target.
+
+## Note (2026-09-25, sp-feo): the input log is mandatory for every Ecto host
+
+Pure addition: nothing above is edited.
+
+**Ruled by the operator on 2026-09-22: a host that stores through
+`StatifierPersistence.Storage.Ecto` keeps the input log, and cannot decline
+it.** This answers the open end of decision 9's `sp-b0g` Note, which named a
+declaration at `init/1` as the fix if a host ever wanted no log. That
+declaration is not added. `Storage.Ecto.supports_input_log?/1` stays
+unconditionally true (`def supports_input_log?(_opts), do: true`,
+`lib/statifier_persistence/storage/ecto.ex:1002`, read at `453f630`), the V05
+inputs table stays required on every Ecto host, and `:input_log_cap` stays
+the only knob the adapter's `init/1` takes for the log (the
+`:input_log_cap` bullet of the `Storage.Ecto` moduledoc,
+`lib/statifier_persistence/storage/ecto.ex:25`, read at `453f630`).
+
+**Why: the replay door is the helper's, not the host's to decline.** The
+log exists so that a persisted execution can be replayed (the first bullet
+under Consequences), and the ordering a replay depends on is known only
+inside the exclusion this package holds (decision 1). The package's
+execution helper writes the log at its one write site (the private
+`append_input/4` in `lib/statifier_persistence/executions.ex:2466`, read at
+`453f630`) and reads it back through `Executions.inputs/2`
+(`lib/statifier_persistence/executions.ex:1879`, read at `453f630`). A
+per-host switch on the in-package adapter would make that door open for some
+Ecto hosts and shut for others, with nothing in the execution itself to say
+which. Keeping it unconditional gives three things:
+
+- **One code path for every Ecto host.** Every execution stored through
+  `Storage.Ecto` appends the same way and reads back the same way; there is
+  no second, log-less shape of the adapter to conform and test.
+- **The migration chain stays a single call.**
+  `StatifierPersistence.Ecto.Migrations.up/1` runs every version it knows in
+  one call (`@current_version`, derived from the `@migrations` map in
+  `lib/statifier_persistence/ecto/migrations.ex:218`, read at `453f630`,
+  where the map runs from V01 through V08), and V05 is one link of that
+  chain rather than a link some hosts must know to skip.
+- **Retention is bounded on the clock the host already runs.** A host that
+  must bound how much input it keeps caps the log with `:input_log_cap`
+  (decision 6), and removes an execution's input rows on the same clock it
+  clears its position blob: `Storage.Ecto`'s `prune_executions/3` deletes a
+  batch's input log rows and nulls its position blobs in one transaction
+  (`lib/statifier_persistence/storage/ecto.ex:1089`, read at `453f630`;
+  ADR-0016), and `StatifierPersistence.Retention.prune/3` is the door a host
+  calls (`lib/statifier_persistence/retention.ex:66`, read at `453f630`).
+
+What is unchanged: an adapter of a host's own still opts in by export and
+answer, and one that keeps no log still sees no behaviour change (decision 1
+and its `sp-t12` Note); the `sp-b0g` Note's account of such a host capping
+its migration below V05 is not revisited here. This Note closes the trigger
+that Note named for the in-package adapter; it does not reopen decision 9.
