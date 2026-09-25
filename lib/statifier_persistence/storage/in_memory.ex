@@ -586,17 +586,24 @@ defmodule StatifierPersistence.Storage.InMemory do
 
   @doc """
   Prunes one batch of finished executions (the optional
-  `c:StatifierPersistence.Storage.Adapter.prune_executions/3`,
+  `c:StatifierPersistence.Storage.Adapter.prune_executions/4`,
   ADR-0016): one `Agent.get_and_update/2`, this adapter's transaction.
 
   This adapter keeps no input log (ADR-0010 decision 1), so a batch
   holds only the executions that still carry a position blob, and it
   answers `inputs: 0`.
+
+  Its records have no host columns to hold a scope, so it answers
+  `{:error, :unscoped_adapter}` for any scope that is not `[]`, and
+  clears nothing.
   """
   @impl Adapter
-  @spec prune_executions(Adapter.opts(), DateTime.t(), pos_integer()) ::
+  @spec prune_executions(Adapter.opts(), DateTime.t(), pos_integer(), Adapter.prune_scope()) ::
           {:ok, Adapter.prune_counts()} | {:error, Adapter.error()}
-  def prune_executions(opts, %DateTime{} = cutoff, limit) when is_integer(limit) and limit > 0 do
+  def prune_executions(opts, cutoff, limit, scope)
+
+  def prune_executions(opts, %DateTime{} = cutoff, limit, [])
+      when is_integer(limit) and limit > 0 do
     Agent.get_and_update(pid(opts), fn state ->
       due =
         state.executions
@@ -615,6 +622,10 @@ defmodule StatifierPersistence.Storage.InMemory do
       {{:ok, counts}, %{state | executions: executions}}
     end)
   end
+
+  def prune_executions(_opts, %DateTime{}, limit, [_ | _])
+      when is_integer(limit) and limit > 0,
+      do: {:error, :unscoped_adapter}
 
   @spec prunable?(Adapter.execution_record(), DateTime.t()) :: boolean()
   defp prunable?(%{status: status, ended_at: %DateTime{} = ended_at} = record, cutoff)

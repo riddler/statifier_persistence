@@ -248,3 +248,93 @@ What was re-read before the flip, decision by decision:
 The cost it means - a pruned execution cannot be told from an unpruned one
 by a read - is decision 9's; decision 8 is the adapter callback. The
 sentence stays as written, and this Note is how it is read.
+
+## Amendment (2026-09-25, sp-u4mc): `prune/3` takes `scope:`, and the adapter callback becomes `prune_executions/4`
+
+Status of this amendment: proposed (2026-09-25, sp-u4mc). The record above
+stays accepted; this amendment is proposed until the operator accepts it.
+
+Decision 1 prunes across the whole store. A host whose tables are
+partitioned by a column of its own - one it placed with `:leading_columns`
+on `use StatifierPersistence.Ecto` - runs its work one partition at a time,
+inside that partition's transaction, and a prune that reads or writes rows
+of every partition does not fit there. The operator ruled on 2026-09-25
+that `prune/3` gains `scope:`. This amendment records that ruling and
+amends decisions 1 and 8.
+
+What it rests on, read on `main` at `453f630`:
+
+- **The package never reads or writes a leading column.** `:leading_columns`
+  "only places the column ... the generated schemas do not declare it, so
+  the package never reads or writes it"
+  (`lib/statifier_persistence/ecto/config.ex`, moduledoc, @453f630).
+- **The prune queries are bound to the generated schemas.** The selection
+  and both writes are built over `execution_schema(opts)` and
+  `input_schema(opts)` (`lib/statifier_persistence/storage/ecto.ex`,
+  `due_executions/3` and `prune_batch/3`, @453f630), and Ecto refuses a
+  `where` on a field a schema does not declare.
+- **`execution_id` is unique on the executions table.**
+  `unique_index(executions, [:execution_id], ...)`
+  (`lib/statifier_persistence/ecto/migrations/v01.ex`, `up/1`, @453f630).
+
+**1. `prune/3` takes `scope:`, a keyword list of column equalities.** Given,
+it is threaded to every batch, and the batch clears only executions whose
+row holds every equality. Left out, the prune is decision 1's, unchanged.
+`prune/3` raises `ArgumentError` on a scope that is empty, that is not a
+keyword list, that names a column twice, or that holds a `nil` value: an
+empty scope computed by a host would prune every partition from inside
+one, and an equality with `NULL` matches no row. Its code is `scope!/1` in
+`lib/statifier_persistence/retention.ex`, landed with this amendment.
+
+**2. The scope reaches every statement of a batch.** The selection, the
+input log check inside it, the input log delete and the position blob
+update each carry the equalities, so a batch run inside one partition's
+transaction reads and writes no row of another. The update is keyed on ids
+the scoped selection chose, so on a table where `execution_id` is unique
+its equalities change no count; they are there so no statement of the
+batch reaches outside the partition.
+
+**3. The adapter callback becomes `prune_executions/4`.** The scope is its
+fourth argument, `[]` when the host gave none, typed
+`t:StatifierPersistence.Storage.Adapter.prune_scope/0`. It replaces
+`prune_executions/3` in `@optional_callbacks`, and
+`execution_pruning_supported?/1` checks for the new arity. The facade is
+`Storage.prune_executions/4`, its scope defaulting to `[]`. Decision 8's
+`prune_executions/3` and `Storage.prune_executions/3` are read as these.
+
+**4. An adapter that cannot scope says so.** It answers
+`{:error, :unscoped_adapter}` for any scope that is not `[]` and clears
+nothing; `:unscoped_adapter` is a new arm of
+`t:StatifierPersistence.Storage.Adapter.error/0`. The in-memory adapter is
+one: its records hold no column of the host's.
+
+**5. The Ecto adapter scopes by the host's leading columns and no other.**
+A scoped batch queries the executions and inputs tables by name, under the
+generated schemas' prefix, because the scope's columns are not schema
+fields; an unscoped batch reads through the schemas as before. A column
+that is not one of the host's `:leading_columns` raises `ArgumentError`
+before any statement runs. A scoped prune is the one place the package
+reads a leading column, and the `:leading_columns` documentation quoted
+above now says so; it still writes none.
+
+**6. The conformance suite proves both halves.** Its prune cases call the
+callback with `[]`, the unscoped answer the scope must not change. A new
+`prune_scope:` option on `StatifierPersistence.Testing.StorageConformance`
+names a scope inside, a scope outside and a function that places an
+execution's rows in a scope, and generates one more case: of two finished
+executions, the scoped batch clears the one inside and leaves the one
+outside whole, position and input log. The option exists because the
+suite cannot place a row in a scope itself: the package never writes a
+host's column.
+
+**It is breaking for an adapter written outside this package.** One that
+exports `prune_executions/3` is no longer counted as declaring pruning,
+and `prune/3` refuses it with `{:error, :execution_pruning_unsupported}`
+until it takes the fourth argument. A host matching
+`t:StatifierPersistence.Storage.Adapter.error/0` exhaustively needs a
+clause for `:unscoped_adapter`. It ships in a minor with a Breaking
+changelog line, and it adds no schema version.
+
+The Consequences' sentence "The conformance suite generates its prune
+cases only for an adapter that exports `prune_executions/3`" is read with
+`prune_executions/4`. The record's other lines stay as written.

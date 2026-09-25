@@ -46,8 +46,10 @@ defmodule StatifierPersistence.Ecto.Config do
       creates it, so a table that already exists - one V06 renamed on a
       database built before `0.12.0` included - keeps the columns it
       already had; the generated schemas do not declare it, so the
-      package never reads or writes it; and a default or a `NOT NULL`
-      belongs to a later migration of the host's own.
+      package never writes it, and reads it only to confine a prune to
+      the `scope:` the host passes `StatifierPersistence.Retention.prune/3`;
+      and a default or a `NOT NULL` belongs to a later migration of the
+      host's own.
     * `:timestamps_position` - where the migrations helper places
       `inserted_at` and `updated_at` in every table V01 and V05 create,
       `:trailing` (default: last in the `CREATE TABLE`, the package's

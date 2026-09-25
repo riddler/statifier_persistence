@@ -1012,9 +1012,12 @@ The option only places the column:
   to the end, and evaluate its default there and then to fill the
   existing rows - an expression such as `current_setting(...)` would
   have to resolve inside that migration.
-- **The package never reads or writes it.** The generated schemas do not
+- **The package never writes it.** The generated schemas do not
   declare the column, so every row this package inserts leaves it to the
-  column's default - `NULL` until you set one.
+  column's default - `NULL` until you set one. The one read is a prune
+  you confine to a partition with `scope:` on
+  `StatifierPersistence.Retention.prune/3` ([pruning one
+  partition](docs/retention.md#pruning-one-partition)).
 
 Two more options exist for a host that wrote these tables by hand and
 wants the helper to build exactly what it wrote:

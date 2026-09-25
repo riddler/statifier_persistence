@@ -36,6 +36,9 @@ defmodule StatifierPersistence.BootstrapMigrations do
   nothing to rename - the same two paths, on the same DDL, that
   `StatifierPersistence.Ecto.Migrations.V06` describes.
 
+  Migration 110 creates the `Scoped` host's tables, V01 to V08 but V04,
+  so its `tenant_id` leading column is placed on every table.
+
   The `Kx*` hosts are not bootstrapped here: the live migration tests
   own their DDL end to end, up and down, and prove the helper itself.
   Test-only support code.
@@ -50,7 +53,8 @@ defmodule StatifierPersistence.BootstrapMigrations do
     {20_260_906_000_106, __MODULE__.InputLogTables},
     {20_260_912_000_107, __MODULE__.ExecutionRenameTables},
     {20_260_919_000_108, __MODULE__.ChartTombstoneColumns},
-    {20_260_924_000_109, __MODULE__.ExecutionEndedAtColumns}
+    {20_260_924_000_109, __MODULE__.ExecutionEndedAtColumns},
+    {20_260_925_000_110, __MODULE__.ScopedTables}
   ]
 
   defmodule DefaultTables do
@@ -240,6 +244,27 @@ defmodule StatifierPersistence.BootstrapMigrations do
       end
 
       :ok
+    end
+  end
+
+  defmodule ScopedTables do
+    @moduledoc false
+    use Ecto.Migration
+
+    alias StatifierPersistence.Ecto.Migrations
+    alias StatifierPersistence.EctoHosts
+
+    # The scoped host's tables, created fresh so its leading column is
+    # placed, through V08 with V04 left out for the reason the moduledoc
+    # gives. `version: 8` pins the target, as migration 104 pins its own.
+    def up do
+      Migrations.up(for: EctoHosts.Scoped, version: 3)
+      Migrations.up(for: EctoHosts.Scoped, from: 5, version: 8)
+    end
+
+    def down do
+      Migrations.down(for: EctoHosts.Scoped, from: 8, version: 5)
+      Migrations.down(for: EctoHosts.Scoped, from: 3)
     end
   end
 

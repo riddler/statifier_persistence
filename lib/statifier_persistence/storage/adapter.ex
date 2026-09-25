@@ -243,7 +243,7 @@ defmodule StatifierPersistence.Storage.Adapter do
         }
 
   @typedoc """
-  What one batch of `c:prune_executions/3` cleared (ADR-0016): how many
+  What one batch of `c:prune_executions/4` cleared (ADR-0016): how many
   execution rows it selected, how many of those still held a position
   blob that it nulled, and how many input log rows it deleted.
 
@@ -256,6 +256,14 @@ defmodule StatifierPersistence.Storage.Adapter do
           position_blobs: non_neg_integer(),
           inputs: non_neg_integer()
         }
+
+  @typedoc """
+  The partition one batch of `c:prune_executions/4` is confined to
+  (ADR-0016, as amended for scoped pruning): column equalities over
+  columns the host owns, such as the Ecto layer's `:leading_columns`.
+  `[]` is no scope: the batch is selected from the whole store.
+  """
+  @type prune_scope :: [{atom(), term()}]
 
   @typedoc """
   One write of a tree migration's unit (`c:write_tree_migration/2`,
@@ -360,7 +368,10 @@ defmodule StatifierPersistence.Storage.Adapter do
   `:input_log_full` is
   `append_input/3`'s refusal past the host-declared cap, after the log has
   closed itself with a marker (ADR-0010 decision 6) - it refuses the
-  append and never the step; `{:adapter, term()}` carries a backend
+  append and never the step; `:unscoped_adapter` is
+  `prune_executions/4`'s refusal of a scope from an adapter that cannot
+  confine a batch to one partition, which clears nothing (ADR-0016, as
+  amended for scoped pruning); `{:adapter, term()}` carries a backend
   failure (a database down, a timeout) that is not this layer's to
   interpret further.
   """
@@ -377,6 +388,7 @@ defmodule StatifierPersistence.Storage.Adapter do
           | {:pinned, pin_counts()}
           | {:chart_retired, retired_info()}
           | :input_log_full
+          | :unscoped_adapter
           | {:adapter, term()}
 
   @doc """
@@ -955,7 +967,7 @@ defmodule StatifierPersistence.Storage.Adapter do
   The same opt-in-by-export shape `supports_metadata?/1` uses: an adapter
   exports it and answers `true`, the facade checks with
   `function_exported?/3`, and an adapter that does not export it sees no
-  behaviour change. `StatifierPersistence.Storage.prune_executions/3`
+  behaviour change. `StatifierPersistence.Storage.prune_executions/4`
   answers `{:error, :execution_pruning_unsupported}` for such an adapter
   without calling it.
   """
@@ -992,8 +1004,19 @@ defmodule StatifierPersistence.Storage.Adapter do
   An adapter that keeps no input log clears the position blobs alone and
   answers `inputs: 0`. `cutoff` is the host's; this layer takes no
   duration and computes no window (ADR-0012 decision 7).
+
+  `scope` confines the batch to one partition of the store
+  (`t:prune_scope/0`). With `[]` the batch is selected as above from
+  every execution. With column equalities, an execution is in the batch
+  only when its row holds every one of them too, and every statement the
+  batch runs - the selection, the input log check inside it, the input
+  log delete and the position blob update - carries the same equalities,
+  so a batch run inside one partition's transaction reads and writes no
+  row of another. An adapter that cannot confine a batch that way
+  answers `{:error, :unscoped_adapter}` for any scope that is not `[]`,
+  and clears nothing.
   """
-  @callback prune_executions(opts(), DateTime.t(), pos_integer()) ::
+  @callback prune_executions(opts(), DateTime.t(), pos_integer(), prune_scope()) ::
               {:ok, prune_counts()} | {:error, error()}
 
   @optional_callbacks isolate: 1,
@@ -1015,7 +1038,7 @@ defmodule StatifierPersistence.Storage.Adapter do
                       append_input: 3,
                       list_inputs: 2,
                       supports_execution_pruning?: 1,
-                      prune_executions: 3
+                      prune_executions: 4
 
   @doc """
   Folds one hash's counts into the shape a refusal carries

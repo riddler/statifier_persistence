@@ -43,10 +43,35 @@ row itself stays, with its status, failure, metadata, answer and
   same cutoff carries on, and a call with nothing left to do answers zeros.
 - **It needs an adapter that declares it.** Both shipped adapters do. The
   in-memory adapter keeps no input log, so it clears position blobs only.
-  An adapter of your own that does not declare the capability gets
-  `{:error, :execution_pruning_unsupported}`, and
+  An adapter of your own declares it by exporting
+  `supports_execution_pruning?/1` and `prune_executions/4`; one that does
+  not gets `{:error, :execution_pruning_unsupported}`, and
   `StatifierPersistence.Storage.execution_pruning_supported?/1` tells you
   in advance.
+
+### Pruning one partition
+
+If your tables carry a column of your own that partitions them, placed
+with `:leading_columns` on `use StatifierPersistence.Ecto`, `scope:`
+confines a prune to the rows that hold it:
+
+    StatifierPersistence.Retention.prune(store, cutoff, scope: [tenant_id: tenant_id])
+
+`scope:` is a keyword list of column equalities. Every statement each
+batch runs carries all of them: the selection, the input log check inside
+it, the input log delete and the position blob update. So a prune you run
+inside one partition's transaction reads and writes no row of another.
+
+- **The columns must be your `:leading_columns`.** The Ecto adapter raises
+  `ArgumentError` for any other column before it runs a statement.
+- **A scope is never empty and never `nil`.** `prune/3` raises on
+  `scope: []`, so a scope your code computed to nothing cannot prune every
+  partition. It also raises on a `nil` value, because an equality with
+  `NULL` matches no row. To prune across every partition, leave `scope:`
+  out.
+- **The in-memory adapter cannot scope.** Its records have no columns of
+  yours, so it answers `{:error, :unscoped_adapter}` for any `scope:` and
+  clears nothing.
 
 After a prune, `Executions.inputs/2` answers `{:ok, []}` for that
 execution, which is also what an execution that took no input answers. A

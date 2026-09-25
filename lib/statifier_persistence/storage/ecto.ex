@@ -50,7 +50,8 @@ if Code.ensure_loaded?(Ecto) do
 
     @behaviour StatifierPersistence.Storage.Adapter
 
-    import Ecto.Query, only: [exclude: 2, from: 2, subquery: 1, update: 3, where: 3]
+    import Ecto.Query,
+      only: [exclude: 2, from: 2, put_query_prefix: 2, subquery: 1, update: 3, where: 3]
 
     alias Ecto.Adapters.SQL.Sandbox
     alias Ecto.Changeset
@@ -111,7 +112,8 @@ if Code.ensure_loaded?(Ecto) do
            input_schema: Module.concat(host, Input),
            executions_table: Config.table(config, :executions),
            inputs_table: Config.table(config, :inputs),
-           input_log_cap: cap
+           input_log_cap: cap,
+           scope_columns: Keyword.keys(config.leading_columns)
          )}
       else
         {:error, {:adapter, {:not_a_persistence_host, host}}}
@@ -1068,7 +1070,7 @@ if Code.ensure_loaded?(Ecto) do
 
     @doc """
     Prunes one batch of finished executions (the optional
-    `c:StatifierPersistence.Storage.Adapter.prune_executions/3`,
+    `c:StatifierPersistence.Storage.Adapter.prune_executions/4`,
     ADR-0016) in one transaction.
 
     The batch is selected on the V08 index on `executions(ended_at)`,
@@ -1079,31 +1081,50 @@ if Code.ensure_loaded?(Ecto) do
     once take disjoint batches. Off Postgres the backend's own write lock
     serialises the transaction.
 
+    A scope confines every statement - the selection, the input log check
+    inside it, the input log delete and the position blob update - to the
+    rows holding each of its column equalities. Its columns are the
+    host's `:leading_columns`, which the generated schemas do not declare,
+    so a scoped batch queries the two tables by name, under the schemas'
+    own prefix, and reads the package columns it needs by the same names.
+    A column that is not one of the host's `:leading_columns` raises
+    `ArgumentError` before any statement runs.
+
     This transaction joins a caller's own when there is one. Nothing here
     rolls back: every statement either runs or raises the driver's own
     exception.
     """
     @impl Adapter
-    @spec prune_executions(Adapter.opts(), DateTime.t(), pos_integer()) ::
+    @spec prune_executions(Adapter.opts(), DateTime.t(), pos_integer(), Adapter.prune_scope()) ::
             {:ok, Adapter.prune_counts()} | {:error, Adapter.error()}
-    def prune_executions(opts, %DateTime{} = cutoff, limit)
-        when is_integer(limit) and limit > 0 do
-      repo(opts).transaction(fn -> prune_batch(opts, cutoff, limit) end)
+    def prune_executions(opts, %DateTime{} = cutoff, limit, scope)
+        when is_integer(limit) and limit > 0 and is_list(scope) do
+      check_scope!(opts, scope)
+      repo(opts).transaction(fn -> prune_batch(opts, cutoff, limit, scope) end)
     end
 
-    @spec prune_batch(Adapter.opts(), DateTime.t(), pos_integer()) :: Adapter.prune_counts()
-    defp prune_batch(opts, cutoff, limit) do
+    @spec prune_batch(Adapter.opts(), DateTime.t(), pos_integer(), Adapter.prune_scope()) ::
+            Adapter.prune_counts()
+    defp prune_batch(opts, cutoff, limit, scope) do
       repo = repo(opts)
-      ids = repo.all(due_executions(opts, cutoff, limit))
+      ids = repo.all(due_executions(opts, cutoff, limit, scope))
 
       {inputs, _returned} =
-        repo.delete_all(from(i in input_schema(opts), where: i.execution_id in ^ids))
+        repo.delete_all(
+          scoped(
+            from(i in prune_source(opts, :inputs, scope), where: i.execution_id in ^ids),
+            scope
+          )
+        )
 
       {position_blobs, _returned} =
         repo.update_all(
-          from(r in execution_schema(opts),
-            where: r.execution_id in ^ids,
-            where: not is_nil(r.position_blob)
+          scoped(
+            from(r in prune_source(opts, :executions, scope),
+              where: r.execution_id in ^ids,
+              where: not is_nil(r.position_blob)
+            ),
+            scope
           ),
           set: [position_blob: nil]
         )
@@ -1115,28 +1136,80 @@ if Code.ensure_loaded?(Ecto) do
     # cutoff, and something still to clear. The status is read as well as
     # the stamp because a stamp stays on a row written back to a status
     # that is not terminal, and that execution can still take a step.
-    @spec due_executions(Adapter.opts(), DateTime.t(), pos_integer()) :: Ecto.Query.t()
-    defp due_executions(opts, cutoff, limit) do
+    @spec due_executions(Adapter.opts(), DateTime.t(), pos_integer(), Adapter.prune_scope()) ::
+            Ecto.Query.t()
+    defp due_executions(opts, cutoff, limit, scope) do
       logged =
-        from(i in input_schema(opts),
-          where: i.execution_id == parent_as(:execution).execution_id,
-          select: 1
+        scoped(
+          from(i in prune_source(opts, :inputs, scope),
+            where: i.execution_id == parent_as(:execution).execution_id,
+            select: 1
+          ),
+          scope
         )
 
       query =
-        from(r in execution_schema(opts),
-          as: :execution,
-          where: r.status in ^terminal_statuses(),
-          where: r.ended_at < type(^cutoff, :utc_datetime_usec),
-          where: not is_nil(r.position_blob) or exists(subquery(logged)),
-          order_by: [asc: r.ended_at, asc: r.execution_id],
-          limit: ^limit,
-          select: r.execution_id
+        scoped(
+          from(r in prune_source(opts, :executions, scope),
+            as: :execution,
+            where: r.status in ^terminal_statuses(),
+            where: r.ended_at < type(^cutoff, :utc_datetime_usec),
+            where: not is_nil(r.position_blob) or exists(subquery(logged)),
+            order_by: [asc: r.ended_at, asc: r.execution_id],
+            limit: ^limit,
+            select: r.execution_id
+          ),
+          scope
         )
 
       if repo(opts).__adapter__() == Ecto.Adapters.Postgres,
         do: from(r in query, lock: "FOR UPDATE SKIP LOCKED"),
         else: query
+    end
+
+    # Unscoped, a prune reads through the generated schemas, as it always
+    # has. Scoped, it reads the table by name, under the schemas' prefix,
+    # which a query over a table name does not otherwise carry: the scope's
+    # columns are the host's, the schemas do not declare them, and Ecto
+    # refuses a field a schema does not declare.
+    @spec prune_source(Adapter.opts(), :executions | :inputs, Adapter.prune_scope()) ::
+            module() | Ecto.Query.t()
+    defp prune_source(opts, :executions, []), do: execution_schema(opts)
+    defp prune_source(opts, :inputs, []), do: input_schema(opts)
+
+    defp prune_source(opts, table, _scope) do
+      query =
+        opts
+        |> Keyword.fetch!(if table == :executions, do: :executions_table, else: :inputs_table)
+        |> Ecto.Queryable.to_query()
+
+      case execution_schema(opts).__schema__(:prefix) do
+        nil -> query
+        prefix -> put_query_prefix(query, prefix)
+      end
+    end
+
+    # One equality per scope column.
+    @spec scoped(Ecto.Query.t(), Adapter.prune_scope()) :: Ecto.Query.t()
+    defp scoped(query, scope) do
+      Enum.reduce(scope, query, fn {column, value}, query ->
+        where(query, [r], field(r, ^column) == ^value)
+      end)
+    end
+
+    @spec check_scope!(Adapter.opts(), Adapter.prune_scope()) :: :ok
+    defp check_scope!(opts, scope) do
+      columns = Keyword.get(opts, :scope_columns, [])
+
+      case Enum.reject(Keyword.keys(scope), &(&1 in columns)) do
+        [] ->
+          :ok
+
+        unknown ->
+          raise ArgumentError,
+                "prune_executions/4 scopes only by the host's :leading_columns " <>
+                  "(#{inspect(columns)}), got: #{inspect(unknown)}"
+      end
     end
 
     @spec terminal_statuses() :: [String.t()]

@@ -24,7 +24,7 @@ defmodule StatifierPersistence.Retention do
   @default_batch_size 500
 
   @typedoc "Options `prune/3` accepts."
-  @type prune_opt :: {:batch_size, pos_integer()}
+  @type prune_opt :: {:batch_size, pos_integer()} | {:scope, Adapter.prune_scope()}
 
   @doc """
   Clears the position blob and the input log of every execution that
@@ -51,15 +51,30 @@ defmodule StatifierPersistence.Retention do
   (`StatifierPersistence.Storage.execution_pruning_supported?/1`),
   before anything is read.
 
+  `{:error, :unscoped_adapter}` when `:scope` is given and the store's
+  adapter cannot confine a batch to it - the in-memory adapter is one -
+  before anything is cleared.
+
   Raises `ArgumentError` when `cutoff` is not a `t:DateTime.t/0` - a
-  duration, a number of days or a `Date` included - and when
-  `:batch_size` is not a positive integer.
+  duration, a number of days or a `Date` included - when `:batch_size`
+  is not a positive integer, and when `:scope` is not a non-empty keyword
+  list of distinct columns with no `nil` value.
 
   ## Options
 
   - `:batch_size` - at most how many executions one batch prunes.
     Defaults to #{@default_batch_size}. Smaller batches hold shorter
     transactions; the answer is the same.
+  - `:scope` - a keyword list of column equalities, such as
+    `[tenant_id: "tenant-a"]`, that confines the prune to the rows
+    holding every one of them. Every batch's selection, input log check,
+    input log delete and position blob update carries the equalities, so
+    a prune run inside one partition's transaction reads and writes no
+    row of another. On `StatifierPersistence.Storage.Ecto` the columns
+    are ones the host placed with `:leading_columns`. Left out, the prune
+    covers the whole store, as it always has. `nil` is refused rather
+    than read as `IS NULL`, because an equality with `NULL` matches no
+    row.
   """
   @spec prune(store :: Storage.t(), cutoff :: DateTime.t(), opts :: [prune_opt()]) ::
           {:ok, Adapter.prune_counts()} | {:error, Storage.error()}
@@ -67,9 +82,14 @@ defmodule StatifierPersistence.Retention do
 
   def prune(%Storage{} = store, %DateTime{} = cutoff, opts) when is_list(opts) do
     batch_size = batch_size!(opts)
+    scope = scope!(opts)
 
     if Storage.execution_pruning_supported?(store) do
-      prune_batches(store, cutoff, batch_size, %{executions: 0, position_blobs: 0, inputs: 0})
+      prune_batches(store, cutoff, batch_size, scope, %{
+        executions: 0,
+        position_blobs: 0,
+        inputs: 0
+      })
     else
       {:error, :execution_pruning_unsupported}
     end
@@ -85,10 +105,15 @@ defmodule StatifierPersistence.Retention do
   # A batch that answers fewer executions than it may take found
   # everything that was due, so the loop stops there rather than asking
   # once more for an answer of zero.
-  @spec prune_batches(Storage.t(), DateTime.t(), pos_integer(), Adapter.prune_counts()) ::
-          {:ok, Adapter.prune_counts()} | {:error, Storage.error()}
-  defp prune_batches(store, cutoff, batch_size, total) do
-    case Storage.prune_executions(store, cutoff, batch_size) do
+  @spec prune_batches(
+          Storage.t(),
+          DateTime.t(),
+          pos_integer(),
+          Adapter.prune_scope(),
+          Adapter.prune_counts()
+        ) :: {:ok, Adapter.prune_counts()} | {:error, Storage.error()}
+  defp prune_batches(store, cutoff, batch_size, scope, total) do
+    case Storage.prune_executions(store, cutoff, batch_size, scope) do
       {:ok, counts} ->
         total = %{
           executions: total.executions + counts.executions,
@@ -98,7 +123,7 @@ defmodule StatifierPersistence.Retention do
 
         if counts.executions < batch_size,
           do: {:ok, total},
-          else: prune_batches(store, cutoff, batch_size, total)
+          else: prune_batches(store, cutoff, batch_size, scope, total)
 
       {:error, _reason} = error ->
         error
@@ -115,5 +140,48 @@ defmodule StatifierPersistence.Retention do
         raise ArgumentError,
               "prune/3 requires `batch_size:` to be a positive integer, got: #{inspect(other)}"
     end
+  end
+
+  # No `:scope` is no scope, which the adapter reads as `[]`. A given
+  # scope must name at least one column: a scope computed to nothing
+  # would otherwise prune every partition from inside one.
+  @spec scope!([prune_opt()]) :: Adapter.prune_scope()
+  defp scope!(opts) do
+    case Keyword.fetch(opts, :scope) do
+      :error -> []
+      {:ok, scope} -> validate_scope!(scope)
+    end
+  end
+
+  @spec validate_scope!(term()) :: Adapter.prune_scope()
+  defp validate_scope!([_ | _] = scope) do
+    columns = if Keyword.keyword?(scope), do: Keyword.keys(scope), else: nil
+
+    cond do
+      is_nil(columns) ->
+        raise_scope!(scope, "a keyword list of column: value")
+
+      length(Enum.uniq(columns)) != length(columns) ->
+        raise_scope!(scope, "each column named once")
+
+      Enum.any?(scope, fn {_column, value} -> is_nil(value) end) ->
+        raise_scope!(scope, "no nil value - an equality with NULL matches no row")
+
+      true ->
+        scope
+    end
+  end
+
+  defp validate_scope!(scope) do
+    raise_scope!(
+      scope,
+      "a non-empty keyword list of column: value - leave it out to prune the whole store"
+    )
+  end
+
+  @spec raise_scope!(term(), String.t()) :: no_return()
+  defp raise_scope!(scope, requirement) do
+    raise ArgumentError,
+          "prune/3 requires `scope:` to be #{requirement}, got: #{inspect(scope)}"
   end
 end
