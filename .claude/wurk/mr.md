@@ -25,8 +25,8 @@ carrying the operator's explicit, quotable consent, and only after the
 terminology scan below is clean.
 
 Merging the request is the operator's, with the one exception that table's
-own *merging a campaign PR* row records (added 2026-09-01, after the 025
-post-wrap walk): a campaign consent the operator adopted verbatim that names
+own *merging a campaign PR* row records (ruled by the operator,
+2026-09-01): a campaign consent the operator adopted verbatim that names
 automatic merges, with every condition the row lists met - full gate green,
 CI green, the terminology scan clean with a positive control, and any named
 review gate passed. Read the row for those conditions rather than this

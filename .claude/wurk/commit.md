@@ -91,7 +91,7 @@ skip). An `--auto` run that reports `attested: false` is the check working -
 report it, do not fake an attestation.
 
 The earlier wiring named `mix gate.verify` (bead `sp-7cu`), which no dep ever
-shipped; it was dropped entirely in f76db7d (`sp-cs0`, fleet ruling F2
+shipped; it was dropped entirely in f76db7d (`sp-cs0`, ruled by the operator,
 2026-08-27) because the dangling declaration could yield a blocked
 `gate_attest_could_not_start` envelope. Re-pointing it at the published
 `ex_quality` task is what that commit deferred.
