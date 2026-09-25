@@ -1164,3 +1164,86 @@ What was re-read before the flip:
 - **`migrate/4` rewrites no pin.** It writes through
   `Storage.update_execution/5`, which carries the stored metadata forward
   (`executions.ex`, `repin/5`).
+
+## Amendment (2026-09-24, sp-51ah): a single child's answer is recorded on its own record, and a refused one is delivered again from it
+
+Status of this amendment: proposed (2026-09-24, sp-51ah). The record above
+stays accepted; this amendment is proposed until the operator accepts it.
+
+Decision 3 has a child answer its parent through ADR-0007's doors. A
+fan-out child's answer is also kept: a settlement records it on the child's
+own execution record (`lib/statifier_persistence/driver.ex`,
+`record_outcome/3`, read at `d72c92e`) and assembles the parent's answer
+from those records (`entry/5`, read at `d72c92e`), so answering again
+through any one child settles the invocation again from storage. A single
+child's answer was kept nowhere. `Driver.answer_parent/3` took it to the
+parent's door and wrote nothing (`answer_parent/3`, read at `d72c92e`), and
+`StatifierPersistence.Execution.from_record/1` said a stored record carries
+no donedata (`lib/statifier_persistence/execution.ex`, `from_record/1`,
+read at `d72c92e`). A parked parent refuses an answer whole (ADR-0014
+decision 2), and ADR-0015 leaves what the answering side does with that
+refusal undecided (its "What this record does not decide"). So a refused
+single-child answer could be delivered again only from the value the host
+held where it drove the child, which is what ADR-0009's sp-6neq Amendment
+says in its decision 3. Ruled by the operator, 2026-09-24: a refused
+single-child answer is answered again from the child's own stored terminal
+record, through the entry point a fan-out answers again by; the settlement
+event keeps reporting the settlement's decision; nothing is added to any
+vocabulary.
+
+**1. A single child's answer is recorded on its own execution record.** It
+is kept in the column a fan-out child's answer is kept in, the V03
+`outcome_blob`, with the encoding `record_outcome/3` uses. It is recorded
+before the parent's door is tried, in `answer_parent/3`'s single-child
+branch, and when `Driver.resolve_and_answer_parent/3`, the path the
+automatic answer takes, never reaches the parent: the `:parent_unfetched`
+and `:parent_chart_unresolved` cases (`record_single_answer/3` and
+`unreached/5`, in this change). Those are the answers a host may have to
+deliver again. It is recorded once: only
+when the child's stored status is the terminal status the answer names
+(`:completed` for `{:done, _}`, `:failed` for `{:failed, _}`), only when
+the record holds no answer yet, and only on an adapter that declares it can
+store one (`StatifierPersistence.Storage.execution_outcome_supported?/1`).
+Unlike `record_outcome/3` it derives no status: it writes the stored status
+and `failure` back as they are. A write that fails does not stop the
+answer, which goes to the parent's door either way. No column, schema
+version or adapter callback is added.
+
+**2. The recorded answer reads back through the host-facing struct.**
+`Execution.from_record/1` builds `donedata` from a recorded
+`{:done, donedata}` answer, and leaves it `nil` for a recorded failure and
+for a record with no answer (`donedata/1` in `execution.ex`, in this
+change). This holds for a single child and for a fan-out child alike. A
+failed child's reason was on its record before this change, as `failure`.
+A host delivering an answer again fetches the child's record and calls
+`Driver.answer_parent/3`, the entry point a fan-out answers again by, with
+`{:done, execution.donedata}` or `{:failed, reason: execution.failure}`.
+This is the one documented behaviour that changes: `from_record/1` no
+longer answers `donedata: nil` for every record. Nothing is queued inside
+this package; ADR-0014 decision 8 and the sp-6neq Amendment's decision 4
+hold, and the delivery again is still the host's.
+
+**3. A child that ended before this change holds no recorded answer.** Its
+record builds `donedata: nil` as it did before, and nothing fills the
+answer in later. Its fetched record's `outcome_blob` is `nil`, and that is
+how a host tells it apart from a child whose donedata is itself `nil`. A
+completed child of that kind is answered again only from what the host
+held. A failed one is still answered from its `failure`.
+
+**4. `[:statifier_persistence, :child, :settled]` does not name a refused
+answer.** Its `decision` stays the settlement's own
+(`decision_atom/1`, called from `report_settled/3`, read at `d72c92e`):
+`:answer` means every index is settled and the assembled list goes to the
+parent's door. A parked parent that then refuses the list still reports
+`:answer` there. What the door answered is the `delivery` on the
+`:answered` event that follows. `docs/telemetry.md` and the
+`StatifierPersistence.Telemetry` moduledoc now say so. No event, key or
+value is added, so ADR-0009 decision 8's count of event names does not
+change, and `:recorded` stays the fan-out settlement's event: a single
+child's recorded answer emits nothing of its own.
+
+The sp-6neq Amendment's decision 3 still holds for an answer the host kept.
+It is no longer the only way to deliver a single child's answer again. This
+amendment edits nothing in ADR-0009.
+
+No other decision moves.

@@ -175,7 +175,10 @@ defmodule StatifierPersistence.Telemetry do
   `:recorded` fires once per fan-out child answer written under the
   parent's exclusion, and `:settled` once per settlement decision -
   `decision` is `:answer` or `:not_yet` - both from the settlement section
-  (the ADR-0009 sp-8wv amendment). `:answered`'s `outcome` is the
+  (the ADR-0009 sp-8wv amendment). `decision` is the settlement's, not the
+  parent's: a parked parent that refuses the assembled answer still reports
+  `:answer` on `:settled`, and what its door answered is the `delivery` of
+  the `:answered` that follows. `:answered`'s `outcome` is the
   *invocation's* aggregate for a fan-out, `:failed` when any index failed,
   even though the parent's door is always `done_invocation/5`; and
   `child_count` and `failed_count` are `nil` on the single-child path,
@@ -709,7 +712,9 @@ defmodule StatifierPersistence.Telemetry do
 
   @doc """
   Emits `[:statifier_persistence, :child, :settled]` - one settlement
-  decision over a whole invocation, `:answer` or `:not_yet`.
+  decision over a whole invocation, `:answer` or `:not_yet`. `:answer` is
+  the decision to answer, not the parent's acceptance of it: what the
+  parent's door answered is `child_answered/1`'s `delivery`.
 
   `counts` is the measurement map: `child_count` and the four tallies over
   the invocation's indexes. They partition `child_count` only once every
