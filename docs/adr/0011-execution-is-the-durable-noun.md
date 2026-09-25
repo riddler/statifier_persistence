@@ -2,8 +2,8 @@
 
 Status: accepted (2026-09-13, sp-5nv, PR #101, after PR #95 (sp-op4, the code),
 PR #97 (sp-j2y, V06 and the `Config` key) and PR #99 (sp-tae, V06's down)
-landed on `main`; merged at proposed 2026-09-12, sp-n55, PR #94; campaign
-SF041, RQ-SF041-7/-8/-9 ruled by
+landed on `main`; merged at proposed 2026-09-12, sp-n55, PR #94; three
+questions ruled by
 the operator the same day; epic sp-hnp. sp-op4 and sp-j2y build it, sp-478 and
 sp-pcw carry the pointer Notes, and sp-5nv flips this record once the code and
 the migration are on `main`)
@@ -943,7 +943,7 @@ than reworded (zero removed lines other than the Status text):
    `docs/adr/README.md:6` - both remain open against that record, not this
    one.
 
-### 1. Upgrade consequence: drain in-flight children first (RQ-SF041-22)
+### 1. Upgrade consequence: drain in-flight children first
 
 Ruled by the operator 2026-09-13, verbatim: "Record the consequence - host
 should drain in-flight children first."
@@ -962,7 +962,7 @@ The consequence for a host is therefore an ordering rule, not a code change:
 no live child at the moment of the upgrade is unaffected, because the
 reserved key only ever appears on a child's metadata. Tracked as **sp-f99**.
 
-### 2. Decision 3's down path: V06's down is a no-op (RQ-SF041-25)
+### 2. Decision 3's down path: V06's down is a no-op
 
 Ruled by the operator 2026-09-13, verbatim: "V06 down no-op". This
 supersedes the earlier ruling of the same day that had V06's down rename
@@ -1012,9 +1012,9 @@ attribution of the discoverability argument to ADR-0002 decision 4
 (`docs/adr/0002-configurable-keys-and-table-names.md:88-95`, `@e33cd7a`) was
 already corrected before the record merged.
 
-### 4. Decision 2's survivor count is superseded by decision 3 (RQ-SF041-26)
+### 4. Decision 2's survivor count is superseded by decision 3
 
-Ruled by the operator 2026-09-13 (**RQ-SF041-26**, option A): the sentences
+Ruled by the operator 2026-09-13 (option A): the sentences
 below are met by this dated item rather than reworded.
 
 Decision 2 says, of its atom-literal clause, that "the survivor list is
@@ -1041,7 +1041,7 @@ literal or a declared name. The test's own comment gives exactly that reason
 calls unnecessary, narrowed to that one file.
 
 And it names **four** survivors, not two, each forced by a decision of this
-record or by the moduledoc RQ-SF041-25 put in place:
+record or by the moduledoc the ruling in item 2 put in place:
 
 1. the old donedata **string** `statifier_persistence:run_status`
    (`@survivor_lines`, `:26`, `@e33cd7a`), which decision 4 keeps readable
@@ -1052,7 +1052,7 @@ record or by the moduledoc RQ-SF041-25 put in place:
 3. the same recipe's naming of the two `run_id` columns
    (`@survivor_lines`, `:31`, `@e33cd7a`) - 2 and 3 are both forced by
    decision 3, and are downstream of the `ecto/migrations.ex` moduledoc
-   that RQ-SF041-25 put there (item 2 above): a host reading the recipe
+   that the ruling put there (item 2 above): a host reading the recipe
    cannot tell which of its databases version `6` is for unless the recipe
    spells the name it finds;
 4. `run` as the ordinary English verb (`@survivor_names ["run"]`, `:37`,
@@ -1072,7 +1072,7 @@ Item 4 of the 2026-09-13 Note lists four survivors and says of its second
 and third - the migration helper's recipe prose naming the `runs` table
 that version `6` renames, and the same recipe's naming of the two
 `run_id` columns - that they are "downstream of the `ecto/migrations.ex`
-moduledoc that RQ-SF041-25 put there (item 2 above)". **That attribution
+moduledoc that the ruling put there (item 2 above)". **That attribution
 is wrong.** `git blame -L 94,103
 lib/statifier_persistence/ecto/migrations.ex`, run at `8211e03`, puts
 both lines on `71537dc`: `:98` ("renames the `runs` table to") and `:99`

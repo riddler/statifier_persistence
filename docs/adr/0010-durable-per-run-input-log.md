@@ -1,7 +1,7 @@
 # ADR-0010: The durable per-run input log: two optional adapter callbacks, a verbatim event stamped with its door and its ordinal, a host-declared cap, one log per run
 
 Status: accepted (2026-09-06, sp-t12; proposed the same day as sp-o1b under
-campaign-034 ruling RQ-034-3, flipped once sp-80g landed - the Note below
+the operator's 2026-09-06 ruling, flipped once sp-80g landed - the Note below
 names the merge and the four places the code diverged from this text)
 
 ## Context
@@ -239,7 +239,7 @@ failure to avoid).
 **"The position it landed at" is the log's ordinal, and it is spelled `seq`.**
 The word is already taken in this repository - a *position* is
 `Statifier.Position.to_binary/1`'s output, the thing `position_blob` holds and
-the identity guard guards - so the campaign-034 ruling's phrase is recorded
+the identity guard guards - so the phrase from the operator's ruling is recorded
 here under a name that cannot be confused with it. What a replay needs from an
 entry is where it sat in the run's input order, which is an ordinal; what it
 does not need is the configuration the run reached, which is derivable by

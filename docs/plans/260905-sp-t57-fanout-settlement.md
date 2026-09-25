@@ -96,7 +96,7 @@ full `mix quality` gate green.
   child as the N=1 case (`:306-313`), the index durably on the child
   (`:311`), and no join table (`:330`). This plan implements all four.
 - ADR-0006 decision 4 (`docs/adr/0006-*.md:113-124`) leaves the metadata
-  index to the host; the campaign's ruling C6 ships one, so that decision
+  index to the host; an operator ruling ships one, so that decision
   gains a dated Note in this change rather than a silent contradiction.
 - ADR-0006 decision 2 admits **identities only** into `metadata`. A child's
   outcome payload is not an identity, which is why it is a blob column and
@@ -106,8 +106,8 @@ full `mix quality` gate green.
 
 ## What We're NOT Doing
 
-- **Not storing the child set on the parent.** The campaign's ruling
-  R31-10 (taken 2026-09-05) makes the set derived from the children, and
+- **Not storing the child set on the parent.** An operator ruling
+  (taken 2026-09-05) makes the set derived from the children, and
   this plan derives it. That is not in tension with ADR-0008: the
   amendment's point 1 names the ordered set as the *logical* parent-side
   view whose "concrete encoding is the implementation plan's, not this
@@ -127,7 +127,7 @@ full `mix quality` gate green.
   equality-on-all-pairs contract is unchanged, and the projection is the
   same match with fewer columns.
 - **No measurement.** The settlement-read cost versus N is `sp-461`.
-- **No `max_concurrency` handling.** That is sob's Note (ruling C7).
+- **No `max_concurrency` handling.** That is sob's Note (an operator ruling).
 - **Not changing single-child durable subcharts.** A linkage with no
   `child_count` key is not a fan-out and keeps today's direct answer to
   the parent's door, byte for byte.

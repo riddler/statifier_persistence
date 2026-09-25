@@ -1,13 +1,13 @@
 # ADR-0008: A durable subchart's child is an ordinary run, linked by pinned metadata, started and answered across the async seam, and ended by a cascading cancel that retains
 
-Status: accepted (2026-09-01, campaign-025; unqualified direction-agent
+Status: accepted (2026-09-01; unqualified direction-agent
 verdict; drafts the durable-subchart rulings recorded on sp-nt8 and its
 mirror sb-2i04, 2026-08-31)
 
 ## Context
 
 `statifier_blocks` ships the canonical subchart invoke handler
-(`StatifierBlocks.Runtime.Subchart`, campaign-023). Its `start/2` is a pure
+(`StatifierBlocks.Runtime.Subchart`). Its `start/2` is a pure
 planning callback that resolves a document id and returns one
 `{:start_child, %Invoke{}, {:invoke, invoke}}` instruction, and that
 instruction has an executor clause in `Statifier.Session` and nowhere else.
@@ -70,7 +70,7 @@ the queries this record foresees - *find my child*, *find my parent* - are
 both single-key reads that do not.
 
 The pin is **mandatory**, which is the one place this record hardens an
-existing convention into contract. Campaign-023's R-d treated a recorded
+existing convention into contract. An earlier operator ruling treated a recorded
 child chart identity as demo provenance; here it is required, because a
 child is resumed by whatever node picks it up and the only thing standing
 between "resumed the workflow you started" and "resumed a different
@@ -254,20 +254,20 @@ explicit about what the linkage had to survive: "the linkage of decision 2
 is per-child and does not assume one child per invocation". That walk has
 now happened, in the three records that had to be walked together. This
 amendment states the half of its outcome that is this package's, per the
-operator's campaign-026 ruling `R26-5`.
+operator's ruling.
 
 Two accepted records depend on what follows and are cited rather than
 restated:
 
 - `statifier_blocks` **ADR-0009**, *durable fan-out is a new block type,
-  `core.map`* (accepted 2026-09-01, campaign-026). Its decision 10 cites
+  `core.map`* (accepted 2026-09-01). Its decision 10 cites
   this amendment for the linkage widening, and it depends on exactly one
   thing from it: that the item index reaches the child's own metadata, so
   that its decision 5's index-ordered accumulation is recoverable when
   completions arrive out of order, after a restart, on a process that did
   not exist when the child started.
 - `statifier_oban` **ADR-0007**, *fan-out child starts are batched*
-  (accepted 2026-09-01, campaign-026). Its decision 5 derives a fan-out's
+  (accepted 2026-09-01). Its decision 5 derives a fan-out's
   resumable unit from the difference between the item indices and the
   indices already in this ordered set, holding no cursor of its own; its
   decision 4 makes the same index a component of the per-child job key.
@@ -351,7 +351,7 @@ on this record's ruling and names a transactional child-creation guarantee
 here as its single reopen trigger. This amendment does not pull it, and a
 later record that wants to must expect to reopen that one.
 
-**Nothing here is implemented.** Campaign 026's `R26-1` defers the
+**Nothing here is implemented.** An operator ruling defers the
 implementation; this amendment carries no `lib/` change and no test.
 `active_invocations` still holds one child per invocation in the shipped
 code, which is the N=1 case of what is described above and is why the
@@ -444,11 +444,11 @@ is a host decision about a run rather than a chart transition (ADR-0004
 decision 6). So a child whose chart handles its own error and settles
 deliberately - the ordinary shape of *this one finished badly* - completes
 as `:completed`, `first_error` never fires, and its siblings run on.
-Campaign 031's fan-out proof hit exactly that and worked around it
+An earlier fan-out proof hit exactly that and worked around it
 host-side, translating the condition through the public
 `StatifierPersistence.Driver.answer_parent/3`.
 
-This amendment closes that seam, per the operator's campaign-033 ruling of
+This amendment closes that seam, per the operator's ruling of
 2026-09-06. Its sibling is bead `sb-napt` in `statifier_blocks`, which
 spends the tag named below in the block outcome vocabulary; ownership
 splits the way decision 3 already splits it, stepping and run status here,
@@ -605,7 +605,7 @@ alternative - a second way to say a child failed is a second thing to keep
 consistent with settlement, and `answer_parent/3` remains public for what
 it is actually for, a host answering for a party that is not a run.
 
-**Accepted 2026-09-06 (campaign-033, `sp-ive`), and implemented.** This
+**Accepted 2026-09-06 (`sp-ive`), and implemented.** This
 amendment carries no `lib/` change and no test, in the same posture the
 sp-3n2 amendment above records for itself. `sp-hia` implements it - the
 `run_status/2` arm, the `failure` string, and a case that drives a
@@ -660,8 +660,8 @@ For an ordinary run that is exactly right. For a linked child it left the
 parent's `<invoke>` `:pending` with nothing that would ever answer it, and
 0.7.2's settlement made that permanent: an invocation now waits for every
 child's recorded answer, and a child failed this way records none. This
-note states the seam and what closes it, per the operator's campaign-SF035
-ruling `RQ-SF035-9`. No decision above is edited.
+note states the seam and what closes it, per the operator's
+ruling. No decision above is edited.
 
 **What was added.** `Runs.fail/4`'s `opts` gains `driver:`. Given one, a
 run that carried linkage and actually reached `:failed` answers its parent
@@ -745,7 +745,7 @@ reads `:no_parent`, answers nobody, and behaves exactly as it did before
 the option existed. Whether decision 2's linkage should have a non-metadata
 home for such a backend is a question this note opens and does not answer.
 
-**Accepted 2026-09-06 (campaign-SF035, `sp-y7n`), and implemented.** In the
+**Accepted 2026-09-06 (`sp-y7n`), and implemented.** In the
 posture the sp-n8g amendment above records, inverted: that section carried
 no `lib/` change and waited for one, and this one ships with its own. The
 `driver:` option, `resolve_and_answer_parent/3` and both halves of the
@@ -756,7 +756,7 @@ that is what lets the acceptance be recorded here rather than separately.
 ## Amendment (2026-09-08, sp-sli): `Driver.new/3` takes an `after_step:` callback, fired after every step the driver drives on a caller's behalf
 
 **Status: accepted (2026-09-08, `sp-nhl`; drafted the same day as `sp-sli`
-under the operator's campaign-SF039 ruling `RQ-SF039-13`, flipped once
+under the operator's ruling, flipped once
 `sp-c48` landed - the Note at the foot of this file names the merge and
 what was re-read against it).** Additive; decisions 1 to 7 stand
 exactly as accepted, and every amendment and note above is unchanged - the
@@ -781,7 +781,7 @@ subchart's lifecycle is made of.
 Two ways out were available. The host could stop using the package's answer
 path and re-implement it - read the linkage, resolve the parent, deliver
 the answer itself - which is the shape the sp-n8g amendment above records
-campaign 031's fan-out proof taking, translating its condition through the
+the earlier fan-out proof taking, translating its condition through the
 public `StatifierPersistence.Driver.answer_parent/3`, and which the sp-y7n
 note above names as the explicit host door beside the automatic one. The
 embedder has instead ruled to keep the package route and asked for the
@@ -1017,7 +1017,7 @@ is deliberately the wrong tool - decision 5 below says why". Read "decision
 not"), which is what the sentence points at; this record's decision 5 is the
 cascade, and the section's other self-references say "clause N".
 
-## Note (2026-09-12, sp-pcw): `run` in this record is the noun now called `execution`, and the clause 3 wording the SF039 wrap queued is already the amendment's text
+## Note (2026-09-12, sp-pcw): `run` in this record is the noun now called `execution`, and the clause 3 wording a review queued is already the amendment's text
 
 Two items, both met by addition: nothing above is edited, and this record is
 read at the dates its sections were decided.
@@ -1025,7 +1025,7 @@ read at the dates its sections were decided.
 **1. Read `run` as `execution` from 0.12.0.** Every `run` in this file - the
 durable noun, the module and function names, the ids and the column names it
 cites - names the record this package now calls an `execution`. The rename
-landed on `main` at `5f8ca12` (sp-op4, campaign SF041) with its pin tightened
+landed on `main` at `5f8ca12` (sp-op4) with its pin tightened
 at `05993b0`. `StatifierPersistence.Execution` and
 `StatifierPersistence.Executions` are the modules
 (`lib/statifier_persistence/execution.ex:1`,
@@ -1041,7 +1041,7 @@ This record's decisions are unchanged by the rename - only the word is - and
 the file name keeps `child-runs` because a file name is a cite target.
 
 **2. Clause 3 of the `after_step:` amendment already carries the narrow
-promise the SF039 wrap queued, scoped to the run it reports.** The SF039 wrap
+promise the review queued, scoped to the run it reports.** The review
 queued an item on the reading that clause 3 promises the callback fires
 outside *any* run lock, asking for the narrower wording on the grounds that
 decision 3's child is created inside its parent's serialization section, so

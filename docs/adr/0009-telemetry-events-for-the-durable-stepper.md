@@ -1,6 +1,6 @@
 # ADR-0009: Telemetry for the durable stepper: `:persistence` on the family contract, plus a storage-phase family of this package's own
 
-Status: accepted (2026-09-01, sp-i21; unqualified direction-agent verdict, campaign-025)
+Status: accepted (2026-09-01, sp-i21; unqualified direction-agent verdict)
 
 ## Context
 
@@ -438,8 +438,8 @@ Decision 5's seams were written before Tier A's fan-out existed. The
 settlement section that ADR-0008's sp-3n2 amendment added -
 `StatifierPersistence.Driver`'s `decide/4`, `record_and_settle/5` and
 `settle/3`, all inside the parent's own exclusion - emits nothing, and a
-read-only run of a hybrid fan-out under the bridge (campaign 033's W0
-scout) found three specific holes:
+read-only run of a hybrid fan-out under the bridge (an earlier
+scout pass) found three specific holes:
 
 - **Every recorded answer but one is invisible.** A settlement writes the
   finishing child's answer to that child's run record and then asks
@@ -460,7 +460,7 @@ scout) found three specific holes:
 
 This amendment is additive under decision 8: two new names and three new
 metadata keys, no rename and no removal. It is this package's half of the
-campaign-034 ruling of 2026-09-06 (`RQ-034-12`); nothing about the trace
+operator's ruling of 2026-09-06; nothing about the trace
 wire format changes, because these are `:telemetry` events.
 
 **1. `[:statifier_persistence, :child, :recorded]`, once per recorded

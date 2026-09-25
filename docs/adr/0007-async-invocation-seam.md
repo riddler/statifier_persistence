@@ -1,6 +1,6 @@
 # ADR-0007: A durable run can rest mid-invocation: the pending dispatch arm, the two re-entry doors, and `active_invocations` as the race mechanism
 
-Status: accepted (2026-09-01, campaign-024 ruling R-c; unqualified direction-agent verdict)
+Status: accepted (2026-09-01, ruled by the operator; unqualified direction-agent verdict)
 
 ## Context
 
@@ -69,7 +69,7 @@ Position` already persists `active_invocations` across a restart, and
 is exited - which is what a cancel is. A door therefore reverse-looks-up
 the invocation id in that map and discards when it is absent, returning
 ADR-0004 decision 3's own `{:discarded, run}`. The criterion under which
-that outcome was allowed is campaign-024 ruling R-c's rider, which made a
+that outcome was allowed is the rider on the operator's ruling, which made a
 cancel-versus-completion-across-restart conformance test a hard acceptance
 criterion and permitted an in-flight-invocation record only if that test
 forced one: the test is
