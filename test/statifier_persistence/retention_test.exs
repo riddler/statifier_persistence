@@ -45,7 +45,7 @@ defmodule StatifierPersistence.RetentionTest do
   end
 
   # sabotage: removed the capability check from
-  # Storage.prune_executions/3 -> red, the facade called a callback the
+  # Storage.prune_executions/4 -> red, the facade called a callback the
   # adapter does not export. Removing prune/3's own check alone stays
   # green, because the facade answers the same refusal. Verified, reverted
   # from a copy.
@@ -77,6 +77,41 @@ defmodule StatifierPersistence.RetentionTest do
     for size <- [0, -1, 1.5, :all] do
       assert_raise ArgumentError, ~r/batch_size/, fn ->
         Retention.prune(store, @cutoff, batch_size: size)
+      end
+    end
+  end
+
+  # sabotage: made InMemory's prune_executions/4 ignore its scope and
+  # prune as if unscoped -> red, the answer was {:ok, counts} and the
+  # position was cleared. Verified red, reverted from a copy.
+  test "prune/3 with a scope answers :unscoped_adapter from an adapter that cannot confine it",
+       %{store: store} do
+    execution(store, "retention-scoped", :completed, 1)
+
+    assert {:error, :unscoped_adapter} =
+             Retention.prune(store, @cutoff, scope: [tenant_id: "tenant-a"])
+
+    assert {:ok, %{position_blob: blob}} = Storage.fetch_execution(store, "retention-scoped")
+    assert is_binary(blob)
+
+    assert {:ok, %{executions: 1}} = Retention.prune(store, @cutoff)
+  end
+
+  # sabotage: made scope!/1 return any value it was given -> red, [] and
+  # the nil value reached the adapter and pruned or answered instead of
+  # raising. Verified red, reverted from a copy.
+  test "prune/3 refuses a scope that is not a non-empty keyword list of set columns",
+       %{store: store} do
+    for scope <- [
+          [],
+          %{tenant_id: "tenant-a"},
+          "tenant-a",
+          [{"tenant_id", "tenant-a"}],
+          [tenant_id: nil],
+          [tenant_id: "tenant-a", tenant_id: "tenant-b"]
+        ] do
+      assert_raise ArgumentError, ~r/scope/, fn ->
+        Retention.prune(store, @cutoff, scope: scope)
       end
     end
   end

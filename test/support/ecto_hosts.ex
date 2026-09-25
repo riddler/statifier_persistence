@@ -5,7 +5,8 @@ defmodule StatifierPersistence.EctoHosts do
   Hosts spanning the option surface: the zero-config default, a host
   overriding every knob, a host on database-assigned keys, and
   `BlobTyped`, which puts the generic reversible transform
-  (`StatifierPersistence.Test.ReversibleBlobType`) on `:blob_type`.
+  (`StatifierPersistence.Test.ReversibleBlobType`) on `:blob_type`, and
+  `Scoped`, which places a host-owned `tenant_id` with `:leading_columns`.
   Test-only support code, not part of the package's public API.
 
   The `Kx*` hosts back the live migration tests: one per key scheme, each
@@ -45,6 +46,17 @@ defmodule StatifierPersistence.EctoHosts do
       repo: StatifierPersistence.TestRepo,
       table_prefix: "blobtype_",
       blob_type: StatifierPersistence.Test.ReversibleBlobType
+  end
+
+  # A partitioned host: one leading column the host owns, in a Postgres
+  # schema of its own, so a scoped prune is proven through the queries
+  # that name the table and carry the schema prefix themselves.
+  defmodule Scoped do
+    @moduledoc false
+    use StatifierPersistence.Ecto,
+      repo: StatifierPersistence.TestRepo,
+      prefix: "scoped",
+      leading_columns: [tenant_id: {:text, null: true}]
   end
 
   defmodule KxUxid do

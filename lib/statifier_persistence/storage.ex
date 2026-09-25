@@ -1158,14 +1158,14 @@ defmodule StatifierPersistence.Storage do
 
   True when the adapter exports the optional
   `c:StatifierPersistence.Storage.Adapter.supports_execution_pruning?/1`
-  and `c:StatifierPersistence.Storage.Adapter.prune_executions/3` and the
+  and `c:StatifierPersistence.Storage.Adapter.prune_executions/4` and the
   first answers `true` - the shape `tree_migration_supported?/1` checks.
   """
   @spec execution_pruning_supported?(store :: t()) :: boolean()
   def execution_pruning_supported?(%__MODULE__{} = store) do
     Code.ensure_loaded?(store.adapter) and
       function_exported?(store.adapter, :supports_execution_pruning?, 1) and
-      function_exported?(store.adapter, :prune_executions, 3) and
+      function_exported?(store.adapter, :prune_executions, 4) and
       adapter_call(store.adapter, :supports_execution_pruning?, [], fn ->
         store.adapter.supports_execution_pruning?(store.opts)
       end) == true
@@ -1174,23 +1174,33 @@ defmodule StatifierPersistence.Storage do
   @doc """
   Prunes one batch of at most `limit` finished executions that ended
   before `cutoff` (ADR-0016, the facade half of
-  `c:StatifierPersistence.Storage.Adapter.prune_executions/3`).
+  `c:StatifierPersistence.Storage.Adapter.prune_executions/4`).
 
   Each execution in the batch keeps its row and loses its position blob
   and its input log. The callback's documentation says which executions
   a batch takes. `StatifierPersistence.Retention.prune/3` calls this
   until nothing is left, and is the door a host uses.
 
+  `scope` is the callback's: `[]`, the default, prunes from the whole
+  store, and column equalities confine the batch to the rows that hold
+  them (`t:StatifierPersistence.Storage.Adapter.prune_scope/0`). An
+  adapter that cannot confine a batch answers
+  `{:error, :unscoped_adapter}` for a scope that is not `[]`.
+
   `{:error, :execution_pruning_unsupported}` for a store whose adapter
   does not declare the capability, without calling it.
   """
-  @spec prune_executions(store :: t(), cutoff :: DateTime.t(), limit :: pos_integer()) ::
-          {:ok, Adapter.prune_counts()} | {:error, error()}
-  def prune_executions(%__MODULE__{} = store, %DateTime{} = cutoff, limit)
-      when is_integer(limit) and limit > 0 do
+  @spec prune_executions(
+          store :: t(),
+          cutoff :: DateTime.t(),
+          limit :: pos_integer(),
+          scope :: Adapter.prune_scope()
+        ) :: {:ok, Adapter.prune_counts()} | {:error, error()}
+  def prune_executions(%__MODULE__{} = store, %DateTime{} = cutoff, limit, scope \\ [])
+      when is_integer(limit) and limit > 0 and is_list(scope) do
     if execution_pruning_supported?(store) do
       adapter_call(store.adapter, :prune_executions, [], fn ->
-        store.adapter.prune_executions(store.opts, cutoff, limit)
+        store.adapter.prune_executions(store.opts, cutoff, limit, scope)
       end)
     else
       {:error, :execution_pruning_unsupported}

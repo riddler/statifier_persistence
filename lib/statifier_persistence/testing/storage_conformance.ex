@@ -102,6 +102,28 @@ defmodule StatifierPersistence.Testing.StorageConformance do
   backend cannot honor hides a failure instead of opting out of a
   contract. `docs/non-postgres-backends.md` in this package is the guide:
   what declining costs, and how to verify.
+
+  The pruning cases (ADR-0016) call
+  `c:StatifierPersistence.Storage.Adapter.prune_executions/4` with the
+  scope `[]`. An adapter that can confine a batch to one partition proves
+  it by passing `prune_scope:`, which generates one more case: two
+  finished executions, one placed inside a scope and one outside it, and
+  a scoped batch that clears the first and leaves the second whole.
+
+      use StatifierPersistence.Testing.StorageConformance,
+        adapter: MyApp.EctoAdapter,
+        opts: [repo: MyApp.Repo],
+        prune_scope: [
+          inside: [tenant_id: "tenant-a"],
+          outside: [tenant_id: "tenant-b"],
+          place: {MyApp.ScopeFixture, :place}
+        ]
+
+  `place` names a function the case calls as
+  `place(adapter_opts, execution_id, scope)` once the execution and its
+  input log are written; it writes the scope's columns onto that
+  execution's rows and answers `:ok`. The package never writes a host's
+  own columns, so placing a row in a scope is the host's.
   """
 
   use ExUnit.CaseTemplate
@@ -110,7 +132,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
     # credo:disable-for-next-line Credo.Check.Refactor.LongQuoteBlocks
     quote bind_quoted: [
             conformance_adapter: Keyword.fetch!(options, :adapter),
-            conformance_adapter_opts: Keyword.get(options, :opts, [])
+            conformance_adapter_opts: Keyword.get(options, :opts, []),
+            conformance_prune_scope: Keyword.get(options, :prune_scope)
           ] do
       alias Statifier.Machine
       alias Statifier.Machine.Identity
@@ -120,6 +143,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
 
       @conformance_adapter conformance_adapter
       @conformance_adapter_opts conformance_adapter_opts
+      @conformance_prune_scope conformance_prune_scope
 
       setup do
         {:ok, store} = Storage.new(@conformance_adapter, @conformance_adapter_opts)
@@ -2273,20 +2297,23 @@ defmodule StatifierPersistence.Testing.StorageConformance do
       # -- Adapter level: pruning finished executions (ADR-0016) ---------
       #
       # Generated only when the adapter under test exports the optional
-      # prune_executions/3. An adapter that does not sees no behaviour
+      # prune_executions/4. An adapter that does not sees no behaviour
       # change and generates none of these cases; the facade refuses it at
       # open. The input log case is generated only when the adapter also
       # keeps a log (append_input/3). Untagged: the selection, the delete
       # and the update need nothing a backend other than Postgres lacks.
+      # Every case but the scoped one passes the scope `[]`: an unscoped
+      # batch, whose answer the scope must not change. The scoped case is
+      # generated only when the suite is given `prune_scope:`.
 
       if Code.ensure_loaded?(conformance_adapter) and
-           function_exported?(conformance_adapter, :prune_executions, 3) do
-        # sabotage: in InMemory's prune_executions/3, replaced the record
+           function_exported?(conformance_adapter, :prune_executions, 4) do
+        # sabotage: in InMemory's prune_executions/4, replaced the record
         # with one holding only its id and a nil position -> red; in the
         # Ecto adapter's, nulled `failure` beside position_blob -> red,
         # the kept fields no longer matched. Verified red on each
         # conformance module, reverted from a copy.
-        test "adapter: prune_executions/3 nulls a finished execution's position and keeps its row",
+        test "adapter: prune_executions/4 nulls a finished execution's position and keeps its row",
              %{store: store} do
           ended = ~U[2026-01-01 00:00:00.000000Z]
 
@@ -2303,7 +2330,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                    @conformance_adapter.prune_executions(
                      store.opts,
                      ~U[2026-02-01 00:00:00.000000Z],
-                     10
+                     10,
+                     []
                    )
 
           assert {:ok, pruned} =
@@ -2320,14 +2348,14 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                    )
         end
 
-        # sabotage: in each adapter's prune_executions/3, dropped the
+        # sabotage: in each adapter's prune_executions/4, dropped the
         # terminal-status clause -> red, the stamped row written back to
         # :active was counted. And: compared the stamp with <= instead of
         # < -> red, the row that ended exactly at the cutoff was pruned.
         # And: let a terminal row with no stamp through -> red, the
         # unstamped row was counted. Verified red on both conformance
         # modules, reverted from a copy.
-        test "adapter: prune_executions/3 leaves what has not ended before the cutoff", %{
+        test "adapter: prune_executions/4 leaves what has not ended before the cutoff", %{
           store: store
         } do
           cutoff = ~U[2026-02-01 00:00:00.000000Z]
@@ -2368,7 +2396,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                    Storage.fetch_execution(store, reopened)
 
           assert {:ok, %{executions: 0, position_blobs: 0, inputs: 0}} =
-                   @conformance_adapter.prune_executions(store.opts, cutoff, 10)
+                   @conformance_adapter.prune_executions(store.opts, cutoff, 10, [])
 
           for id <- [
                 "execution-conformance-prune-at-cutoff",
@@ -2382,12 +2410,12 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           end
         end
 
-        # sabotage: in each adapter's prune_executions/3, dropped the
+        # sabotage: in each adapter's prune_executions/4, dropped the
         # "something left to clear" clause -> red here, the second batch
         # counted the pruned execution again, and red on the limit case
         # below. Verified red on both conformance modules, reverted from a
         # copy.
-        test "adapter: prune_executions/3 is idempotent - a second batch answers zeros", %{
+        test "adapter: prune_executions/4 is idempotent - a second batch answers zeros", %{
           store: store
         } do
           cutoff = ~U[2026-02-01 00:00:00.000000Z]
@@ -2400,16 +2428,16 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           )
 
           assert {:ok, %{executions: 1}} =
-                   @conformance_adapter.prune_executions(store.opts, cutoff, 10)
+                   @conformance_adapter.prune_executions(store.opts, cutoff, 10, [])
 
           assert {:ok, %{executions: 0, position_blobs: 0, inputs: 0}} =
-                   @conformance_adapter.prune_executions(store.opts, cutoff, 10)
+                   @conformance_adapter.prune_executions(store.opts, cutoff, 10, [])
         end
 
-        # sabotage: in each adapter's prune_executions/3, sorted newest end
+        # sabotage: in each adapter's prune_executions/4, sorted newest end
         # first -> red, the first batch of one took the later execution.
         # Verified red on both conformance modules, reverted from a copy.
-        test "adapter: prune_executions/3 takes at most limit executions, oldest end first", %{
+        test "adapter: prune_executions/4 takes at most limit executions, oldest end first", %{
           store: store
         } do
           cutoff = ~U[2026-02-01 00:00:00.000000Z]
@@ -2429,7 +2457,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           )
 
           assert {:ok, %{executions: 1}} =
-                   @conformance_adapter.prune_executions(store.opts, cutoff, 1)
+                   @conformance_adapter.prune_executions(store.opts, cutoff, 1, [])
 
           assert {:ok, %{position_blob: nil}} =
                    Storage.fetch_execution(store, "execution-conformance-prune-first")
@@ -2440,19 +2468,19 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           assert is_binary(second)
 
           assert {:ok, %{executions: 1}} =
-                   @conformance_adapter.prune_executions(store.opts, cutoff, 1)
+                   @conformance_adapter.prune_executions(store.opts, cutoff, 1, [])
 
           assert {:ok, %{executions: 0}} =
-                   @conformance_adapter.prune_executions(store.opts, cutoff, 1)
+                   @conformance_adapter.prune_executions(store.opts, cutoff, 1, [])
         end
 
         if function_exported?(conformance_adapter, :append_input, 3) do
-          # sabotage: in the Ecto adapter's prune_executions/3, skipped the
+          # sabotage: in the Ecto adapter's prune_executions/4, skipped the
           # input delete -> red, the pruned execution's log still listed
           # its entries. And: deleted every input row rather than the
           # batch's -> red, the unfinished execution's log was empty. Both
           # red on the SQLite mirror too. Verified red, reverted from a copy.
-          test "adapter: prune_executions/3 deletes a pruned execution's input log and no other's",
+          test "adapter: prune_executions/4 deletes a pruned execution's input log and no other's",
                %{store: store} do
             cutoff = ~U[2026-02-01 00:00:00.000000Z]
             finished = "execution-conformance-prune-logged"
@@ -2471,10 +2499,64 @@ defmodule StatifierPersistence.Testing.StorageConformance do
             end
 
             assert {:ok, %{executions: 1, position_blobs: 1, inputs: 2}} =
-                     @conformance_adapter.prune_executions(store.opts, cutoff, 10)
+                     @conformance_adapter.prune_executions(store.opts, cutoff, 10, [])
 
             assert {:ok, []} = @conformance_adapter.list_inputs(store.opts, finished)
             assert {:ok, [%{seq: 0}]} = @conformance_adapter.list_inputs(store.opts, running)
+          end
+        end
+
+        if conformance_prune_scope do
+          # sabotage: in the Ecto adapter's prune_executions/4, dropped the
+          # scope's equalities from the selection -> red, the batch took
+          # the execution outside the scope too. Verified red on the
+          # scoped Ecto conformance module, reverted from a copy.
+          test "adapter: prune_executions/4 with a scope clears the rows inside it and no other",
+               %{store: store} do
+            cutoff = ~U[2026-02-01 00:00:00.000000Z]
+            inside_scope = Keyword.fetch!(@conformance_prune_scope, :inside)
+            outside_scope = Keyword.fetch!(@conformance_prune_scope, :outside)
+            {place_module, place_function} = Keyword.fetch!(@conformance_prune_scope, :place)
+            logs? = function_exported?(@conformance_adapter, :append_input, 3)
+            inside = "execution-conformance-prune-scoped-inside"
+            outside = "execution-conformance-prune-scoped-outside"
+
+            for {id, scope} <- [{inside, inside_scope}, {outside, outside_scope}] do
+              prune_execution(store, id, :completed, ~U[2026-01-01 00:00:00.000000Z])
+
+              if logs? do
+                assert {:ok, _seq} =
+                         @conformance_adapter.append_input(store.opts, id, %{
+                           execution_id: id,
+                           seq: 0,
+                           door: "step",
+                           input_blob: <<1>>
+                         })
+              end
+
+              # credo:disable-for-next-line Credo.Check.Refactor.Apply
+              :ok = apply(place_module, place_function, [store.opts, id, scope])
+            end
+
+            inputs = if logs?, do: 1, else: 0
+
+            assert {:ok, %{executions: 1, position_blobs: 1, inputs: ^inputs}} =
+                     @conformance_adapter.prune_executions(store.opts, cutoff, 10, inside_scope)
+
+            assert {:ok, %{position_blob: nil}} = Storage.fetch_execution(store, inside)
+            assert {:ok, %{position_blob: kept}} = Storage.fetch_execution(store, outside)
+            assert is_binary(kept)
+
+            if logs? do
+              assert {:ok, []} = @conformance_adapter.list_inputs(store.opts, inside)
+              assert {:ok, [%{seq: 0}]} = @conformance_adapter.list_inputs(store.opts, outside)
+            end
+
+            assert {:ok, %{executions: 0, position_blobs: 0, inputs: 0}} =
+                     @conformance_adapter.prune_executions(store.opts, cutoff, 10, inside_scope)
+
+            assert {:ok, %{executions: 1, position_blobs: 1, inputs: ^inputs}} =
+                     @conformance_adapter.prune_executions(store.opts, cutoff, 10, [])
           end
         end
 
