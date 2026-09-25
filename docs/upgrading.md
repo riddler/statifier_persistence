@@ -1,7 +1,7 @@
-# Upgrading a host from 0.13 to 0.17
+# Upgrading a host from 0.13 to 0.18
 
 This page says what a host changes to move `statifier_persistence` from
-0.13.0 to 0.17.0, one minor at a time. A host here is the code that
+0.13.0 to 0.18.0, one minor at a time. A host here is the code that
 embeds the package: the module that calls `use StatifierPersistence.Ecto`,
 the migrations it runs, the options it passes to
 `StatifierPersistence.Executions` and `StatifierPersistence.Driver`, the
@@ -12,8 +12,8 @@ nothing.
 
 Take the minors in order, and move the pin with each one, as the README
 recommends: `{:statifier_persistence, "~> 0.14.0"}`, then `"~> 0.15.0"`,
-then `"~> 0.16.0"`, then `"~> 0.17.0"`. The `statifier` floor stays
-`~> 2.6` for every step on this page.
+then `"~> 0.16.0"`, then `"~> 0.17.0"`, then `"~> 0.18.0"`. The `statifier`
+floor stays `~> 2.6` through 0.17.0; 0.18.0 moves it to `~> 2.9`.
 
 ## Before you start: the database is at V07
 
@@ -30,7 +30,8 @@ with its own migration,
 
 and an install still short of V06 follows the V06 ordering rule in the
 `StatifierPersistence.Ecto.Migrations` documentation first. No release before
-0.17.0 adds a migration; 0.17.0 does (V08, at the end).
+0.17.0 adds a migration; 0.17.0 does (V08, under "0.16 to 0.17"), and
+0.18.0 adds none.
 
 ## 0.13 to 0.14
 
@@ -186,3 +187,51 @@ migration V08, which adds the column and an index on it.
   carries. `StatifierPersistence.Testing.StorageConformance` checks both.
 - `leading_columns:` and `timestamps_position:` do not move `ended_at`:
   V08 alters an existing table, so the column lands at the end.
+
+## 0.17 to 0.18
+
+Schema: **NONE**. 0.18.0 requires `statifier ~> 2.9`.
+
+- **Let `statifier` resolve to 2.9.** 0.18.0 reads
+  `Statifier.MachineState`'s `last_selection`, which statifier 2.9.0
+  adds. A host that pins `statifier` itself below 2.9 lifts that pin, then
+  updates both packages together.
+- **If you call `StatifierPersistence.Executions.migrate/4` on a durable
+  child**, expect `{:error, {:linked, execution}}`: `migrate/4` now
+  refuses an execution that carries a linkage and writes nothing, under
+  either `on_failure:` value, so a `:park` call parks nothing. Move a
+  child with `StatifierPersistence.Executions.migrate_tree/4`, the child
+  as the root, which moves its row and its linkage pin together. If you
+  match `t:StatifierPersistence.Executions.migrate_error/0` exhaustively,
+  add a clause for `{:linked, execution}`, or a catch-all.
+- **If you fetch a completed child's record and match `donedata: nil`**,
+  expect its donedata instead. `StatifierPersistence.Execution.from_record/1`
+  reads a recorded `{:done, donedata}` answer back as `donedata`, so a
+  fetched completed child of a durable subchart, a fan-out child's
+  included, carries the donedata it answered its parent with. Every other
+  record still reads `donedata: nil`.
+- **If you deliver a refused answer again**, you can take it from the
+  child's record: a single child now records its answer on its own
+  execution record before its parent's door is tried, on an adapter that
+  stores answers (`StatifierPersistence.Storage.execution_outcome_supported?/1`).
+  Fetch the child and answer through
+  `StatifierPersistence.Driver.answer_parent/3` with
+  `{:done, execution.donedata}`, or `{:failed, reason: execution.failure}`
+  for a failed child. A single child that ended before 0.18.0 has no
+  recorded answer; delivering its answer again still needs the answer you
+  held. A host that never redelivers: **NONE**.
+- **If you attach handlers to `StatifierPersistence.Telemetry.events/0` and
+  match the event name exhaustively**, add a clause for
+  `[:statifier_persistence, :execution, :step, :reentered]`. It fires
+  inside the step span, once per `error.communication` event the persist
+  tail re-entered after an executor failure, carrying `name`, `origin`
+  and `opts`. A host that folds the events it delivered to rebuild a
+  position folds each one after the event of the step that produced it,
+  through `Statifier.Interpreter.deliver_internal(machine_state,
+  :platform, name, origin, opts)`; a host that does not: **NONE**.
+- `[:statifier_persistence, :execution, :step, :stop]` gains a
+  `selection` key: `:selected` or `:none` when the event the step
+  delivered ran an external round, whether or not tracing is on, and
+  `nil` on a stop that delivered no event or returned no position.
+  **NONE** is required; a handler that matches the stop's metadata as a
+  closed map accepts the new key.
