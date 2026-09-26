@@ -714,3 +714,16 @@ answer, and one that keeps no log still sees no behaviour change (decision 1
 and its `sp-t12` Note); the `sp-b0g` Note's account of such a host capping
 its migration below V05 is not revisited here. This Note closes the trigger
 that Note named for the in-package adapter; it does not reopen decision 9.
+
+## Note (2026-09-26, sp-pmze): `prune_executions/3` is read as `prune_executions/4`
+
+Pure addition: nothing above is edited.
+
+Since the scoped prune (ADR-0016's `sp-u4mc` Amendment), the `sp-feo` Note's
+`Storage.Ecto` `prune_executions/3` is read as `prune_executions/4`: the
+adapter callback takes a scope
+(`c:StatifierPersistence.Storage.Adapter.prune_executions/4`,
+`lib/statifier_persistence/storage/adapter.ex:1019`, read at `c29f56e`), and
+`Storage.Ecto.prune_executions/4` still deletes a batch's input log rows and
+nulls its position blobs in one transaction
+(`lib/statifier_persistence/storage/ecto.ex:1100`, read at `c29f56e`).
