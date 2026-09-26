@@ -367,3 +367,56 @@ What was re-read before the flip:
 One claim of decision 2 has no test of its own: that the position blob
 update carries the equalities. sp-x8n6 adds that test or narrows the claim
 by a later Note; it does not hold the flip.
+
+## Amendment (2026-09-26, sp-efyh): `prune/3` takes `single_batch:`, and a call inside a caller's transaction is one transaction
+
+Status of this amendment: proposed (2026-09-26, sp-efyh). The record above
+and its 2026-09-25 Amendment stay accepted; this amendment is proposed
+until the operator accepts it.
+
+Decision 7 says each batch commits on its own. That holds only when
+nothing encloses the call. A host that runs its work inside a transaction
+of its own per partition (to set that partition's context before any
+write) and calls `prune/3` there gets one transaction for the whole
+drain, and loses the short-transaction bound `batch_size:` exists for.
+Its alternative was a loop of its own over `Storage.prune_executions/4`,
+which the facade's doc did not present as a host door.
+
+What it rests on, read on `main` at `ac63753`:
+
+- **The Ecto batch's transaction joins a caller's own.** "This transaction
+  joins a caller's own when there is one"
+  (`lib/statifier_persistence/storage/ecto.ex`, `prune_executions/4`,
+  @ac63753).
+- **`prune/3` drains by calling the facade until a batch answers fewer
+  executions than its limit** (`lib/statifier_persistence/retention.ex`,
+  `prune_batches/5`, @ac63753).
+
+**1. `prune/3` takes `single_batch:`, a boolean, `false` by default.**
+`true` runs one batch and answers its counts plus `more?`; left out or
+`false`, prune is decision 1's and the first Amendment's, unchanged, and
+answers the same map it always has. Capability refusal, `:scope` checks
+and `ArgumentError` rules are unchanged; a non-boolean raises
+`ArgumentError`. Code is `single_batch!/1` in `retention.ex`, landed with
+this amendment.
+
+**2. `more?` is the loop's own stop, handed to the host.** `true` when the
+batch took `batch_size:` executions, `false` when fewer; it says nothing
+about rows another transaction held locked (decision 8's SKIP LOCKED
+leaves them for a later call). A host loop that stops at `more?: false`
+stops where `prune/3` does.
+
+**3. Inside a caller's transaction, a prune is one transaction.** Decision
+7's "committed on its own" is read as: when no caller's transaction
+encloses the call. On the Ecto adapter every batch of a call made inside
+one joins it, so the whole drain commits or rolls back with the caller's.
+The facade `Storage.prune_executions/4` stays the one-batch door and
+`prune/3` with `single_batch: true` is the documented way to take one
+batch per host transaction.
+
+**4. No adapter change.** The callback, the facade's arity and the
+conformance suite are untouched.
+
+This is not breaking: a host that passes no `single_batch:` sees today's
+answer. It ships in a minor with an Added changelog line, and it adds no
+schema version.

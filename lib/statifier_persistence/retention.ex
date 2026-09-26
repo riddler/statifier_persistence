@@ -24,7 +24,21 @@ defmodule StatifierPersistence.Retention do
   @default_batch_size 500
 
   @typedoc "Options `prune/3` accepts."
-  @type prune_opt :: {:batch_size, pos_integer()} | {:scope, Adapter.prune_scope()}
+  @type prune_opt ::
+          {:batch_size, pos_integer()}
+          | {:scope, Adapter.prune_scope()}
+          | {:single_batch, boolean()}
+
+  @typedoc """
+  What `prune/3` answers for `single_batch: true`: one batch's own counts
+  plus whether another call may find more.
+  """
+  @type batch_counts :: %{
+          executions: non_neg_integer(),
+          position_blobs: non_neg_integer(),
+          inputs: non_neg_integer(),
+          more?: boolean()
+        }
 
   @doc """
   Clears the position blob and the input log of every execution that
@@ -41,7 +55,8 @@ defmodule StatifierPersistence.Retention do
   idempotent: a second call with the same cutoff answers zeros, because
   an execution with nothing left to clear is not selected again.
 
-  Each batch is one atomic unit in the adapter and commits on its own.
+  Each batch is one atomic unit in the adapter and commits on its own,
+  unless a caller's transaction encloses the call (see below).
   So an `{:error, reason}` from a later batch leaves the earlier batches
   pruned, and calling again with the same cutoff carries on from where
   the failed batch stopped.
@@ -75,21 +90,66 @@ defmodule StatifierPersistence.Retention do
     covers the whole store, as it always has. `nil` is refused rather
     than read as `IS NULL`, because an equality with `NULL` matches no
     row.
+  - `:single_batch` - `false` (the default) drains every batch as before.
+    `true` runs exactly one batch and answers that batch's own counts
+    plus `more?`: `true` when the batch took as many executions as
+    `batch_size:` allows, so another call may find more; `false` when it
+    took fewer, the same point where the default drain stops. A row
+    another transaction holds locked (on Postgres) is skipped, not
+    waited on, so it is left for a later call either way.
+
+  ## Inside a transaction of your own
+
+  Each batch is its own transaction only when nothing encloses it. On
+  `StatifierPersistence.Storage.Ecto` a batch's transaction joins a
+  caller's enclosing transaction, so `prune/3` called inside one runs the
+  whole drain - every batch - as one transaction that commits or rolls
+  back with the caller's. `:batch_size` then bounds each batch's
+  statements, not the transaction.
+
+  For one bounded transaction per batch - for example one that first sets
+  a partition's context - call `prune/3` with `single_batch: true` inside
+  each of your transactions, and call again while `more?` is `true`:
+
+      def prune_tenant(store, cutoff, tenant_id) do
+        batch =
+          Repo.transaction(fn ->
+            # set the tenant's context for this transaction here, then:
+            opts = [scope: [tenant_id: tenant_id], single_batch: true]
+
+            case Retention.prune(store, cutoff, opts) do
+              {:ok, counts} -> counts
+              {:error, reason} -> Repo.rollback(reason)
+            end
+          end)
+
+        with {:ok, %{more?: true}} <- batch do
+          prune_tenant(store, cutoff, tenant_id)
+        end
+      end
+
+  It answers `{:ok, counts}` for the last batch, `more?: false`, or the
+  first `{:error, reason}`, with every earlier batch committed.
   """
   @spec prune(store :: Storage.t(), cutoff :: DateTime.t(), opts :: [prune_opt()]) ::
-          {:ok, Adapter.prune_counts()} | {:error, Storage.error()}
+          {:ok, Adapter.prune_counts() | batch_counts()} | {:error, Storage.error()}
   def prune(store, cutoff, opts \\ [])
 
   def prune(%Storage{} = store, %DateTime{} = cutoff, opts) when is_list(opts) do
     batch_size = batch_size!(opts)
     scope = scope!(opts)
+    single_batch = single_batch!(opts)
 
     if Storage.execution_pruning_supported?(store) do
-      prune_batches(store, cutoff, batch_size, scope, %{
-        executions: 0,
-        position_blobs: 0,
-        inputs: 0
-      })
+      if single_batch do
+        prune_one_batch(store, cutoff, batch_size, scope)
+      else
+        prune_batches(store, cutoff, batch_size, scope, %{
+          executions: 0,
+          position_blobs: 0,
+          inputs: 0
+        })
+      end
     else
       {:error, :execution_pruning_unsupported}
     end
@@ -124,6 +184,24 @@ defmodule StatifierPersistence.Retention do
         if counts.executions < batch_size,
           do: {:ok, total},
           else: prune_batches(store, cutoff, batch_size, scope, total)
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  # A single batch, answered with `more?` rather than summed into a
+  # running total: `more?` is the loop's own stop, handed to the host.
+  @spec prune_one_batch(
+          Storage.t(),
+          DateTime.t(),
+          pos_integer(),
+          Adapter.prune_scope()
+        ) :: {:ok, batch_counts()} | {:error, Storage.error()}
+  defp prune_one_batch(store, cutoff, batch_size, scope) do
+    case Storage.prune_executions(store, cutoff, batch_size, scope) do
+      {:ok, counts} ->
+        {:ok, Map.put(counts, :more?, counts.executions == batch_size)}
 
       {:error, _reason} = error ->
         error
@@ -183,5 +261,17 @@ defmodule StatifierPersistence.Retention do
   defp raise_scope!(scope, requirement) do
     raise ArgumentError,
           "prune/3 requires `scope:` to be #{requirement}, got: #{inspect(scope)}"
+  end
+
+  @spec single_batch!([prune_opt()]) :: boolean()
+  defp single_batch!(opts) do
+    case Keyword.get(opts, :single_batch, false) do
+      value when is_boolean(value) ->
+        value
+
+      other ->
+        raise ArgumentError,
+              "prune/3 requires `single_batch:` to be true or false, got: #{inspect(other)}"
+    end
   end
 end

@@ -6,6 +6,10 @@ defmodule StatifierPersistence.Ecto.ScopedPruneTest do
   # not a leading column is refused before any statement runs (ADR-0016,
   # as amended for scoped pruning).
   #
+  # Also covers the single-batch path (`single_batch: true`): a scoped
+  # loop of `prune/3` calls, each inside its own transaction, and a call
+  # inside a caller's transaction that rolls back.
+  #
   # These cases run on Postgres only, by decision: scoped coverage off
   # Postgres is not wanted. The scoped arm adds no adapter-conditional
   # code: `prune_source/3` reads the tables by name and `scoped/2` adds one
@@ -91,6 +95,56 @@ defmodule StatifierPersistence.Ecto.ScopedPruneTest do
              Storage.prune_executions(store, @cutoff, 10, [])
   end
 
+  # sabotage: made Retention.prune/3's single-batch path pass [] to the
+  # facade in place of its scope -> red, the first loop iteration cleared
+  # both tenants at once and the second answered zeros with more?: false
+  # instead of the tenant-a-only 2/1 split. Verified red, reverted from a
+  # copy.
+  test "Retention.prune/3 with single_batch: true carries the scope to each batch, each in its own transaction",
+       %{store: store} do
+    for n <- 1..3, do: finished(store, "single-scoped-a-#{n}", @tenant_a)
+    for n <- 1..2, do: finished(store, "single-scoped-b-#{n}", @tenant_b)
+
+    answers = drain_in_own_transactions(store, @cutoff, @tenant_a, [])
+
+    assert [
+             %{executions: 2, position_blobs: 2, inputs: 2, more?: true},
+             %{executions: 1, position_blobs: 1, inputs: 1, more?: false}
+           ] = answers
+
+    for n <- 1..2 do
+      assert {:ok, %{position_blob: blob}} =
+               Storage.fetch_execution(store, "single-scoped-b-#{n}")
+
+      assert is_binary(blob)
+      assert {:ok, [_entry]} = Storage.Ecto.list_inputs(store.opts, "single-scoped-b-#{n}")
+    end
+  end
+
+  # sabotage: not run - no lib mutation reaches this under the SQL
+  # sandbox, where every connection the test owns is already inside one
+  # transaction. It pins the documented behaviour of the Ecto adapter's
+  # batch transaction joining a caller's (storage/ecto.ex,
+  # prune_executions/4): the caller's rollback undoes every batch.
+  test "prune/3 inside a caller's transaction that rolls back leaves every batch undone",
+       %{store: store} do
+    for n <- 1..2, do: finished(store, "rollback-a-#{n}", @tenant_a)
+
+    assert {:error, :undo} =
+             TestRepo.transaction(fn ->
+               {:ok, _counts} =
+                 Retention.prune(store, @cutoff, batch_size: 1, scope: @tenant_a)
+
+               TestRepo.rollback(:undo)
+             end)
+
+    for n <- 1..2 do
+      assert {:ok, %{position_blob: blob}} = Storage.fetch_execution(store, "rollback-a-#{n}")
+      assert is_binary(blob)
+      assert {:ok, [_entry]} = Storage.Ecto.list_inputs(store.opts, "rollback-a-#{n}")
+    end
+  end
+
   # The package's own migration makes `execution_id` unique, so no row
   # outside the scope can share an id the selection chose. A host that
   # partitions by its leading column keys that uniqueness on the column
@@ -172,6 +226,22 @@ defmodule StatifierPersistence.Ecto.ScopedPruneTest do
         door: "step",
         input_blob: <<seq>>
       })
+  end
+
+  # Loops `Retention.prune/3` with `single_batch: true`, each call inside
+  # its own transaction, collecting each batch's answer until `more?` is
+  # false.
+  defp drain_in_own_transactions(store, cutoff, scope, acc) do
+    {:ok, answer} =
+      TestRepo.transaction(fn ->
+        {:ok, counts} =
+          Retention.prune(store, cutoff, batch_size: 2, scope: scope, single_batch: true)
+
+        counts
+      end)
+
+    acc = acc ++ [answer]
+    if answer.more?, do: drain_in_own_transactions(store, cutoff, scope, acc), else: acc
   end
 
   defp restamp_input(_store, execution_id, seq, tenant) do
