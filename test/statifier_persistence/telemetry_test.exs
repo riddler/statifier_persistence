@@ -191,7 +191,7 @@ defmodule StatifierPersistence.TelemetryTest do
 
     on_exit(fn -> :telemetry.detach(handler_id) end)
 
-    start_supervised!(RecordingExecutor)
+    RecordingExecutor.start!()
     {:ok, store} = Storage.new(InMemory, [])
 
     # The store's own `:init` adapter call is setup, not the test's

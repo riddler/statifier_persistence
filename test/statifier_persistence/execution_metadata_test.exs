@@ -55,9 +55,8 @@ defmodule StatifierPersistence.ExecutionMetadataTest do
     %{store: store, machine: machine, executor: executor(recorder), recorder: recorder}
   end
 
-  # A per-test recording executor, as an arity-2 fun rather than the
-  # module-named `RecordingExecutor`: that one registers under a global
-  # name, which collides across async modules.
+  # A per-test recording executor, as an arity-2 fun over this test's own
+  # Agent, so each test reads exactly the effects its own calls produced.
   defp executor(recorder) do
     fn effect, context ->
       Agent.update(recorder, &[{effect, context} | &1])
