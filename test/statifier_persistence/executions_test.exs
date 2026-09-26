@@ -322,7 +322,7 @@ defmodule StatifierPersistence.ExecutionsTest do
 
   setup do
     {:ok, store} = Storage.new(InMemory, [])
-    start_supervised!(RecordingExecutor)
+    RecordingExecutor.start!()
     %{store: store}
   end
 

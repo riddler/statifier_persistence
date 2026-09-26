@@ -104,7 +104,7 @@ defmodule StatifierPersistence.CoreTelemetryTest do
 
     on_exit(fn -> :telemetry.detach(handler_id) end)
 
-    start_supervised!(RecordingExecutor)
+    RecordingExecutor.start!()
     {:ok, store} = Storage.new(InMemory, [])
     drain()
 

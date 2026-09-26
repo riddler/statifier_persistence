@@ -59,7 +59,7 @@ defmodule StatifierPersistence.Ecto.CallerTransactionTest do
   end
 
   setup do
-    start_supervised!(RecordingExecutor)
+    RecordingExecutor.start!()
     %{execution_id: "caller-tx-#{System.unique_integer([:positive])}"}
   end
 

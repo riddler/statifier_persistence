@@ -62,7 +62,7 @@ defmodule StatifierPersistence.HeldLeaseTest do
   end
 
   setup do
-    start_supervised!(RecordingExecutor)
+    RecordingExecutor.start!()
     %{execution_id: @prefix <> "#{System.unique_integer([:positive])}"}
   end
 
