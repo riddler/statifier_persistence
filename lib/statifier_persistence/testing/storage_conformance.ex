@@ -1687,6 +1687,116 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         end
       end
 
+      # -- Adapter level: the optional listing by status set (ADR-0017) --
+      #
+      # Generated only when the adapter under test exports the optional
+      # list_execution_ids_by_content_hash/3. The contract is decision 8's:
+      # the ids on one hash in any of the given statuses, ascending, and
+      # an empty list for a hash the store has never seen.
+
+      if Code.ensure_loaded?(conformance_adapter) and
+           function_exported?(conformance_adapter, :list_execution_ids_by_content_hash, 3) do
+        @listing_hash "sha256:conformance-listing-by-status"
+        @listing_other_hash "sha256:conformance-listing-other"
+
+        # sabotage: in the adapter under test's
+        # list_execution_ids_by_content_hash/3, drop the status predicate
+        # -> red, the completed and cancelled ids came back beside the
+        # asked ones. Verified red on both conformance suites. Reverted
+        # from a copy.
+        test "adapter: the listing names the executions on the hash in the asked statuses",
+             %{store: store} do
+          save_listing_chart(store, @listing_hash)
+          save_listing_chart(store, @listing_other_hash)
+          insert_listing_execution(store, "listing-c-active", @listing_hash, :active)
+          insert_listing_execution(store, "listing-a-parked", @listing_hash, :needs_migration)
+          insert_listing_execution(store, "listing-b-done", @listing_hash, :completed)
+          insert_listing_execution(store, "listing-d-cancelled", @listing_hash, :cancelled)
+          insert_listing_execution(store, "listing-e-elsewhere", @listing_other_hash, :active)
+
+          assert {:ok, ["listing-a-parked", "listing-c-active"]} =
+                   @conformance_adapter.list_execution_ids_by_content_hash(
+                     store.opts,
+                     @listing_hash,
+                     [:active, :needs_migration]
+                   )
+
+          assert {:ok, ["listing-b-done", "listing-d-cancelled"]} =
+                   @conformance_adapter.list_execution_ids_by_content_hash(
+                     store.opts,
+                     @listing_hash,
+                     [:completed, :cancelled]
+                   )
+        end
+
+        # More ids than a small Erlang map holds, so an in-memory store's
+        # map no longer yields its values in key order.
+        #
+        # sabotage: in the adapter under test's
+        # list_execution_ids_by_content_hash/3, drop the final sort -> red
+        # on both conformance suites, the ids came back in the store's own
+        # order. Verified red, reverted from a copy.
+        test "adapter: the listing is in ascending execution id", %{store: store} do
+          save_listing_chart(store, @listing_hash)
+
+          ids = for n <- Enum.shuffle(1..40), do: "listing-order-#{n}"
+
+          for id <- ids do
+            insert_listing_execution(store, id, @listing_hash, :active)
+          end
+
+          assert {:ok, listed} =
+                   @conformance_adapter.list_execution_ids_by_content_hash(
+                     store.opts,
+                     @listing_hash,
+                     [:active]
+                   )
+
+          assert listed == Enum.sort(ids)
+        end
+
+        # sabotage: in the adapter under test's
+        # list_execution_ids_by_content_hash/3, drop the content-hash
+        # predicate -> red, an unseen hash listed the other hash's
+        # execution. Verified red on both conformance suites. Reverted
+        # from a copy.
+        test "adapter: a hash this store never held lists nothing", %{store: store} do
+          save_listing_chart(store, @listing_other_hash)
+          insert_listing_execution(store, "listing-f-elsewhere", @listing_other_hash, :active)
+
+          assert {:ok, []} =
+                   @conformance_adapter.list_execution_ids_by_content_hash(
+                     store.opts,
+                     "sha256:conformance-listing-never-stored",
+                     [:active, :needs_migration]
+                   )
+        end
+
+        defp save_listing_chart(store, content_hash) do
+          assert :ok =
+                   @conformance_adapter.save_chart(store.opts, %{
+                     content_hash: content_hash,
+                     identity_blob: <<1, 2, 3>>,
+                     chart_blob: <<4, 5, 6>>
+                   })
+        end
+
+        defp insert_listing_execution(store, execution_id, content_hash, status) do
+          assert :ok =
+                   @conformance_adapter.insert_execution(store.opts, %{
+                     execution_id: execution_id,
+                     status: status,
+                     content_hash: content_hash,
+                     identity_blob: <<1, 2, 3>>,
+                     position_blob: <<7, 8, 9>>,
+                     failure: nil,
+                     metadata: %{},
+                     outcome_blob: nil,
+                     ended_at: nil
+                   })
+        end
+      end
+
       # -- Adapter level: the optional tree migration unit (ADR-0015) ----
       #
       # Generated only when the adapter under test exports the optional

@@ -36,6 +36,14 @@ defmodule StatifierPersistence.ExecutionVocabularyTest do
   # package-internal, and is the verb rather than the noun.
   @survivor_names ["run"]
 
+  # Atom survivors, each a whole atom that spells `run` in another sense.
+  # ADR-0017 decision 6 names `migrate_batch/3`'s `dry_run:` option and its
+  # report's `dry_run` key: a dry run is a rehearsal of the batch, not the
+  # retired noun for the durable record. The atom is removed from a line
+  # before the line is matched, so any other spelling beside it still
+  # fails.
+  @survivor_atoms ["dry_run"]
+
   defp lines(path), do: path |> File.read!() |> String.split("\n") |> Enum.with_index(1)
 
   defp survivor_line?(path, line) do
@@ -46,6 +54,13 @@ defmodule StatifierPersistence.ExecutionVocabularyTest do
   # keyword syntax, which carries no leading colon and which the first
   # pattern alone cannot see (sp-op4's pass-1 follow-on (a)).
   defp atom_spelling?(line) do
+    line =
+      Regex.replace(
+        ~r/(?<![a-z0-9_])(?:#{Enum.join(@survivor_atoms, "|")})(?![a-z0-9_])/,
+        line,
+        ""
+      )
+
     Regex.match?(~r/:(?:runs?|run_[a-z0-9_]+|[a-z0-9_]+_runs?)(?![a-z0-9_])/, line) or
       Regex.match?(~r/(?:^\s*|[\[{,]\s*)(?:runs?|run_[a-z0-9_]+|[a-z0-9_]+_runs?):(?!:)/, line)
   end
@@ -121,6 +136,17 @@ defmodule StatifierPersistence.ExecutionVocabularyTest do
       refute atom_spelling?("    here a non-Postgres adapter cannot run: a table and an index")
       refute atom_spelling?("  # not that nothing has run: the handle is still there")
       refute atom_spelling?("      executions: [")
+
+      # The one atom survivor, and only it: a `dry_run` key or atom passes,
+      # and a retired spelling on the same line still fails.
+      #
+      # sabotage: emptied @survivor_atoms -> red here, and in the atom test
+      # above on every `dry_run` line of executions.ex. Verified red,
+      # reverted from a copy.
+      refute atom_spelling?("    dry_run = Keyword.get(opts, :dry_run, false)")
+      refute atom_spelling?("      dry_run: dry_run,")
+      assert atom_spelling?("      dry_run: dry_run, run_id: id")
+      assert atom_spelling?("    Keyword.get(opts, :dry_runs, false)")
     end
 
     # The broadest arm: the `run_id` / `run_status` spellings anywhere in
