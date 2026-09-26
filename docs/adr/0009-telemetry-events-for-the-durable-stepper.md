@@ -1285,3 +1285,45 @@ What was re-read before the flip:
   not an `:ok` with a position.
 - **The docs.** `docs/telemetry.md`'s step stop row lists `selection`,
   and the text below the table says what it reads.
+
+## Note (2026-09-26, sp-4djh): the batch migration span, decided by ADR-0017 decision 6
+
+Pure addition: nothing above is edited. This Note names a second span in
+this record's family and points at the record that decides it; it decides
+nothing itself.
+
+**The span.** `StatifierPersistence.Executions.migrate_batch/3` is
+bracketed by `[:statifier_persistence, :execution, :migrate_batch, :start]`,
+`[..., :stop]` and `[..., :exception]`. ADR-0017 decision 6
+(`docs/adr/0017-migrating-the-executions-on-a-chart.md`, "The verb, its
+report and the batch span", read on `main` at `4c8ab37`) decides the names,
+the measurements - on the stop, one count per outcome of the mode beside
+`duration` and `monotonic_time` - and the metadata `from`, `to`, `dry_run`
+and `span_ref`, with `outcome` and `reason` on the stop and `kind`,
+`reason` and `stacktrace` on the exception. `docs/telemetry.md`'s batch
+migration section is the contract a host attaches to.
+
+**Decision 5.** Its heading, "The step seam is a `:start` / `:stop` pair;
+everything else is a point-in-time event", read with this Note, has a
+second pair: the batch span. The Consequences section names "a consumer
+needing an interval this package owns that decision 5's single pair does
+not bracket" as what would reopen this record; ADR-0017 is the dated record
+that answers it for one interval, a batch call over every execution on a
+chart hash. The step span and every point-in-time event are unchanged, and
+the per-execution `[:statifier_persistence, :execution, :migrated]` event
+still fires once per execution a batch moves.
+
+**Decision 8.** The frozen list grows from twenty event names to
+twenty-three. `@events` in `lib/statifier_persistence/telemetry.ex` holds
+twenty names at `4c8ab37`, and this change adds `@execution_migrate_batch_start`,
+`@execution_migrate_batch_stop` and `@execution_migrate_batch_exception`
+after `@drive_turns_exhausted`, in the order `docs/telemetry.md` tables
+them, with their emitters `execution_migrate_batch_start/1`,
+`execution_migrate_batch_stop/3` and `execution_migrate_batch_exception/2`.
+The earlier counts in this record and in `docs/adr/README.md`'s index row
+are corrected by this addition; this Note edits none of them in place. A
+handler that matches the names `events/0` returns exhaustively needs a
+clause for each new one.
+
+Decision 7 holds: none of the values it excludes is on the span, and the
+exception's `reason` and `stacktrace` are narrowed as the step span's are.

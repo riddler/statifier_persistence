@@ -1,0 +1,3 @@
+### Added
+
+- `StatifierPersistence.Executions.migrate_batch/3` emits one telemetry span per call: `[:statifier_persistence, :execution, :migrate_batch, :start]`, then `[..., :stop]` carrying the report's count per outcome as measurements, or `[..., :exception]` when the batch raises. Every half carries the plan's `from` and `to` hashes, `dry_run` and `span_ref`; the stop adds `outcome` (`:ok`, or `:error` with the refusal as `reason` when the whole batch was refused). The dry run and a whole-batch refusal open it too, and `StatifierPersistence.Telemetry.events/0` lists the three new names. The per-execution `[:statifier_persistence, :execution, :migrated]` event is unchanged.

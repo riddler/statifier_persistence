@@ -175,7 +175,9 @@ call, so `st-ADR-0067` decision 5's "a span never crosses a persist
 boundary" holds structurally.
 
 Everything that is *not* the step seam is a single point-in-time event, on
-that record's own reasoning.
+that record's own reasoning - except the batch migration, the second span
+(below): one call over every execution on a chart hash is an interval this
+package owns too.
 
 ### The step seam
 
@@ -429,6 +431,37 @@ which is single-wave by design. Nothing wraps a *successful* executor call: the
 host's work is the host's to instrument, and the step span already bounds
 it.
 
+### The batch migration span (ADR-0017 decision 6)
+
+Brackets one `Executions.migrate_batch/3` call, opened once its options are
+checked. Emitted on the calling process.
+
+| Event | Emitted from | Measurements | Metadata |
+|---|---|---|---|
+| `[:statifier_persistence, :execution, :migrate_batch, :start]` | `Executions.migrate_batch/3`, after its options are checked and before the plan's checks and the listing | `system_time`, `monotonic_time` | `from`, `to`, `dry_run`, `span_ref` |
+| `[:statifier_persistence, :execution, :migrate_batch, :stop]` | the same call, on every return | `duration`, `monotonic_time`, one count per outcome of the mode | `from`, `to`, `dry_run`, `span_ref`, `outcome`, `reason` |
+| `[:statifier_persistence, :execution, :migrate_batch, :exception]` | the same call, in place of the stop, when the batch raises, throws or exits | `duration`, `monotonic_time` | `from`, `to`, `dry_run`, `span_ref`, `kind`, `reason`, `stacktrace` |
+
+`from` and `to` are the plan's two content hashes, and `dry_run` is the
+option the call was given. The stop's counts are the report's `counts`, one
+measurement per outcome of the mode, every one present: `would_migrate`,
+`would_refuse` and `skipped` under the dry run; `migrated`, `refused`,
+`parked` and `skipped` under the apply. `outcome` is `:ok` when the call
+answered a report, with `reason` `nil`, and `:error` when it refused the
+whole batch, with `reason` the refusal it answered and every count `0`.
+
+The dry run opens the span and so does a whole-batch refusal, so a host
+counting stops counts every batch it asked for. A malformed option raises
+`ArgumentError` before the span opens. The exception's keys are the step
+span's: the start's metadata plus `kind`, `reason` and `stacktrace`, with
+`reason` and `stacktrace` narrowed the same way, and the raise then reaches
+the caller unchanged.
+
+Each execution the apply moves still emits its own
+`[:statifier_persistence, :execution, :migrated]`, unchanged, between the
+batch's start and its stop; the dry run emits none. A batch is not a step:
+its span takes no `entry` and no `execution_id`.
+
 ### The durable-subchart seam (ADR-0008)
 
 Emitted on the parent's stepping process, at dispatch time.
@@ -559,7 +592,8 @@ is indexes into the chart and is bounded by it.
 vocabulary (`:discarded`, `:child, :refused`, the adapter arms) it is safe
 to dimension on. Where it carries an arbitrary executor or adapter error
 (`:effect, :failed`, `:adapter, :call`'s `{:adapter, term}`, the step
-stop), a consumer must narrow it before it becomes a dimension. The step
+stop, the batch migration stop), a consumer must narrow it before it
+becomes a dimension. The step
 exception's `reason` is already narrowed to a module or an atom. A host executor returning a per-effect struct
 there will blow up any metric keyed on it, and no change here can prevent
 that.
@@ -704,6 +738,10 @@ gets, with no OpenTelemetry anywhere:
 - a counter on `[:statifier_persistence, :execution, :migrated]` by
   `from_content_hash` and `to_content_hash` - how many executions a sweep
   over the drained query has moved off a chart;
+- a distribution over `[:statifier_persistence, :execution, :migrate_batch,
+  :stop]`'s `duration` by `dry_run` and `outcome`, and sums of its counts -
+  how long a batch took and how many executions it moved, refused, parked
+  and skipped;
 - a counter on `[:statifier_persistence, :execution, :unparked]` by
   `content_hash` - how many parked executions a host put back to work
   unmigrated;

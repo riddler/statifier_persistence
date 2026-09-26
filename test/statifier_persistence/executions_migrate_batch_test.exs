@@ -191,9 +191,25 @@ defmodule StatifierPersistence.ExecutionsMigrateBatchTest do
     end
   end
 
+  defmodule RaisingStrategy do
+    @moduledoc false
+    # A serialization strategy that raises when an execution's turn comes:
+    # a fault inside the batch, after its span opened.
+    @behaviour StatifierPersistence.Serialization
+
+    @impl StatifierPersistence.Serialization
+    def with_execution(_config, _execution_id, _fun), do: raise("the loan shelf is unreachable")
+  end
+
   @doc false
   def forward(name, _measurements, metadata, %{pid: pid}) do
     if self() == pid, do: send(pid, {:telemetry, name, metadata})
+    :ok
+  end
+
+  @doc false
+  def forward_span(name, measurements, metadata, %{pid: pid}) do
+    if self() == pid, do: send(pid, {:span, List.last(name), measurements, metadata})
     :ok
   end
 
@@ -293,6 +309,22 @@ defmodule StatifierPersistence.ExecutionsMigrateBatchTest do
   defp attach(event) do
     id = {__MODULE__, make_ref()}
     :ok = :telemetry.attach(id, event, &__MODULE__.forward/4, %{pid: self()})
+    on_exit(fn -> :telemetry.detach(id) end)
+  end
+
+  @batch_span [:statifier_persistence, :execution, :migrate_batch]
+
+  defp attach_span do
+    id = {__MODULE__, make_ref()}
+
+    :ok =
+      :telemetry.attach_many(
+        id,
+        for(half <- [:start, :stop, :exception], do: @batch_span ++ [half]),
+        &__MODULE__.forward_span/4,
+        %{pid: self()}
+      )
+
     on_exit(fn -> :telemetry.detach(id) end)
   end
 
@@ -691,6 +723,149 @@ defmodule StatifierPersistence.ExecutionsMigrateBatchTest do
       end
 
       assert stored(ctx, "loan-a") == before
+    end
+  end
+
+  describe "the batch span (ADR-0017 decision 6)" do
+    # sabotage: had batch_span/3 (executions.ex) emit the stop with an
+    # empty counts map -> red over both adapters: the stop carried no
+    # :migrated or :refused measurement. Verified red, reverted from a copy.
+    test "an apply opens it, and its stop carries the report's counts", ctx do
+      loan!(ctx, "loan-a", [])
+      loan!(ctx, "loan-b", ["loan.due"])
+      attach_span()
+      attach([:statifier_persistence, :execution, :migrated])
+
+      assert {:ok, %{counts: counts}} =
+               batch(ctx, plan!(ctx.loan, ctx.recall), ctx.loan, ctx.recall)
+
+      assert_received {:span, :start, start_m, start_meta}
+      assert %{system_time: _, monotonic_time: started_at} = start_m
+      from = hash(ctx.loan)
+      to = hash(ctx.recall)
+
+      assert %{from: ^from, to: ^to, dry_run: false, span_ref: span_ref} = start_meta
+      assert is_reference(span_ref)
+
+      assert_received {:telemetry, [:statifier_persistence, :execution, :migrated],
+                       %{execution_id: "loan-a"}}
+
+      assert_received {:span, :stop, stop_m, stop_meta}
+
+      assert %{
+               from: ^from,
+               to: ^to,
+               dry_run: false,
+               span_ref: ^span_ref,
+               outcome: :ok,
+               reason: nil
+             } = stop_meta
+
+      assert %{duration: duration, monotonic_time: stopped_at} = stop_m
+      assert duration == stopped_at - started_at
+      assert Map.drop(stop_m, [:duration, :monotonic_time]) == counts
+      assert counts == %{migrated: 1, refused: 1, parked: 0, skipped: 0}
+      refute_received {:span, _half, _measurements, _metadata}
+    end
+
+    # sabotage: had migrate_batch/3 (executions.ex) call migrate_listed/1
+    # outside batch_span/3 when dry_run is true -> red over both adapters:
+    # the dry run emitted no start. Verified red, reverted from a copy.
+    test "a dry run opens it, with the dry run's counts and no :migrated", ctx do
+      loan!(ctx, "loan-a", [])
+      loan!(ctx, "loan-b", ["loan.due"])
+      attach_span()
+      attach([:statifier_persistence, :execution, :migrated])
+
+      assert {:ok, %{counts: counts}} =
+               batch(ctx, plan!(ctx.loan, ctx.recall), ctx.loan, ctx.recall, dry_run: true)
+
+      assert_received {:span, :start, _start_m, %{dry_run: true, span_ref: span_ref}}
+      assert_received {:span, :stop, stop_m, stop_meta}
+      assert %{dry_run: true, span_ref: ^span_ref, outcome: :ok, reason: nil} = stop_meta
+      assert Map.drop(stop_m, [:duration, :monotonic_time]) == counts
+      assert counts == %{would_migrate: 1, would_refuse: 1, skipped: 0}
+      refute_received {:telemetry, _name, _metadata}
+      refute_received {:span, _half, _measurements, _metadata}
+    end
+
+    # sabotage: had batch_span/3 (executions.ex) match no {:error, _}
+    # result -> red over both adapters: a refused batch raised instead of
+    # closing its span with :error. Verified red, reverted from a copy.
+    test "a whole-batch refusal closes it with :error, the refusal and zero counts", ctx do
+      loan!(ctx, "loan-a", [])
+      attach_span()
+      plan = plan!(ctx.loan, ctx.checkin, %{"no_such_state" => "awaiting_return"})
+
+      for {dry_run, zeros} <- [
+            {true, %{would_migrate: 0, would_refuse: 0, skipped: 0}},
+            {false, %{migrated: 0, refused: 0, parked: 0, skipped: 0}}
+          ] do
+        assert {:error, {:invalid_plan, _findings} = reason} =
+                 batch(ctx, plan, ctx.loan, ctx.checkin, dry_run: dry_run)
+
+        assert_received {:span, :start, _start_m, %{dry_run: ^dry_run, span_ref: span_ref}}
+        assert_received {:span, :stop, stop_m, stop_meta}
+
+        assert %{dry_run: ^dry_run, span_ref: ^span_ref, outcome: :error, reason: ^reason} =
+                 stop_meta
+
+        assert Map.drop(stop_m, [:duration, :monotonic_time]) == zeros
+      end
+
+      refute_received {:span, _half, _measurements, _metadata}
+    end
+
+    # sabotage: had batch_span/3 (executions.ex)'s catch clause match no
+    # kind -> red over both adapters: the raise reached the caller with
+    # the span left open and no :exception. Verified red, reverted from a
+    # copy.
+    test "a raise inside the batch closes it with :exception and reaches the caller", ctx do
+      loan!(ctx, "loan-a", [])
+      attach_span()
+
+      for dry_run <- [true, false] do
+        assert_raise RuntimeError, "the loan shelf is unreachable", fn ->
+          batch(ctx, plan!(ctx.loan, ctx.checkin), ctx.loan, ctx.checkin,
+            dry_run: dry_run,
+            serialization: {RaisingStrategy, nil}
+          )
+        end
+
+        assert_received {:span, :start, %{monotonic_time: started_at}, start_meta}
+        assert %{dry_run: ^dry_run, span_ref: span_ref} = start_meta
+        assert_received {:span, :exception, exc_m, exc_meta}
+        assert %{duration: duration, monotonic_time: raised_at} = exc_m
+        assert duration == raised_at - started_at
+        assert map_size(exc_m) == 2
+
+        assert %{
+                 from: from,
+                 to: to,
+                 dry_run: ^dry_run,
+                 span_ref: ^span_ref,
+                 kind: :error,
+                 reason: RuntimeError,
+                 stacktrace: [_ | _]
+               } = exc_meta
+
+        assert from == hash(ctx.loan)
+        assert to == hash(ctx.checkin)
+        refute_received {:span, :stop, _measurements, _metadata}
+      end
+    end
+
+    # sabotage: had migrate_batch/3 (executions.ex) emit a start before
+    # check_batch_opts!/3 -> red over both adapters: a malformed option
+    # emitted a start. Verified red, reverted from a copy.
+    test "a malformed option raises before it opens", ctx do
+      attach_span()
+
+      assert_raise ArgumentError, fn ->
+        batch(ctx, plan!(ctx.loan, ctx.checkin), ctx.loan, ctx.checkin, dry_run: "yes")
+      end
+
+      refute_received {:span, _half, _measurements, _metadata}
     end
   end
 
