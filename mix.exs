@@ -36,7 +36,8 @@ defmodule StatifierPersistence.MixProject do
   # `test/dialyzer/` holds callers written the way a host writes them, for
   # the Dialyzer stage to read: `mix dialyzer` runs in `:dev`, so it is
   # compiled there as well as in `:test`. Never in `:prod`, and never in the
-  # package's `files:`.
+  # package's `files:`. `test/statifier_persistence/dialyzer_fixture_paths_test.exs`
+  # fails when `test/dialyzer` drops out of the `:dev` list.
   defp elixirc_paths(:test), do: ["lib", "test/support", "test/dialyzer"]
   defp elixirc_paths(:dev), do: ["lib", "test/dialyzer"]
   defp elixirc_paths(_), do: ["lib"]
