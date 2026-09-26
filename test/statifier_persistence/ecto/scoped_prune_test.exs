@@ -1,9 +1,10 @@
 defmodule StatifierPersistence.Ecto.ScopedPruneTest do
   # A scoped prune on the Ecto adapter, past what the conformance case
-  # proves: the scope reaches the input log check and the input log
-  # delete as well as the selection, `Retention.prune/3` carries it to
-  # every batch, and a column that is not a leading column is refused
-  # before any statement runs (ADR-0016, as amended for scoped pruning).
+  # proves: the scope reaches the input log check, the input log delete
+  # and the position blob update as well as the selection,
+  # `Retention.prune/3` carries it to every batch, and a column that is
+  # not a leading column is refused before any statement runs (ADR-0016,
+  # as amended for scoped pruning).
   use ExUnit.Case, async: true
 
   alias Ecto.Adapters.SQL
@@ -77,6 +78,48 @@ defmodule StatifierPersistence.Ecto.ScopedPruneTest do
 
     assert {:ok, %{executions: 1, position_blobs: 0, inputs: 1}} =
              Storage.prune_executions(store, @cutoff, 10, [])
+  end
+
+  # The package's own migration makes `execution_id` unique, so no row
+  # outside the scope can share an id the selection chose. A host that
+  # partitions by its leading column keys that uniqueness on the column
+  # and the id instead, and there two partitions can hold one id. The
+  # test drops the index inside its sandbox transaction to build that
+  # table, then copies the execution's row into tenant-b under the same
+  # id.
+  #
+  # sabotage: dropped `scoped/3` from the position blob update in the
+  # Ecto adapter's prune_batch/4 -> red, the batch cleared two blobs,
+  # the tenant-b row's with the tenant-a row's. Verified red, reverted
+  # from a copy.
+  test "the position blob update carries the scope", %{store: store} do
+    SQL.query!(TestRepo, ~s(DROP INDEX "scoped"."statifier_executions_execution_id_index"))
+    finished(store, "scoped-shared", @tenant_a)
+
+    SQL.query!(
+      TestRepo,
+      ~s(CREATE TEMPORARY TABLE shared_copy ON COMMIT DROP AS SELECT * FROM "scoped"."statifier_executions" WHERE execution_id = $1),
+      ["scoped-shared"]
+    )
+
+    SQL.query!(TestRepo, ~s(UPDATE shared_copy SET id = id || '-b', tenant_id = 'tenant-b'))
+
+    SQL.query!(
+      TestRepo,
+      ~s(INSERT INTO "scoped"."statifier_executions" SELECT * FROM shared_copy)
+    )
+
+    assert {:ok, %{executions: 1, position_blobs: 1, inputs: 1}} =
+             Storage.prune_executions(store, @cutoff, 10, @tenant_a)
+
+    assert %{rows: rows} =
+             SQL.query!(
+               TestRepo,
+               ~s(SELECT tenant_id, position_blob IS NULL FROM "scoped"."statifier_executions" WHERE execution_id = $1 ORDER BY tenant_id),
+               ["scoped-shared"]
+             )
+
+    assert rows == [["tenant-a", true], ["tenant-b", false]]
   end
 
   # sabotage: made check_scope!/2 answer :ok for every scope -> red, the
