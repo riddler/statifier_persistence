@@ -947,7 +947,7 @@ No other decision moves.
 
 ## Amendment (2026-09-23, sp-q0pp): `delivery` names the two ways an answer never reaches the parent's door
 
-Status of this amendment: proposed (2026-09-23, sp-q0pp). The record above
+Status of this amendment: accepted (2026-09-25, sp-q0pp). The record above
 stays accepted; this amendment is proposed until the operator accepts it.
 
 The sp-6neq Amendment gave `[:statifier_persistence, :child, :answered]` a
@@ -1094,7 +1094,7 @@ What was re-read before the flip:
 
 ## Amendment (2026-09-24, sp-226): each re-entered `error.communication` gets an event inside the step span
 
-Status of this amendment: proposed (2026-09-24, sp-226). The record above
+Status of this amendment: accepted (2026-09-25, sp-226). The record above
 stays accepted; this amendment is proposed until the operator accepts it.
 
 ADR-0004 decision 4 re-enters an executor failure on an actionable effect
@@ -1167,7 +1167,7 @@ No other decision moves.
 
 ## Amendment (2026-09-25, sp-qrkx): the step stop says whether the delivered event selected a transition
 
-Status of this amendment: proposed (2026-09-25, sp-qrkx). The record above
+Status of this amendment: accepted (2026-09-25, sp-qrkx). The record above
 stays accepted; this amendment is proposed until the operator accepts it.
 
 A caller of `step/5` cannot tell a delivery that moved the chart from one
@@ -1223,3 +1223,65 @@ caller holding the returned position can read `last_selection` from it
 directly, and the key exists for a caller that has only the event.
 
 No other decision moves.
+
+## Note (2026-09-25): the sp-q0pp Amendment is accepted
+
+The operator accepted the 2026-09-23 sp-q0pp Amendment on 2026-09-25. The
+code that implements it landed in PR 160 (`6f901ac`) and shipped in
+statifier_persistence 0.16.0 (tag `v0.16.0`, `8314fce`). That Amendment's
+own status line flips in place from proposed to accepted, and the record
+above stays accepted. Its "this amendment is proposed until the operator
+accepts it" is met here and stays as written. Every cite in the three
+Notes of this date was read on `main` at `adca4f0`, which carries 0.19.0.
+
+What was re-read before the flip:
+
+- **Decision 1.** `t:StatifierPersistence.Telemetry.delivery/0` carries
+  `:parent_unfetched` and `:parent_chart_unresolved`
+  (`lib/statifier_persistence/telemetry.ex`).
+- **Decision 2.** The driver emits `:answered` with each value from the
+  step that failed, through `unreached/5`
+  (`lib/statifier_persistence/driver.ex`).
+- **Decision 5.** `docs/telemetry.md`'s `:answered` row names both
+  entry points, and its text says `resolve_and_answer_parent/3` still
+  returns `:ok`.
+
+## Note (2026-09-25): the sp-226 Amendment is accepted
+
+The operator accepted the 2026-09-24 sp-226 Amendment on 2026-09-25. The
+code that implements it landed in PR 171 (`d72c92e`) and shipped in
+statifier_persistence 0.18.0 (tag `v0.18.0`, `453f630`). That Amendment's
+own status line flips in place from proposed to accepted, and the record
+above stays accepted. Its "this amendment is proposed until the operator
+accepts it" is met here and stays as written.
+
+What was re-read before the flip:
+
+- **Decisions 1 and 2.** `deliver_reentry/4` calls `report_reentry/3`
+  only once the re-entry is delivered
+  (`lib/statifier_persistence/executions.ex`).
+- **Decision 5.** `@execution_step_reentered` sits in `@events`, which
+  lists twenty names, with its emitter `execution_step_reentered/1`
+  (`lib/statifier_persistence/telemetry.ex`), and `docs/telemetry.md`'s
+  step seam table carries the row with `name`, `origin` and `opts`.
+
+## Note (2026-09-25): the sp-qrkx Amendment is accepted
+
+The operator accepted the 2026-09-25 sp-qrkx Amendment on 2026-09-25. The
+code that implements it landed in PR 177 (`1fcc6f5`) and shipped in
+statifier_persistence 0.18.0 (tag `v0.18.0`, `453f630`). That Amendment's
+own status line flips in place from proposed to accepted, and the record
+above stays accepted. Its "this amendment is proposed until the operator
+accepts it" is met here and stays as written.
+
+What was re-read before the flip:
+
+- **Decision 1.** The step stop's fields carry `selection`, read by
+  `selection/1` off the returned position's `last_selection`
+  (`lib/statifier_persistence/executions.ex`), and the dependency is
+  `{:statifier, "~> 2.9"}` in `mix.exs`, with statifier 2.9.0 in
+  `mix.lock`.
+- **Decision 3.** `selection/1` answers `nil` for every result that is
+  not an `:ok` with a position.
+- **The docs.** `docs/telemetry.md`'s step stop row lists `selection`,
+  and the text below the table says what it reads.
