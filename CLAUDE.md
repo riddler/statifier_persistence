@@ -57,7 +57,8 @@ irreversible step, and report.
 | `bd close <id>` | never for a mirrored bead whose other half is not merged to its own repo's origin/main; a mirrored bead whose other half has ALSO landed may be closed by the campaign conductor under a consent naming this exception, both halves together, each verified against its remote; otherwise the operator's call | for a bead whose description carries a `mirrors:` line while its other half is unlanded, campaign consent included |
 | `bd dolt push` | the operator's call | inside a campaign that spans mirrored trackers - the conductor pushes those atomically |
 | a version bump on a release bead's branch | an operator-authorized release bead, inside a campaign carrying the operator's explicit consent | on any other bead, on main, or when the operator has not named this repo's release bead |
-| a release (tag, `mix hex.publish`, GitHub release) | never | always - publishing is the operator's, in every campaign |
+| tagging a release prep | the release bead's version bump is merged to `origin/main`; the tag names that version at the merged commit | before the bump is on `origin/main`; a tag naming any other version or commit |
+| a release (`mix hex.publish`, GitHub release) | never | always - publishing is the operator's, in every campaign |
 
 The organizing principle is the same one the other packages use: the human gate
 belongs where an action stops being reversible. A commit on a per-bead branch
@@ -77,8 +78,9 @@ authority is the operator's and the subagent is only the hands, so it may act.
 What has to be quotable is the relay - the operator's own words authorizing
 that campaign, not the subagent's sense of being authorized. A subagent that
 cannot quote them reports and stops. A relay unlocks nothing the rows above
-forbid outright: closing a mirrored bead and a release stay
-forbidden however the consent arrives. A version bump is the recorded
+forbid outright: closing a mirrored bead and a release
+(`mix hex.publish`, a GitHub release) stay forbidden however the consent
+arrives. A version bump is the recorded
 exception: on a release bead the operator has named (in the campaign plan or
 their own words), the bump commit is release prep, not a release. (Recorded
 2026-08-27 by the operator.)
@@ -89,6 +91,18 @@ condition that consent names met (full gate green, CI green, firewall scan
 clean with a positive control, any named review gate passed), the conductor's
 merge executes the operator's own authorization - the consent's text is what
 may be done and nothing more. (Recorded 2026-09-01 by the operator.)
+
+**Release preps.** The version bump and the tag of a release prep are the
+family norm, not a grant a campaign consent has to name. On a release bead
+the operator has named (in the campaign plan or their own words), the prep -
+the version bump and the changelog promotion - lands through the rows above;
+once it is merged to `origin/main`, the conductor or the session that owns
+the release bead tags that merged commit with the new version and pushes the
+tag. Publishing (`mix hex.publish`, a docs republish included) is the
+operator's one release step, in every campaign, and no consent or relay
+delegates it. Merging the prep follows this file's merge row, and nothing
+else this file reserves for the operator changes. (Recorded 2026-09-25 by
+the operator.)
 
 Widening this section is a decision for the operator to make and record here.
 An agent may draft the change; it does not adopt it.
