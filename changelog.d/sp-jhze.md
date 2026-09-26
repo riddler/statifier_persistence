@@ -1,5 +1,0 @@
-### Added
-
-- `StatifierPersistence.Executions.migrate_batch/3` applies one migration plan to every `:active` and `:needs_migration` execution on the plan's `from` hash and answers a report with one result per execution and a count per outcome. It refuses an execution the plan cannot take and leaves it where it was unless you pass `on_failure: :park`, and it moves a durable child through `migrate_tree/4` rooted at that child.
-- `dry_run: true` on `migrate_batch/3` previews the batch without writing anything: each execution answers `:would_migrate` (with the states the plan would drop and the `Statifier.Position.compatible_at?/3` answer at its position), `:would_refuse` (with the refusal) or `:skipped`.
-- `StatifierPersistence.Storage.list_execution_ids_by_content_hash/3` lists the ids of the executions on a content hash in a given set of statuses, and `c:StatifierPersistence.Storage.Adapter.list_execution_ids_by_content_hash/3` is the optional callback behind it, implemented by both shipped adapters. An adapter without the capability or without the callback answers `{:error, :content_hash_query_unsupported}`, and so does a batch against it.
