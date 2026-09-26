@@ -116,6 +116,59 @@ defmodule StatifierPersistence.RetentionTest do
     end
   end
 
+  # sabotage: made the single-batch path call prune_batches/5 instead of
+  # one Storage.prune_executions/4 call -> red, the first call answered
+  # all five executions and more?: false instead of stopping at two.
+  # Verified red, reverted from a copy.
+  test "prune/3 with single_batch: true answers one batch's counts plus more?", %{store: store} do
+    for day <- 1..5, do: execution(store, "single-due-#{day}", :completed, day)
+
+    assert {:ok, %{executions: 2, position_blobs: 2, inputs: 0, more?: true}} =
+             Retention.prune(store, @cutoff, single_batch: true, batch_size: 2)
+
+    remaining =
+      for day <- 1..5,
+          {:ok, %{position_blob: blob}} = Storage.fetch_execution(store, "single-due-#{day}"),
+          is_binary(blob),
+          do: day
+
+    assert length(remaining) == 3
+
+    assert {:ok, %{executions: 2, position_blobs: 2, inputs: 0, more?: true}} =
+             Retention.prune(store, @cutoff, single_batch: true, batch_size: 2)
+
+    assert {:ok, %{executions: 1, position_blobs: 1, inputs: 0, more?: false}} =
+             Retention.prune(store, @cutoff, single_batch: true, batch_size: 2)
+
+    assert {:ok, %{executions: 0, position_blobs: 0, inputs: 0, more?: false}} =
+             Retention.prune(store, @cutoff, single_batch: true, batch_size: 2)
+  end
+
+  # sabotage: made single_batch!/1 return its input unchanged -> red, no
+  # ArgumentError was raised; each value reached the prune as truthy or
+  # falsy. Verified red, reverted from a copy.
+  test "prune/3 refuses a single_batch that is not a boolean", %{store: store} do
+    for value <- [1, :yes, nil, "true"] do
+      assert_raise ArgumentError, ~r/single_batch/, fn ->
+        Retention.prune(store, @cutoff, single_batch: value)
+      end
+    end
+  end
+
+  # sabotage: made prune/3 always put :more? on the answer, even for
+  # single_batch: false -> red, the assertion that the key is absent
+  # failed. Verified red, reverted from a copy.
+  test "prune/3 with single_batch: false answers exactly today's map", %{store: store} do
+    for day <- 1..3, do: execution(store, "plain-due-#{day}", :completed, day)
+
+    assert {:ok, counts} = Retention.prune(store, @cutoff, single_batch: false)
+    refute Map.has_key?(counts, :more?)
+    assert counts == %{executions: 3, position_blobs: 3, inputs: 0}
+
+    assert {:ok, default_counts} = Retention.prune(store, @cutoff)
+    refute Map.has_key?(default_counts, :more?)
+  end
+
   # One execution in `status`, stored with a position, stamped on day
   # `day` of 2026-01 when it is terminal.
   defp execution(store, execution_id, status, day) do

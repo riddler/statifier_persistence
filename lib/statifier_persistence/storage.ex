@@ -1232,7 +1232,8 @@ defmodule StatifierPersistence.Storage do
   Each execution in the batch keeps its row and loses its position blob
   and its input log. The callback's documentation says which executions
   a batch takes. `StatifierPersistence.Retention.prune/3` calls this
-  until nothing is left, and is the door a host uses.
+  until nothing is left, or once with `single_batch: true`, and is the
+  door a host uses - including for one batch per host transaction.
 
   `scope` is the callback's: `[]`, the default, prunes from the whole
   store, and column equalities confine the batch to the rows that hold

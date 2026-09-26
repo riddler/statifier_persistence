@@ -41,6 +41,8 @@ row itself stays, with its status, failure, metadata, answer and
   bounds each transaction. Each batch commits on its own, so a call that
   fails part-way leaves the earlier batches done. Calling again with the
   same cutoff carries on, and a call with nothing left to do answers zeros.
+  This holds when nothing encloses the call; see "Pruning inside your own
+  transaction" below for what changes when something does.
 - **It needs an adapter that declares it.** Both shipped adapters do. The
   in-memory adapter keeps no input log, so it clears position blobs only.
   An adapter of your own declares it by exporting
@@ -72,6 +74,47 @@ inside one partition's transaction reads and writes no row of another.
 - **The in-memory adapter cannot scope.** Its records have no columns of
   yours, so it answers `{:error, :unscoped_adapter}` for any `scope:` and
   clears nothing.
+
+### Pruning inside your own transaction
+
+`prune/3` called with nothing enclosing it commits each batch on its own.
+Called inside a transaction of your own, its whole drain - every batch -
+runs as that one transaction, and commits or rolls back with it.
+`batch_size:` then bounds each batch's statements, not the transaction, so
+a host that opens a transaction to set a partition's context before any
+write and calls `prune/3` there loses the short-transaction bound
+`batch_size:` exists for.
+
+For one bounded transaction per batch, call `prune/3` with
+`single_batch: true` inside each of your own transactions, and call again
+while `more?` is `true`:
+
+    def prune_tenant(store, cutoff, tenant_id) do
+      batch =
+        Repo.transaction(fn ->
+          # set the tenant's context for this transaction here, then:
+          opts = [scope: [tenant_id: tenant_id], single_batch: true]
+
+          case StatifierPersistence.Retention.prune(store, cutoff, opts) do
+            {:ok, counts} -> counts
+            {:error, reason} -> Repo.rollback(reason)
+          end
+        end)
+
+      with {:ok, %{more?: true}} <- batch do
+        prune_tenant(store, cutoff, tenant_id)
+      end
+    end
+
+It answers `{:ok, counts}` for the last batch, with `more?: false`, or the
+first `{:error, reason}`. Every batch before that one has committed, so
+calling it again carries on.
+
+`more?` is `true` when the batch took as many executions as `batch_size:`
+allows, so another call may find more, and `false` when it took fewer -
+the same point where the default drain stops on its own. A row another
+transaction holds locked is skipped, not waited on, so it is left for a
+later call either way.
 
 After a prune, `Executions.inputs/2` answers `{:ok, []}` for that
 execution, which is also what an execution that took no input answers. A
