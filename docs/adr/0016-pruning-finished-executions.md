@@ -251,7 +251,7 @@ sentence stays as written, and this Note is how it is read.
 
 ## Amendment (2026-09-25, sp-u4mc): `prune/3` takes `scope:`, and the adapter callback becomes `prune_executions/4`
 
-Status of this amendment: proposed (2026-09-25, sp-u4mc). The record above
+Status of this amendment: accepted (2026-09-25, sp-u4mc). The record above
 stays accepted; this amendment is proposed until the operator accepts it.
 
 Decision 1 prunes across the whole store. A host whose tables are
@@ -338,3 +338,32 @@ changelog line, and it adds no schema version.
 The Consequences' sentence "The conformance suite generates its prune
 cases only for an adapter that exports `prune_executions/3`" is read with
 `prune_executions/4`. The record's other lines stay as written.
+
+## Note (2026-09-25): the sp-u4mc Amendment is accepted
+
+The operator accepted the 2026-09-25 sp-u4mc Amendment on 2026-09-25. The
+code that implements it landed in PR 181 (`b02adbb`) and shipped in
+statifier_persistence 0.19.0 (tag `v0.19.0`, `6dd9172`) under a Breaking
+changelog line. That Amendment's own status line flips in place from
+proposed to accepted, and the record above stays accepted. Its "this
+amendment is proposed until the operator accepts it" is met here and stays
+as written. Every cite below was read on `main` at `adca4f0`.
+
+What was re-read before the flip:
+
+- **Decision 1.** `scope!/1` in `lib/statifier_persistence/retention.ex`
+  checks the scope before any batch runs.
+- **Decisions 3 and 4.** `c:StatifierPersistence.Storage.Adapter.prune_executions/4`
+  takes `t:StatifierPersistence.Storage.Adapter.prune_scope/0` as its
+  fourth argument, `:unscoped_adapter` is an arm of the adapter's `error/0`,
+  the facade is `Storage.prune_executions/4` with the scope defaulting to
+  `[]`, and the in-memory adapter answers `{:error, :unscoped_adapter}` for
+  a scope that is not `[]`.
+- **Decision 6.** `StatifierPersistence.Testing.StorageConformance`
+  documents the `prune_scope:` option.
+- **The changelog.** The 0.19.0 section of `CHANGELOG.md` carries the
+  Breaking line for an adapter that exports `prune_executions/3`.
+
+One claim of decision 2 has no test of its own: that the position blob
+update carries the equalities. sp-x8n6 adds that test or narrows the claim
+by a later Note; it does not hold the flip.

@@ -1167,7 +1167,7 @@ What was re-read before the flip:
 
 ## Amendment (2026-09-24, sp-51ah): a single child's answer is recorded on its own record, and a refused one is delivered again from it
 
-Status of this amendment: proposed (2026-09-24, sp-51ah). The record above
+Status of this amendment: accepted (2026-09-25, sp-51ah). The record above
 stays accepted; this amendment is proposed until the operator accepts it.
 
 Decision 3 has a child answer its parent through ADR-0007's doors. A
@@ -1247,3 +1247,33 @@ It is no longer the only way to deliver a single child's answer again. This
 amendment edits nothing in ADR-0009.
 
 No other decision moves.
+
+## Note (2026-09-25): the sp-51ah Amendment is accepted
+
+The operator accepted the 2026-09-24 sp-51ah Amendment on 2026-09-25. The
+code that implements it landed in PR 173 (`c4ff5b4`) and shipped in
+statifier_persistence 0.18.0 (tag `v0.18.0`, `453f630`). That Amendment's
+own status line flips in place from proposed to accepted, and the record
+above stays accepted. Its "this amendment is proposed until the operator
+accepts it" is met here and stays as written. Every cite below was read on
+`main` at `adca4f0`, which carries 0.19.0 and no change to them.
+
+What was re-read before the flip:
+
+- **Decision 1.** `answer_parent/3`'s single-child branch and the
+  automatic answer's unreached path record the answer through
+  `record_single_answer/3` and `unreached/5`
+  (`lib/statifier_persistence/driver.ex`), and the record is written only
+  on an adapter for which
+  `StatifierPersistence.Storage.execution_outcome_supported?/1` answers
+  true.
+- **Decision 2.** `Execution.from_record/1` builds `donedata` from the
+  recorded `outcome_blob` through `donedata/1`
+  (`lib/statifier_persistence/execution.ex`).
+- **Decisions 3 and 4.** A record with no `outcome_blob` reads
+  `donedata: nil`, and the settlement event's vocabulary is unchanged; the
+  0.18.0 section of `CHANGELOG.md` names the recorded answer and adds no
+  event.
+- **The tests.**
+  `test/statifier_persistence/driver_single_child_answer_test.exs` carries
+  the recorded answer and its delivery again.

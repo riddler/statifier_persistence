@@ -558,7 +558,7 @@ What was re-read before the flip:
 
 ## Amendment (2026-09-24, sp-hpci): `migrate/4` refuses an execution that carries a linkage
 
-Status of this amendment: proposed (2026-09-24, sp-hpci). The record above
+Status of this amendment: accepted (2026-09-25, sp-hpci). The record above
 stays accepted; this amendment is proposed until the operator accepts it.
 
 "What this record does not decide" leaves open whether `migrate/4` refuses,
@@ -619,3 +619,27 @@ linkage pin names the new chart.
 Decision 1's sentence "`migrate/4` is unchanged by this record" stays as
 written and is read as amended here. The "does not decide" entry on
 `migrate/4` and a linkage stays too, and this amendment decides it.
+
+## Note (2026-09-25): the sp-hpci Amendment is accepted
+
+The operator accepted the 2026-09-24 sp-hpci Amendment on 2026-09-25. The
+code that implements it landed in PR 172 (`48c76db`) and shipped in
+statifier_persistence 0.18.0 (tag `v0.18.0`, `453f630`) under a Breaking
+changelog line. That Amendment's own status line flips in place from
+proposed to accepted, and the record above stays accepted. Its "this
+amendment is proposed until the operator accepts it" is met here and stays
+as written. Every cite below was read on `main` at `adca4f0`, which carries
+0.19.0 and no change to them.
+
+What was re-read before the flip:
+
+- **The refusal.** `check_unlinked/1` in
+  `lib/statifier_persistence/executions.ex` refuses a linked execution,
+  and `t:StatifierPersistence.Executions.migrate_error/0` carries the
+  `{:linked, Execution.t()}` arm.
+- **The changelog.** The 0.18.0 section of `CHANGELOG.md` names the
+  refusal as Breaking and names `migrate_tree/4` as the command that moves
+  a child.
+- **The tests.**
+  `test/statifier_persistence/executions_migrate_children_test.exs`
+  carries "migrate/4 on the pickup child, which carries a linkage".
