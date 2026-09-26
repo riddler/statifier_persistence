@@ -5,6 +5,17 @@ defmodule StatifierPersistence.Ecto.ScopedPruneTest do
   # `Retention.prune/3` carries it to every batch, and a column that is
   # not a leading column is refused before any statement runs (ADR-0016,
   # as amended for scoped pruning).
+  #
+  # These cases run on Postgres only, by decision: scoped coverage off
+  # Postgres is not wanted. The scoped arm adds no adapter-conditional
+  # code: `prune_source/3` reads the tables by name and `scoped/2` adds one
+  # equality per column, both adapter-neutral queries. The prune's one
+  # adapter branch, the row lock in `due_executions/4`, does not depend on
+  # the scope, and the SQLite repo's unscoped prune case in
+  # `sqlite_migrations_test.exs` already runs it off Postgres. ADR-0005
+  # decision 2 keeps the storage harness on Postgres, and the SQLite repo
+  # backs only what Postgres cannot show; a scoped SQLite host would add
+  # its own tables and DDL to prove nothing that case does not.
   use ExUnit.Case, async: true
 
   alias Ecto.Adapters.SQL
@@ -46,7 +57,7 @@ defmodule StatifierPersistence.Ecto.ScopedPruneTest do
     end
   end
 
-  # sabotage: dropped `scoped/3` from the input log delete in the Ecto
+  # sabotage: dropped `scoped/2` from the input log delete in the Ecto
   # adapter's prune_batch/4 -> red, the row stamped tenant-b was deleted
   # with its execution's others. Verified red, reverted from a copy.
   test "the input log delete carries the scope", %{store: store} do
@@ -60,7 +71,7 @@ defmodule StatifierPersistence.Ecto.ScopedPruneTest do
     assert {:ok, [%{seq: 1}]} = Storage.Ecto.list_inputs(store.opts, "scoped-split")
   end
 
-  # sabotage: dropped `scoped/3` from the input log check inside the Ecto
+  # sabotage: dropped `scoped/2` from the input log check inside the Ecto
   # adapter's due_executions/4 -> red, the execution was selected for a
   # log row outside the scope. Verified red, reverted from a copy.
   test "the input log check inside the selection carries the scope", %{store: store} do
@@ -88,7 +99,7 @@ defmodule StatifierPersistence.Ecto.ScopedPruneTest do
   # table, then copies the execution's row into tenant-b under the same
   # id.
   #
-  # sabotage: dropped `scoped/3` from the position blob update in the
+  # sabotage: dropped `scoped/2` from the position blob update in the
   # Ecto adapter's prune_batch/4 -> red, the batch cleared two blobs,
   # the tenant-b row's with the tenant-a row's. Verified red, reverted
   # from a copy.
