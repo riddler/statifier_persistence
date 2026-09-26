@@ -1938,6 +1938,14 @@ defmodule StatifierPersistence.Executions do
   `[:statifier_persistence, :execution, :migrated]` event `migrate/4` or
   `migrate_tree/4` emits for it; the dry run emits none.
 
+  One span brackets the call once its options are checked (decision 6):
+  `[:statifier_persistence, :execution, :migrate_batch, :start]`, then
+  `[..., :stop]` - carrying the report's `counts`, or every count of the
+  mode at zero beside a whole-batch refusal - or `[..., :exception]` when
+  anything inside raises, throws or exits, re-raised unchanged. The dry
+  run and a whole-batch refusal open it too; a malformed option raises
+  before it opens. `docs/telemetry.md` is the contract.
+
   Rollback is a reverse plan, `to` -> `from`, handed to this same
   function (decision 7). It moves every execution on `to`, including one
   created there after the forward batch; a host that wants only the
@@ -1969,15 +1977,62 @@ defmodule StatifierPersistence.Executions do
     pin_sources = Keyword.get(opts, :pin_sources, [])
     check_batch_opts!(dry_run, on_failure, pin_sources)
 
-    migrate_listed(%{
-      store: store,
-      plan: plan,
-      machines: {from_machine, to_machine},
-      dry_run: dry_run,
-      on_failure: on_failure,
-      pin_sources: pin_sources,
-      serialization: Keyword.get(opts, :serialization, {AdapterLock, store})
-    })
+    batch_span(plan, dry_run, fn ->
+      migrate_listed(%{
+        store: store,
+        plan: plan,
+        machines: {from_machine, to_machine},
+        dry_run: dry_run,
+        on_failure: on_failure,
+        pin_sources: pin_sources,
+        serialization: Keyword.get(opts, :serialization, {AdapterLock, store})
+      })
+    end)
+  end
+
+  # ADR-0017 decision 6: the batch span. `:start` once the options are
+  # checked; then `:stop` on every return - the report's `counts` as its
+  # measurements, or every count of the mode at zero beside a whole-batch
+  # refusal - or `:exception` in its place when anything inside raises,
+  # throws or exits, re-raised with its own reason and stacktrace as the
+  # step span re-raises.
+  @spec batch_span(Plan.t(), boolean(), (-> {:ok, batch_report()} | {:error, migrate_error()})) ::
+          {:ok, batch_report()} | {:error, migrate_error()}
+  defp batch_span(plan, dry_run, fun) do
+    span_ref = make_ref()
+    fields = [from: plan.from, to: plan.to, dry_run: dry_run, span_ref: span_ref]
+    started_at = Telemetry.execution_migrate_batch_start(fields)
+
+    result =
+      try do
+        fun.()
+      catch
+        kind, reason ->
+          Telemetry.execution_migrate_batch_exception(
+            started_at,
+            fields ++ [kind: kind, reason: reason, stacktrace: __STACKTRACE__]
+          )
+
+          :erlang.raise(kind, reason, __STACKTRACE__)
+      end
+
+    case result do
+      {:ok, %{counts: counts}} ->
+        Telemetry.execution_migrate_batch_stop(
+          started_at,
+          counts,
+          fields ++ [outcome: :ok, reason: nil]
+        )
+
+      {:error, reason} ->
+        Telemetry.execution_migrate_batch_stop(
+          started_at,
+          Map.new(batch_outcomes(dry_run), &{&1, 0}),
+          fields ++ [outcome: :error, reason: reason]
+        )
+    end
+
+    result
   end
 
   @spec check_batch_opts!(term(), term(), term()) :: :ok
@@ -2018,18 +2073,20 @@ defmodule StatifierPersistence.Executions do
 
   @spec batch_report(Plan.t(), boolean(), [{execution_id(), term()}]) :: batch_report()
   defp batch_report(plan, dry_run, results) do
-    keys =
-      if dry_run,
-        do: [:would_migrate, :would_refuse, :skipped],
-        else: [:migrated, :refused, :parked, :skipped]
-
     counts =
-      Enum.reduce(results, Map.new(keys, &{&1, 0}), fn {_id, outcome}, counts ->
+      Enum.reduce(results, Map.new(batch_outcomes(dry_run), &{&1, 0}), fn {_id, outcome},
+                                                                          counts ->
         Map.update!(counts, elem(outcome, 0), &(&1 + 1))
       end)
 
     %{from: plan.from, to: plan.to, dry_run: dry_run, results: results, counts: counts}
   end
+
+  # ADR-0017 decision 6: the outcomes of each mode, every one a key of the
+  # report's `counts` and a measurement on the batch span's `:stop`.
+  @spec batch_outcomes(boolean()) :: [atom(), ...]
+  defp batch_outcomes(true = _dry_run), do: [:would_migrate, :would_refuse, :skipped]
+  defp batch_outcomes(false = _dry_run), do: [:migrated, :refused, :parked, :skipped]
 
   # ADR-0017 decision 2: the dry run, under the execution's own
   # serialization, writing nothing.
@@ -2520,8 +2577,8 @@ defmodule StatifierPersistence.Executions do
   # Nothing inside any tail calls back into this function, so `with_execution/3`
   # never nests on one execution id.
   #
-  # This is also the step seam (ADR-0009 decision 5): the one span this
-  # package emits - `:start`, then `:stop` or `:exception` - brackets
+  # This is also the step seam (ADR-0009 decision 5): the step span -
+  # `:start`, then `:stop` or `:exception` - brackets
   # exactly this function, so the upstream macrostep span - opened inside
   # `fun` - nests inside it by ordinary ambient context, and `st-ADR-0067`
   # decision 5's "a span never crosses a persist boundary" holds

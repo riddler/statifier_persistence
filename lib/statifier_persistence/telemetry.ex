@@ -30,13 +30,15 @@ defmodule StatifierPersistence.Telemetry do
   - **Measurements are numbers; metadata is everything else**, integer
     indexes included - `child_index` is metadata, because an opaque index
     has no numeric meaning to average.
-  - **The step seam is the one span.** This package owns an interval
-    nobody else measures - lock, load, decode, identity-check, advance,
-    execute effects, persist - and the upstream macrostep span nests
-    inside it. It opens with `:start` and closes with exactly one of
-    `:stop` or `:exception`. `span_ref` is a fresh `make_ref/0` per span,
-    carried on both halves, and is the only pairing key (`st-ADR-0040`
-    decision 2). Everything else is a single point-in-time event.
+  - **Two spans: the step seam and the batch migration.** This package
+    owns an interval nobody else measures - lock, load, decode,
+    identity-check, advance, execute effects, persist - and the upstream
+    macrostep span nests inside it. A batch migration is the second
+    (ADR-0017 decision 6): one call over every execution on a chart hash.
+    Each opens with `:start` and closes with exactly one of `:stop` or
+    `:exception`. `span_ref` is a fresh `make_ref/0` per span, carried on
+    both halves, and is the only pairing key (`st-ADR-0040` decision 2).
+    Everything else is a single point-in-time event.
   - **`execution_id` is the identity key**, never `scope`; `session_id` rides
     only where a position has already been decoded and is explicitly `nil`
     otherwise.
@@ -168,6 +170,29 @@ defmodule StatifierPersistence.Telemetry do
   `:active` execution, of a terminal one, or one refused - emits no
   `:unparked`.
 
+  ## The batch migration span (ADR-0017 decision 6)
+
+  Brackets one `StatifierPersistence.Executions.migrate_batch/3` call,
+  opened once its options are checked. Emitted on the calling process.
+
+  | Event | Measurements | Metadata |
+  |---|---|---|
+  | `[:statifier_persistence, :execution, :migrate_batch, :start]` | `system_time`, `monotonic_time` | `from`, `to`, `dry_run`, `span_ref` |
+  | `[:statifier_persistence, :execution, :migrate_batch, :stop]` | `duration`, `monotonic_time`, one count per outcome of the mode | `from`, `to`, `dry_run`, `span_ref`, `outcome`, `reason` |
+  | `[:statifier_persistence, :execution, :migrate_batch, :exception]` | `duration`, `monotonic_time` | `from`, `to`, `dry_run`, `span_ref`, `kind`, `reason`, `stacktrace` |
+
+  `from` and `to` are the plan's two content hashes. The stop's counts are
+  the report's `counts`: `would_migrate`, `would_refuse` and `skipped`
+  under the dry run; `migrated`, `refused`, `parked` and `skipped` under
+  the apply. `outcome` is `:ok` or `:error`; on `:error` - a refusal of the
+  whole batch - `reason` is that refusal and every count of the mode is
+  `0`, and on `:ok` it is `nil`. The exception's `kind`, `reason` and
+  `stacktrace` are narrowed as the step span's are. The dry run and a
+  whole-batch refusal open the span; a malformed option raises before it
+  opens. Each execution the apply moves still emits its own
+  `[:statifier_persistence, :execution, :migrated]` inside the span, and
+  the dry run emits none.
+
   ## The durable-subchart seam (ADR-0008)
 
   | Event | Measurements | Metadata |
@@ -267,6 +292,14 @@ defmodule StatifierPersistence.Telemetry do
   @execution_unparked [:statifier_persistence, :execution, :unparked]
   @effect_failed [:statifier_persistence, :effect, :failed]
   @drive_turns_exhausted [:statifier_persistence, :drive, :turns_exhausted]
+  @execution_migrate_batch_start [:statifier_persistence, :execution, :migrate_batch, :start]
+  @execution_migrate_batch_stop [:statifier_persistence, :execution, :migrate_batch, :stop]
+  @execution_migrate_batch_exception [
+    :statifier_persistence,
+    :execution,
+    :migrate_batch,
+    :exception
+  ]
   @child_started [:statifier_persistence, :child, :started]
   @child_refused [:statifier_persistence, :child, :refused]
   @child_recorded [:statifier_persistence, :child, :recorded]
@@ -289,6 +322,9 @@ defmodule StatifierPersistence.Telemetry do
     @execution_unparked,
     @effect_failed,
     @drive_turns_exhausted,
+    @execution_migrate_batch_start,
+    @execution_migrate_batch_stop,
+    @execution_migrate_batch_exception,
     @child_started,
     @child_refused,
     @child_recorded,
@@ -638,6 +674,86 @@ defmodule StatifierPersistence.Telemetry do
       %{system_time: System.system_time(), turns: turns},
       %{execution_id: fields[:execution_id], entry: fields[:entry]}
     )
+  end
+
+  @doc """
+  Emits `[:statifier_persistence, :execution, :migrate_batch, :start]` and
+  returns the `System.monotonic_time/0` reading the batch span's close
+  measures `duration` against, as `execution_step_start/3` does.
+
+  `fields` carries `from`, `to`, `dry_run` and `span_ref`.
+  """
+  @spec execution_migrate_batch_start(fields :: fields()) :: integer()
+  def execution_migrate_batch_start(fields) do
+    monotonic_time = System.monotonic_time()
+
+    :telemetry.execute(
+      @execution_migrate_batch_start,
+      %{system_time: System.system_time(), monotonic_time: monotonic_time},
+      batch_metadata(fields)
+    )
+
+    monotonic_time
+  end
+
+  @doc """
+  Emits `[:statifier_persistence, :execution, :migrate_batch, :stop]`,
+  `duration` in `:native` units measured from
+  `execution_migrate_batch_start/1`'s reading.
+
+  `counts` is one count per outcome of the mode - the report's `counts`,
+  or every count at zero beside a whole-batch refusal - and rides as
+  measurements beside `duration` and `monotonic_time`. `fields` adds
+  `outcome` and `reason` to the start's.
+  """
+  @spec execution_migrate_batch_stop(
+          start_time :: integer(),
+          counts :: %{atom() => non_neg_integer()},
+          fields :: fields()
+        ) :: :ok
+  def execution_migrate_batch_stop(start_time, counts, fields) do
+    monotonic_time = System.monotonic_time()
+
+    :telemetry.execute(
+      @execution_migrate_batch_stop,
+      Map.merge(counts, %{duration: monotonic_time - start_time, monotonic_time: monotonic_time}),
+      Map.merge(batch_metadata(fields), %{outcome: fields[:outcome], reason: fields[:reason]})
+    )
+  end
+
+  @doc """
+  Emits `[:statifier_persistence, :execution, :migrate_batch, :exception]`,
+  the batch span's close when the batch raised, threw or exited,
+  `duration` in `:native` units measured from
+  `execution_migrate_batch_start/1`'s reading.
+
+  The caller re-raises afterwards; this function only reports. `reason`
+  and `stacktrace` are narrowed as `execution_step_exception/2` narrows
+  them.
+  """
+  @spec execution_migrate_batch_exception(start_time :: integer(), fields :: fields()) :: :ok
+  def execution_migrate_batch_exception(start_time, fields) do
+    monotonic_time = System.monotonic_time()
+
+    :telemetry.execute(
+      @execution_migrate_batch_exception,
+      %{duration: monotonic_time - start_time, monotonic_time: monotonic_time},
+      Map.merge(batch_metadata(fields), %{
+        kind: fields[:kind],
+        reason: narrow_reason(fields[:kind], fields[:reason], fields[:stacktrace]),
+        stacktrace: narrow_stacktrace(fields[:stacktrace])
+      })
+    )
+  end
+
+  @spec batch_metadata(fields()) :: map()
+  defp batch_metadata(fields) do
+    %{
+      from: fields[:from],
+      to: fields[:to],
+      dry_run: fields[:dry_run],
+      span_ref: fields[:span_ref]
+    }
   end
 
   @doc "Emits `[:statifier_persistence, :child, :started]`."
