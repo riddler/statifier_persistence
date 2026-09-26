@@ -847,6 +847,59 @@ defmodule StatifierPersistence.Storage do
     end
   end
 
+  @stored_statuses [:active, :needs_migration, :completed, :failed, :cancelled]
+
+  @doc """
+  Lists the ids of the executions on `content_hash` whose stored status
+  is one of `statuses` (ADR-0017 decision 8).
+
+  `statuses` is a non-empty list of the stored statuses of
+  `t:StatifierPersistence.Storage.Adapter.execution_status/0`; anything
+  else raises `ArgumentError` before the adapter is asked. The answer is
+  `{:ok, ids}` in ascending execution id, and `{:ok, []}` for a hash this
+  store has never seen.
+
+  Delegates to the adapter's optional
+  `c:StatifierPersistence.Storage.Adapter.list_execution_ids_by_content_hash/3`
+  under the capability `count_executions_by_content_hash/2` checks. It
+  answers `{:error, :content_hash_query_unsupported}` without calling the
+  adapter at all when the adapter does not declare that capability, and
+  also when it declares the capability but does not export this callback
+  - an adapter written before the callback existed (ADR-0017 decision 9).
+  An error the adapter answers is passed through as it is.
+
+  `StatifierPersistence.Executions.migrate_batch/3` asks it for
+  `[:active, :needs_migration]`. `list_active_execution_ids_by_content_hash/2`
+  and its `:active`-only answer are unchanged.
+  """
+  @spec list_execution_ids_by_content_hash(
+          store :: t(),
+          content_hash :: Adapter.content_hash(),
+          statuses :: [Adapter.execution_status(), ...]
+        ) :: {:ok, [Adapter.execution_id()]} | {:error, error()}
+  def list_execution_ids_by_content_hash(%__MODULE__{} = store, content_hash, statuses)
+      when is_binary(content_hash) do
+    unless is_list(statuses) and statuses != [] and Enum.all?(statuses, &(&1 in @stored_statuses)) do
+      raise ArgumentError,
+            "statuses must be a non-empty list of #{inspect(@stored_statuses)}, " <>
+              "got: #{inspect(statuses)}"
+    end
+
+    if content_hash_query_supported?(store) and
+         function_exported?(store.adapter, :list_execution_ids_by_content_hash, 3) do
+      adapter_call(
+        store.adapter,
+        :list_execution_ids_by_content_hash,
+        [content_hash: content_hash],
+        fn ->
+          store.adapter.list_execution_ids_by_content_hash(store.opts, content_hash, statuses)
+        end
+      )
+    else
+      {:error, :content_hash_query_unsupported}
+    end
+  end
+
   @doc """
   Whether a chart can be tombstoned in `store` (ADR-0012 decision 6).
 

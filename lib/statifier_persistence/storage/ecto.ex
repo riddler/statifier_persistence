@@ -692,6 +692,39 @@ if Code.ensure_loaded?(Ecto) do
     end
 
     @doc """
+    Lists the ids of the executions on `content_hash` whose status is one
+    of `statuses` (the optional
+    `c:StatifierPersistence.Storage.Adapter.list_execution_ids_by_content_hash/3`,
+    ADR-0017 decision 8), in ascending execution id.
+
+    One column under the same V07 index on `executions(content_hash)` the
+    `:active` listing uses, with the status set as an `IN` list. The ids
+    are sorted in Elixir rather than by an `ORDER BY`, so the order is the
+    binary order of the ids whatever collation the backend's text column
+    carries.
+    """
+    @impl Adapter
+    @spec list_execution_ids_by_content_hash(
+            Adapter.opts(),
+            Adapter.content_hash(),
+            [Adapter.execution_status()]
+          ) :: {:ok, [Adapter.execution_id()]} | {:error, Adapter.error()}
+    def list_execution_ids_by_content_hash(opts, content_hash, statuses) do
+      encoded = Enum.map(statuses, &encode_status/1)
+
+      ids =
+        repo(opts).all(
+          from(r in execution_schema(opts),
+            where: r.content_hash == ^content_hash,
+            where: r.status in ^encoded,
+            select: r.execution_id
+          )
+        )
+
+      {:ok, Enum.sort(ids)}
+    end
+
+    @doc """
     Declares whether the store this adapter is pointed at can be
     tombstoned (the optional
     `c:StatifierPersistence.Storage.Adapter.supports_chart_retirement?/1`,

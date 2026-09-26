@@ -318,7 +318,8 @@ process.
 `:supports_metadata?`, `:list_executions_by_metadata`,
 `:supports_execution_outcome?`, `:list_execution_states_by_metadata`,
 `:supports_content_hash_query?`, `:count_executions_by_content_hash`,
-`:list_active_execution_ids_by_content_hash`, `:supports_chart_retirement?`,
+`:list_active_execution_ids_by_content_hash`,
+`:list_execution_ids_by_content_hash`, `:supports_chart_retirement?`,
 `:retire_chart`, `:supports_retired_info?`, `:fetch_retired_info`,
 `:supports_input_log?`, `:append_input`, `:list_inputs`,
 `:supports_execution_pruning?`, `:prune_executions` - a closed vocabulary

@@ -476,6 +476,33 @@ defmodule StatifierPersistence.Storage.InMemory do
   end
 
   @doc """
+  Lists the ids of the executions on `content_hash` whose status is one
+  of `statuses` (the optional
+  `c:StatifierPersistence.Storage.Adapter.list_execution_ids_by_content_hash/3`,
+  ADR-0017 decision 8), in ascending execution id.
+
+  A filter over the same execution map the `:active` listing reads,
+  sorted, because this callback's contract is an ordered list.
+  """
+  @impl Adapter
+  @spec list_execution_ids_by_content_hash(
+          Adapter.opts(),
+          Adapter.content_hash(),
+          [Adapter.execution_status()]
+        ) :: {:ok, [Adapter.execution_id()]} | {:error, Adapter.error()}
+  def list_execution_ids_by_content_hash(opts, content_hash, statuses) do
+    ids =
+      pid(opts)
+      |> Agent.get(& &1.executions)
+      |> Map.values()
+      |> Enum.filter(&(&1.content_hash == content_hash and &1.status in statuses))
+      |> Enum.map(& &1.execution_id)
+      |> Enum.sort()
+
+    {:ok, ids}
+  end
+
+  @doc """
   Declares chart retirement (the optional
   `c:StatifierPersistence.Storage.Adapter.supports_chart_retirement?/1`,
   ADR-0012 decision 6): an Agent's map has no `NOT NULL` to drop, so

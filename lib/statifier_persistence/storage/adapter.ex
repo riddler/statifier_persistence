@@ -691,7 +691,8 @@ defmodule StatifierPersistence.Storage.Adapter do
   The predicate covers `c:list_active_execution_ids_by_content_hash/2`
   as well: both read the same column under the same index, and a second
   opt-in for the second of them would be a capability a host has no way
-  to want separately.
+  to want separately. It covers `c:list_execution_ids_by_content_hash/3`
+  for the same reason (ADR-0017 decision 8).
   """
   @callback supports_content_hash_query?(opts()) :: boolean()
 
@@ -751,6 +752,33 @@ defmodule StatifierPersistence.Storage.Adapter do
   arm, for the reason the counts answer zeros.
   """
   @callback list_active_execution_ids_by_content_hash(opts(), content_hash()) ::
+              {:ok, [execution_id()]} | {:error, error()}
+
+  @doc """
+  Optional listing of the ids of the executions on one content hash in
+  any of the given stored statuses (ADR-0017 decision 8).
+
+  `statuses` is a non-empty list of `t:execution_status/0` values. The
+  answer is `{:ok, ids}`, in ascending execution id, naming every
+  execution row that carries `content_hash` and whose stored status is
+  one of `statuses`. A hash this store has never seen answers `{:ok, []}`,
+  not a not-found arm, for the reason the counts answer zeros.
+
+  Part of `supports_content_hash_query?/1`'s capability, as
+  `c:list_active_execution_ids_by_content_hash/2` is: an adapter that
+  declares that predicate exports this too. An adapter written before
+  this callback existed may declare the predicate and not export it;
+  `StatifierPersistence.Storage.list_execution_ids_by_content_hash/3`
+  checks the export and answers `{:error, :content_hash_query_unsupported}`
+  for it without calling it (ADR-0017 decision 9).
+
+  It exists for `StatifierPersistence.Executions.migrate_batch/3`, which
+  asks it for `[:active, :needs_migration]`: the batch covers the parked
+  executions on a hash as well as the active ones, and
+  `c:list_active_execution_ids_by_content_hash/2` lists the `:active` arm
+  only, on purpose (ADR-0014 decision 4). That listing is unchanged.
+  """
+  @callback list_execution_ids_by_content_hash(opts(), content_hash(), [execution_status()]) ::
               {:ok, [execution_id()]} | {:error, error()}
 
   @doc """
@@ -1028,6 +1056,7 @@ defmodule StatifierPersistence.Storage.Adapter do
                       supports_content_hash_query?: 1,
                       count_executions_by_content_hash: 2,
                       list_active_execution_ids_by_content_hash: 2,
+                      list_execution_ids_by_content_hash: 3,
                       supports_chart_retirement?: 1,
                       retire_chart: 3,
                       supports_retired_info?: 1,

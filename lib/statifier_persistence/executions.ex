@@ -1078,8 +1078,10 @@ defmodule StatifierPersistence.Executions do
   A `:needs_migration` execution is migrated as an `:active` one is, and a
   successful migration writes it back at `:active` (ADR-0014 decision 3).
 
-  Nothing in this package calls this function: saving a chart, creating an
-  execution and stepping one never migrate anything (decision 9).
+  In this package only `migrate_batch/3` calls this function, once per
+  unlinked execution on its plan's `from` hash, when a host asks it to
+  (ADR-0017 decision 4): saving a chart, creating an execution and
+  stepping one never migrate anything (ADR-0013 decision 9).
   """
   @spec migrate(
           store :: Storage.t(),
@@ -1271,14 +1273,33 @@ defmodule StatifierPersistence.Executions do
         ) ::
           {:ok, %{machine_state: MachineState.t(), dropped: [Plan.state_id()]}}
           | {:error, migrate_error()}
-  defp validate_execution(store, record, plan, {from_machine, to_machine}, timers) do
+  defp validate_execution(store, record, plan, machines, timers) do
+    with {:ok, _loaded, applied} <- validate_loaded(store, record, plan, machines, timers) do
+      {:ok, applied}
+    end
+  end
+
+  # `validate_execution/5`'s work, answering the position as loaded from
+  # the from chart beside the transform's answer: `migrate_batch/3`'s dry
+  # run asks `Statifier.Position.compatible_at?/3` of that position
+  # (ADR-0017 decision 2).
+  @spec validate_loaded(
+          Storage.t(),
+          Adapter.execution_record(),
+          Plan.t(),
+          {Machine.t(), Machine.t()},
+          :none | {:ask, [module()]}
+        ) ::
+          {:ok, MachineState.t(), %{machine_state: MachineState.t(), dropped: [Plan.state_id()]}}
+          | {:error, migrate_error()}
+  defp validate_loaded(store, record, plan, {from_machine, to_machine}, timers) do
     execution_id = record.execution_id
 
     with {:ok, source_counts} <- ask_timer_sources(timers, plan.from, execution_id),
          {:ok, machine_state} <-
            Storage.load_execution_position(store, execution_id, from_machine) do
       case Transform.transform(machine_state, plan, from_machine, to_machine, source_counts) do
-        {:ok, applied} -> {:ok, applied}
+        {:ok, applied} -> {:ok, machine_state, applied}
         {:error, findings} -> {:error, {:migration_refused, findings}}
       end
     end
@@ -1474,8 +1495,10 @@ defmodule StatifierPersistence.Executions do
     changes; no node absent from `plans` is parked (decision 4). Any
     other refusal parks nothing.
 
-  A refused or parked tree emits no event. Nothing in this package calls
-  this function: saving, publishing and stepping never migrate anything.
+  A refused or parked tree emits no event. In this package only
+  `migrate_batch/3` calls this function, rooted at each linked execution
+  on its plan's `from` hash, when a host asks it to (ADR-0017 decision
+  4): saving, publishing and stepping never migrate anything.
   """
   @spec migrate_tree(
           store :: Storage.t(),
@@ -1771,6 +1794,354 @@ defmodule StatifierPersistence.Executions do
   @spec linkage_pin(tree(), execution_id(), Plan.t()) :: Adapter.content_hash() | nil
   defp linkage_pin(tree, id, plan) do
     if Map.has_key?(tree.links, id), do: plan.to, else: nil
+  end
+
+  @typedoc """
+  What `migrate_batch/3`'s dry run answers for one execution (ADR-0017
+  decision 2).
+
+  - `{:would_migrate, %{dropped: dropped, compatible_at: boolean}}` - the
+    plan would move it. `dropped` is what `migrate/4` would report, and
+    `compatible_at` is `Statifier.Position.compatible_at?/3` over the from
+    machine, the to machine and the execution's export at its position:
+    advice for the host that gates nothing. It is `false` for an execution
+    whose active state the plan renames, because the predicate takes no
+    mapping.
+  - `{:would_refuse, reason}` - `migrate/4` would refuse it, and `reason`
+    is that refusal (`t:migrate_error/0`), `{:migration_refused, findings}`
+    for the validation against the execution.
+  - `{:skipped, :terminal}` - the execution is terminal; there is nothing
+    to move.
+  - `{:skipped, :linked}` - the execution carries a linkage, so the apply
+    moves it through `migrate_tree/4` (decision 4), and the dry run does
+    not preview it.
+  """
+  @type batch_preview ::
+          {:would_migrate, %{dropped: [Plan.state_id()], compatible_at: boolean()}}
+          | {:would_refuse, migrate_error()}
+          | {:skipped, :terminal | :linked}
+
+  @typedoc """
+  What `migrate_batch/3`'s apply answers for one execution (ADR-0017
+  decision 6).
+
+  - `{:migrated, migrated}` - moved; `migrated` is what `migrate/4`
+    answers beside the execution, or, for a linked execution, what
+    `migrate_tree/4` answers for its root.
+  - `{:refused, reason}` - refused and written nothing; `reason` is
+    `migrate/4`'s refusal, or `migrate_tree/4`'s for a linked execution.
+  - `{:parked, reason}` - parked under `on_failure: :park`, with the
+    refusal that parked it: `migrate/4`'s `{:migration_refused, findings}`,
+    or `migrate_tree/4`'s `{:tree_refused, refusals}`.
+  - `{:skipped, :terminal}` - terminal when its turn came.
+  """
+  @type batch_outcome ::
+          {:migrated, migrated()}
+          | {:refused, migrate_error() | migrate_tree_error()}
+          | {:parked,
+             {:migration_refused, [migration_finding()]}
+             | {:tree_refused, %{execution_id() => tree_refusal()}}}
+          | {:skipped, :terminal}
+
+  @typedoc """
+  What `migrate_batch/3` answers when it runs (ADR-0017 decision 6).
+
+  - `from` and `to` - the plan's two content hashes.
+  - `dry_run` - whether this was the dry run.
+  - `results` - one `{execution_id, outcome}` per execution the batch
+    took, in the order it took them, ascending execution id: a
+    `t:batch_preview/0` under the dry run, a `t:batch_outcome/0` under
+    the apply.
+  - `counts` - the number of executions that answered each outcome of the
+    mode, every key present, zeros included: `:would_migrate`,
+    `:would_refuse` and `:skipped` under the dry run; `:migrated`,
+    `:refused`, `:parked` and `:skipped` under the apply.
+  """
+  @type batch_report :: %{
+          from: Adapter.content_hash(),
+          to: Adapter.content_hash(),
+          dry_run: boolean(),
+          results: [{execution_id(), batch_preview() | batch_outcome()}],
+          counts: %{atom() => non_neg_integer()}
+        }
+
+  # ADR-0017 decision 8: the batch covers every `:active` and every
+  # `:needs_migration` execution on the plan's `from` hash.
+  @batch_statuses [:active, :needs_migration]
+
+  @doc """
+  Applies one migration plan to every `:active` and every
+  `:needs_migration` execution on the plan's `from` hash, or previews it
+  (ADR-0017, `docs/adr/0017-migrating-the-executions-on-a-chart.md`).
+
+  `plan` is one `StatifierPersistence.Migration.Plan` for the pair of
+  chart hashes, applied to every execution on `from`; there are no
+  per-execution overrides, and an execution the one plan cannot move is
+  refused, never given a plan of its own (decision 1). The host builds the
+  plan, from the blocks package's mapping or by hand; this function never
+  builds one.
+
+  ## Options
+
+  - `from_machine:` and `to_machine:` (required) - the two compiled
+    machines, with `migrate/4`'s meaning.
+  - `dry_run:` - `true` or `false`, default `false` (decision 2).
+  - `on_failure:` - `:refuse` (the default) or `:park` (decision 3).
+  - `pin_sources:` - a list of `StatifierPersistence.PinSource` modules,
+    default `[]`, with `migrate/4`'s meaning, handed to every execution's
+    check.
+  - `serialization:` - the `{module, config}` strategy every entry point
+    takes, with the same default, applied per execution.
+
+  A malformed option raises `ArgumentError` before anything is read, as
+  `migrate/4`'s do.
+
+  ## What it does
+
+  First, once for the whole batch and before any execution is read, the
+  plan meets `migrate/4`'s own checks - the static validation against the
+  two machines, a tombstoned `to` hash, a missing pin source - and the
+  executions on `from` are listed through
+  `StatifierPersistence.Storage.list_execution_ids_by_content_hash/3`
+  with `[:active, :needs_migration]`, outside every exclusion (decision
+  8). That listing is the batch's work: an execution that lands on
+  `from` after it is not in this batch. The executions are then taken one
+  at a time, in ascending execution id.
+
+  Under the dry run, each execution is read under its own serialization
+  and meets every check `migrate/4` makes - the terminal status, the
+  linkage, the from hash, the pin sources, the export, the transform and
+  the import - and nothing is written, so `on_failure:` changes nothing
+  (decision 2). Each answers a `t:batch_preview/0`. The dry run is
+  advice, never a lock: it holds no exclusion past each execution's own
+  check, and the apply checks everything again.
+
+  Under the apply, an execution that carries no linkage moves through
+  `migrate/4`. One that carries a linkage - a durable child - moves
+  through `migrate_tree/4` rooted at it, with `plans` holding its own id
+  mapped to the plan and `machines:` the two machines; a node of its
+  subtree on another hash stays where it is, and one on `from` is moved
+  on its own turn (decision 4). Under `on_failure: :refuse` a refused
+  execution is written nothing: an `:active` one stays `:active` on
+  `from` and keeps draining there, and a `:needs_migration` one stays
+  parked. Under `on_failure: :park` a refusal that `migrate/4` or
+  `migrate_tree/4` parks is parked, and every parked id is in the report
+  (decision 3). Each execution answers a `t:batch_outcome/0`.
+
+  A batch is not one unit. Each execution is moved whole or not at all,
+  under its own exclusion; the batch holds no exclusion and no
+  transaction across executions. An interrupted apply leaves the
+  executions it reached moved, refused or parked and the rest untouched
+  on `from`, and calling it again with the same plan carries on.
+
+  Each moved execution emits the one
+  `[:statifier_persistence, :execution, :migrated]` event `migrate/4` or
+  `migrate_tree/4` emits for it; the dry run emits none.
+
+  Rollback is a reverse plan, `to` -> `from`, handed to this same
+  function (decision 7). It moves every execution on `to`, including one
+  created there after the forward batch; a host that wants only the
+  moved ones back reads the forward report's `results`.
+
+  ## What it answers
+
+  - `{:ok, report}` - `t:batch_report/0`.
+  - `{:error, reason}` - the whole batch refused before any execution was
+    read, with nothing written under either mode: `migrate/4`'s
+    `{:invalid_plan, findings}`, `{:chart_retired, info}` for a tombstoned
+    `to` hash (a reverse plan whose `to` is retired included) and
+    `{:no_pin_source, states}`, or the listing's refusal. An adapter that
+    does not declare
+    `c:StatifierPersistence.Storage.Adapter.supports_content_hash_query?/1`,
+    or declares it without exporting
+    `c:StatifierPersistence.Storage.Adapter.list_execution_ids_by_content_hash/3`,
+    answers `{:error, :content_hash_query_unsupported}`; an error the
+    adapter answers to the listing is passed through. The batch never
+    falls back to the `:active`-only listing (decision 9).
+  """
+  @spec migrate_batch(store :: Storage.t(), plan :: Plan.t(), opts :: keyword()) ::
+          {:ok, batch_report()} | {:error, migrate_error()}
+  def migrate_batch(%Storage{} = store, %Plan{} = plan, opts) when is_list(opts) do
+    %Machine{} = from_machine = Keyword.fetch!(opts, :from_machine)
+    %Machine{} = to_machine = Keyword.fetch!(opts, :to_machine)
+    dry_run = Keyword.get(opts, :dry_run, false)
+    on_failure = Keyword.get(opts, :on_failure, :refuse)
+    pin_sources = Keyword.get(opts, :pin_sources, [])
+    check_batch_opts!(dry_run, on_failure, pin_sources)
+
+    migrate_listed(%{
+      store: store,
+      plan: plan,
+      machines: {from_machine, to_machine},
+      dry_run: dry_run,
+      on_failure: on_failure,
+      pin_sources: pin_sources,
+      serialization: Keyword.get(opts, :serialization, {AdapterLock, store})
+    })
+  end
+
+  @spec check_batch_opts!(term(), term(), term()) :: :ok
+  defp check_batch_opts!(dry_run, on_failure, pin_sources) do
+    unless is_boolean(dry_run) do
+      raise ArgumentError, "the :dry_run option must be true or false, got: #{inspect(dry_run)}"
+    end
+
+    unless on_failure in [:refuse, :park] do
+      raise ArgumentError,
+            "the :on_failure option must be :refuse or :park, got: #{inspect(on_failure)}"
+    end
+
+    unless is_list(pin_sources) do
+      raise ArgumentError,
+            "the :pin_sources option must be a list of modules, got: #{inspect(pin_sources)}"
+    end
+
+    :ok
+  end
+
+  # ADR-0017 decisions 6, 8 and 9: the plan's checks and the listing,
+  # once, before any execution is read; then one execution at a time.
+  @spec migrate_listed(map()) :: {:ok, batch_report()} | {:error, migrate_error()}
+  defp migrate_listed(%{store: store, plan: plan, machines: {from_machine, to_machine}} = batch) do
+    with {:ok, timers} <- plan_check(store, plan, from_machine, to_machine, batch.pin_sources),
+         {:ok, ids} <-
+           Storage.list_execution_ids_by_content_hash(store, plan.from, @batch_statuses) do
+      results =
+        ids
+        |> Enum.uniq()
+        |> Enum.sort()
+        |> Enum.map(&{&1, batch_one(batch, &1, timers)})
+
+      {:ok, batch_report(plan, batch.dry_run, results)}
+    end
+  end
+
+  @spec batch_report(Plan.t(), boolean(), [{execution_id(), term()}]) :: batch_report()
+  defp batch_report(plan, dry_run, results) do
+    keys =
+      if dry_run,
+        do: [:would_migrate, :would_refuse, :skipped],
+        else: [:migrated, :refused, :parked, :skipped]
+
+    counts =
+      Enum.reduce(results, Map.new(keys, &{&1, 0}), fn {_id, outcome}, counts ->
+        Map.update!(counts, elem(outcome, 0), &(&1 + 1))
+      end)
+
+    %{from: plan.from, to: plan.to, dry_run: dry_run, results: results, counts: counts}
+  end
+
+  # ADR-0017 decision 2: the dry run, under the execution's own
+  # serialization, writing nothing.
+  @spec batch_one(map(), execution_id(), :none | {:ask, [module()]}) ::
+          batch_preview() | batch_outcome()
+  defp batch_one(%{dry_run: true, serialization: {strategy, config}} = batch, id, timers) do
+    case strategy.with_execution(config, id, fn -> preview(batch, id, timers) end) do
+      {:ok, preview} -> preview
+      {:error, reason} -> {:would_refuse, reason}
+    end
+  end
+
+  # ADR-0017 decision 4: an unlinked execution moves through `migrate/4`,
+  # a linked one through `migrate_tree/4` rooted at it. The record is read
+  # here only to choose the route: a linkage is write-once metadata, and
+  # the function called checks everything again under the exclusion.
+  defp batch_one(%{dry_run: false, store: store} = batch, id, _timers) do
+    case Storage.fetch_execution(store, id) do
+      {:ok, record} ->
+        case Linkage.from_metadata(record.metadata) do
+          {:ok, %Linkage{}} -> apply_tree(batch, id)
+          :no_linkage -> apply_one(batch, id)
+        end
+
+      {:error, reason} ->
+        {:refused, reason}
+    end
+  end
+
+  @spec preview(map(), execution_id(), :none | {:ask, [module()]}) :: batch_preview()
+  defp preview(%{store: store, plan: plan, machines: machines} = batch, id, timers) do
+    with {:ok, record} <- Storage.fetch_execution(store, id),
+         :ok <- preview_skip(record),
+         :ok <- check_record(record, plan),
+         {:ok, loaded, %{dropped: dropped}} <-
+           validate_loaded(store, record, plan, machines, timers) do
+      {:would_migrate, %{dropped: dropped, compatible_at: compatible_at?(batch, loaded)}}
+    else
+      {:skipped, _why} = skipped -> skipped
+      {:error, reason} -> {:would_refuse, reason}
+    end
+  end
+
+  # ADR-0017 decision 2's skips. A terminal execution is skipped before a
+  # linked one, so that a dry run and an apply agree on a terminal child:
+  # the apply's tree migration answers it terminal.
+  @spec preview_skip(Adapter.execution_record()) :: :ok | {:skipped, :terminal | :linked}
+  defp preview_skip(%{status: status}) when status in [:completed, :failed, :cancelled],
+    do: {:skipped, :terminal}
+
+  defp preview_skip(record) do
+    case Linkage.from_metadata(record.metadata) do
+      {:ok, %Linkage{}} -> {:skipped, :linked}
+      :no_linkage -> :ok
+    end
+  end
+
+  # ADR-0017 decision 2: `Statifier.Position.compatible_at?/3` over the
+  # two machines and the execution's export at its position. The export
+  # cannot refuse here: the transform that just answered exported it.
+  @spec compatible_at?(map(), MachineState.t()) :: boolean()
+  defp compatible_at?(%{machines: {from_machine, to_machine}}, machine_state) do
+    case Statifier.Position.export(machine_state) do
+      {:ok, exported} -> Statifier.Position.compatible_at?(from_machine, to_machine, exported)
+      {:error, _reason} -> false
+    end
+  end
+
+  @spec apply_one(map(), execution_id()) :: batch_outcome()
+  defp apply_one(batch, id) do
+    {from_machine, to_machine} = batch.machines
+
+    opts = [
+      from_machine: from_machine,
+      to_machine: to_machine,
+      on_failure: batch.on_failure,
+      pin_sources: batch.pin_sources,
+      serialization: batch.serialization
+    ]
+
+    case migrate(batch.store, id, batch.plan, opts) do
+      {:ok, %Execution{}, facts} -> {:migrated, facts}
+      {:parked, reason} -> {:parked, reason}
+      {:error, {:terminal_execution, %Execution{}}} -> {:skipped, :terminal}
+      {:error, reason} -> {:refused, reason}
+    end
+  end
+
+  @spec apply_tree(map(), execution_id()) :: batch_outcome()
+  defp apply_tree(%{plan: plan, machines: {from_machine, to_machine}} = batch, id) do
+    opts = [
+      machines: %{plan.from => from_machine, plan.to => to_machine},
+      on_failure: batch.on_failure,
+      pin_sources: batch.pin_sources,
+      serialization: batch.serialization
+    ]
+
+    case migrate_tree(batch.store, id, %{id => plan}, opts) do
+      {:ok, moved} ->
+        {%Execution{execution_id: ^id}, facts} = List.last(moved)
+        {:migrated, facts}
+
+      {:parked, reason} ->
+        {:parked, reason}
+
+      {:error, {:tree_refused, %{^id => {:terminal_execution, %Execution{}}} = refusals}}
+      when map_size(refusals) == 1 ->
+        {:skipped, :terminal}
+
+      {:error, reason} ->
+        {:refused, reason}
+    end
   end
 
   @doc """
