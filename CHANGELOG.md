@@ -10,6 +10,31 @@ fragment in [`changelog.d/`](https://github.com/riddler/statifier_persistence/bl
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
 
+## [0.20.0] 2026-09-26
+
+Feature release: a host can move every execution on a chart hash in one
+call. `StatifierPersistence.Executions.migrate_batch/3` applies one
+migration plan to each `:active` and `:needs_migration` execution on the
+plan's `from` hash and answers a per-execution report, with a dry run
+that writes nothing and a telemetry span around the call.
+`StatifierPersistence.Storage.list_execution_ids_by_content_hash/3` and
+its optional adapter callback list the executions it covers.
+
+Upgrading: no schema migration, and nothing an existing caller does
+changes. The `statifier` floor stays `~> 2.9`. A handler that matches
+`StatifierPersistence.Telemetry.events/0` exhaustively adds the three
+`[:statifier_persistence, :execution, :migrate_batch, _]` events, and one
+that matches the `callback` of `[:statifier_persistence, :adapter, :call]`
+exhaustively adds `:list_execution_ids_by_content_hash`.
+
+### Added
+
+- `StatifierPersistence.Executions.migrate_batch/3` applies one migration plan to every `:active` and `:needs_migration` execution on the plan's `from` hash and answers a report with one result per execution and a count per outcome. It refuses an execution the plan cannot take and leaves it where it was unless you pass `on_failure: :park`, and it moves a durable child through `migrate_tree/4` rooted at that child.
+- `dry_run: true` on `migrate_batch/3` previews the batch without writing anything: each execution answers `:would_migrate` (with the states the plan would drop and the `Statifier.Position.compatible_at?/3` answer at its position), `:would_refuse` (with the refusal) or `:skipped`.
+- `StatifierPersistence.Storage.list_execution_ids_by_content_hash/3` lists the ids of the executions on a content hash in a given set of statuses, and `c:StatifierPersistence.Storage.Adapter.list_execution_ids_by_content_hash/3` is the optional callback behind it, implemented by both shipped adapters. An adapter without the capability or without the callback answers `{:error, :content_hash_query_unsupported}`, and so does a batch against it.
+- `StatifierPersistence.Executions.migrate_batch/3` emits one telemetry span per call: `[:statifier_persistence, :execution, :migrate_batch, :start]`, then `[..., :stop]` carrying the report's count per outcome as measurements, or `[..., :exception]` when the batch raises. Every half carries the plan's `from` and `to` hashes, `dry_run` and `span_ref`; the stop adds `outcome` (`:ok`, or `:error` with the refusal as `reason` when the whole batch was refused). The dry run and a whole-batch refusal open it too, and `StatifierPersistence.Telemetry.events/0` lists the three new names. The per-execution `[:statifier_persistence, :execution, :migrated]` event is unchanged.
+- `prune_scope:` on `use StatifierPersistence.Testing.StorageConformance`, for authors of a storage adapter of their own: given `inside:` and `outside:` scopes and a `place:` function that writes the scope's columns onto an execution's rows, the suite generates one more pruning case proving that a scoped `c:StatifierPersistence.Storage.Adapter.prune_executions/4` batch clears the execution inside the scope and leaves the one outside it whole. The option shipped in 0.19.0, whose section did not name it; nothing changes in this release.
+
 ## [0.19.0] 2026-09-25
 
 Feature release: a host can confine a prune to one partition of its
