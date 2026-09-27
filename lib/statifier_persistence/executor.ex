@@ -38,6 +38,11 @@ defmodule StatifierPersistence.Executor do
     identical deterministic keys (st-ADR-0054 decision 3, st-ADR-0059's
     `timer_counter` ordinal). The loop never dedupes; idempotency by that
     key is the implementer's.
+  - The call runs inside the step, before the new position is written, so
+    a door of `StatifierPersistence.Executions` called from here for the
+    same execution answers `{:error, {:reentrant_step, execution_id}}`
+    rather than being served (ADR-0004's 2026-09-26 Amendment). A door for
+    any other execution is served as usual.
   """
   @callback execute(effect :: Statifier.Effect.t(), context :: context()) ::
               :ok | {:error, term()}

@@ -95,6 +95,25 @@ defmodule StatifierPersistence.Executions do
   origin and options it was delivered with, so a host folding the events it
   delivered can replay it (`docs/telemetry.md`).
 
+  ## A door called from inside its own executor refuses
+
+  The executor runs inside the step, after the position is loaded and
+  before the new one is written (ADR-0004 decision 3). For the length of
+  each executor call this module marks the execution as in a step in the
+  calling process, and every public door that takes an execution id -
+  `create/4`, `step/5`, `fail/4`, `cancel/3`, `unpark/3`, `migrate/4`,
+  `migrate_tree/4` and `inputs/2` - answers
+  `{:error, {:reentrant_step, execution_id}}` for a marked id before it
+  reads or writes anything. `migrate_tree/4` checks its root and every id
+  its `plans` name. Without the refusal a nested door would read the
+  position the outer step has not written yet, write its own, and have it
+  overwritten when the outer step persists, with nothing reported; the
+  Ecto adapter's lock would not stop it, because its advisory lock is
+  re-entrant for the connection that already holds it. A door called for
+  a different execution id, or from another process, is unaffected, and a
+  host that never calls back into the execution being stepped sees no
+  change (ADR-0004's 2026-09-26 Amendment).
+
   Concurrent deliveries to one execution are ordered by a pluggable per-execution
   serialization strategy (ADR-0004 decision 5): every entry point runs its
   fetch-to-persist tail inside the strategy's
@@ -195,7 +214,10 @@ defmodule StatifierPersistence.Executions do
   or create has persisted its `:failed` execution record, plus the serialization
   strategy's own refusal, surfaced unchanged
   (`{:serialization, :not_supported}` from the default strategy over an
-  adapter with no `lock_execution/3`).
+  adapter with no `lock_execution/3`), plus `{:reentrant_step,
+  execution_id}` from a door called for an execution whose executor is
+  running in the calling process (the moduledoc's "A door called from
+  inside its own executor refuses").
   """
   @type error ::
           Storage.error()
@@ -203,6 +225,7 @@ defmodule StatifierPersistence.Executions do
           | {:budget_exhausted, BudgetExhausted.t()}
           | {:serialization, term()}
           | {:pin_source_failed, {module(), PinSource.reason()}}
+          | {:reentrant_step, execution_id()}
 
   @typedoc """
   Options `create/4` accepts, and only those: an option `create/4` does
@@ -385,6 +408,14 @@ defmodule StatifierPersistence.Executions do
         ) ::
           {:ok, Execution.t(), MachineState.t()} | {:error, error()}
   def create(%Storage{} = store, execution_id, %Machine{} = machine, opts) do
+    with :ok <- not_in_step(execution_id) do
+      create_open(store, execution_id, machine, opts)
+    end
+  end
+
+  @spec create_open(Storage.t(), execution_id(), Machine.t(), [create_opt()]) ::
+          {:ok, Execution.t(), MachineState.t()} | {:error, error()}
+  defp create_open(store, execution_id, machine, opts) do
     executor = Keyword.fetch!(opts, :executor)
 
     # ADR-0006 decision 3's refusal is at open, and "at open" has to mean
@@ -506,12 +537,14 @@ defmodule StatifierPersistence.Executions do
           {:ok, Execution.t(), MachineState.t()} | {:discarded, Execution.t()} | {:error, error()}
   def step(%Storage{} = store, execution_id, %Machine{} = machine, event, opts)
       when is_struct(event, Event) or is_function(event, 1) do
-    executor = Keyword.fetch!(opts, :executor)
-    entry = entry(opts, :step)
+    with :ok <- not_in_step(execution_id) do
+      executor = Keyword.fetch!(opts, :executor)
+      entry = entry(opts, :step)
 
-    serialized(store, execution_id, entry, opts, fn ->
-      step_tail(store, execution_id, machine, event, opts, executor, entry)
-    end)
+      serialized(store, execution_id, entry, opts, fn ->
+        step_tail(store, execution_id, machine, event, opts, executor, entry)
+      end)
+    end
   end
 
   @spec step_tail(
@@ -615,9 +648,11 @@ defmodule StatifierPersistence.Executions do
         ) ::
           {:ok, Execution.t()} | {:discarded, Execution.t()} | {:error, error()}
   def fail(%Storage{} = store, execution_id, reason, opts \\ []) when is_binary(reason) do
-    store
-    |> serialized(execution_id, :fail, opts, fn -> fail_tail(store, execution_id, reason) end)
-    |> answer_parent_of_failed(execution_id, reason, opts)
+    with :ok <- not_in_step(execution_id) do
+      store
+      |> serialized(execution_id, :fail, opts, fn -> fail_tail(store, execution_id, reason) end)
+      |> answer_parent_of_failed(execution_id, reason, opts)
+    end
   end
 
   # The answer is deliberately outside `serialized/5` above: it takes the
@@ -704,7 +739,9 @@ defmodule StatifierPersistence.Executions do
   @spec cancel(store :: Storage.t(), execution_id :: execution_id(), opts :: keyword()) ::
           {:ok, Execution.t()} | {:discarded, Execution.t()} | {:error, error()}
   def cancel(%Storage{} = store, execution_id, opts \\ []) do
-    serialized(store, execution_id, :cancel, opts, fn -> cancel_tail(store, execution_id) end)
+    with :ok <- not_in_step(execution_id) do
+      serialized(store, execution_id, :cancel, opts, fn -> cancel_tail(store, execution_id) end)
+    end
   end
 
   @spec cancel_tail(Storage.t(), execution_id()) ::
@@ -767,16 +804,18 @@ defmodule StatifierPersistence.Executions do
   @spec unpark(store :: Storage.t(), execution_id :: execution_id(), opts :: keyword()) ::
           {:ok, Execution.t()} | {:discarded, Execution.t()} | {:error, error()}
   def unpark(%Storage{} = store, execution_id, opts \\ []) do
-    {strategy, config} = Keyword.get(opts, :serialization, {AdapterLock, store})
-    lock_start = System.monotonic_time()
+    with :ok <- not_in_step(execution_id) do
+      {strategy, config} = Keyword.get(opts, :serialization, {AdapterLock, store})
+      lock_start = System.monotonic_time()
 
-    config
-    |> strategy.with_execution(execution_id, fn ->
-      emit_lock(lock_start, execution_id, strategy, :acquired, nil)
-      unpark_tail(store, execution_id)
-    end)
-    |> unlocked(lock_start, execution_id, strategy)
-    |> unparked()
+      config
+      |> strategy.with_execution(execution_id, fn ->
+        emit_lock(lock_start, execution_id, strategy, :acquired, nil)
+        unpark_tail(store, execution_id)
+      end)
+      |> unlocked(lock_start, execution_id, strategy)
+      |> unparked()
+    end
   end
 
   # The one event of an unpark, emitted after its section returns and only
@@ -1093,6 +1132,16 @@ defmodule StatifierPersistence.Executions do
           | {:parked, {:migration_refused, [migration_finding()]}}
           | {:error, migrate_error()}
   def migrate(%Storage{} = store, execution_id, %Plan{} = plan, opts) do
+    with :ok <- not_in_step(execution_id) do
+      migrate_open(store, execution_id, plan, opts)
+    end
+  end
+
+  @spec migrate_open(Storage.t(), execution_id(), Plan.t(), keyword()) ::
+          {:ok, Execution.t(), migrated()}
+          | {:parked, {:migration_refused, [migration_finding()]}}
+          | {:error, migrate_error()}
+  defp migrate_open(store, execution_id, plan, opts) do
     %Machine{} = from_machine = Keyword.fetch!(opts, :from_machine)
     %Machine{} = to_machine = Keyword.fetch!(opts, :to_machine)
     on_failure = Keyword.get(opts, :on_failure, :refuse)
@@ -1511,6 +1560,16 @@ defmodule StatifierPersistence.Executions do
           | {:error, migrate_tree_error()}
   def migrate_tree(%Storage{} = store, root_execution_id, plans, opts)
       when is_binary(root_execution_id) and is_map(plans) do
+    with :ok <- not_in_step([root_execution_id | Map.keys(plans)]) do
+      migrate_tree_open(store, root_execution_id, plans, opts)
+    end
+  end
+
+  @spec migrate_tree_open(Storage.t(), execution_id(), %{execution_id() => Plan.t()}, keyword()) ::
+          {:ok, [{Execution.t(), migrated()}]}
+          | {:parked, {:tree_refused, %{execution_id() => tree_refusal()}}}
+          | {:error, migrate_tree_error()}
+  defp migrate_tree_open(store, root_execution_id, plans, opts) do
     machines = Keyword.get(opts, :machines, %{})
     on_failure = Keyword.get(opts, :on_failure, :refuse)
     pin_sources = Keyword.get(opts, :pin_sources, [])
@@ -2304,8 +2363,11 @@ defmodule StatifierPersistence.Executions do
   """
   @spec inputs(store :: Storage.t(), execution_id :: execution_id()) ::
           {:ok, [Storage.input()]} | :not_supported | {:error, error()}
-  def inputs(%Storage{} = store, execution_id) when is_binary(execution_id),
-    do: Storage.list_inputs(store, execution_id)
+  def inputs(%Storage{} = store, execution_id) when is_binary(execution_id) do
+    with :ok <- not_in_step(execution_id) do
+      Storage.list_inputs(store, execution_id)
+    end
+  end
 
   @doc """
   Whether `execution` has ended: `true` when it carries an `ended_at`
@@ -3505,9 +3567,56 @@ defmodule StatifierPersistence.Executions do
           :emit | :defer
         ) :: [{Statifier.Effect.t(), term()}]
   defp execute_one(effect, failures, seam, report) do
-    case Executor.run(seam.executor, effect, seam.context) do
+    verdict =
+      in_step(seam.context.execution_id, fn ->
+        Executor.run(seam.executor, effect, seam.context)
+      end)
+
+    case verdict do
       :ok -> failures
       {:error, reason} -> collect({effect, reason}, failures, seam, report)
+    end
+  end
+
+  # The in-step mark (ADR-0004's 2026-09-26 Amendment): the execution ids
+  # whose executor is running in this process, innermost first. It is a
+  # list rather than one id because an executor may step a different
+  # execution, whose own executor then runs inside the first one's: both
+  # are in a step until their calls return, and a door for either refuses.
+  @in_step_key {__MODULE__, :in_step}
+
+  # The guard every public door that takes an execution id runs first,
+  # before it reads or writes anything. `migrate_tree/4` hands it every id
+  # it was called for, the root and the ids its plans name.
+  @spec not_in_step(execution_id() | [execution_id()]) ::
+          :ok | {:error, {:reentrant_step, execution_id()}}
+  defp not_in_step(ids) when is_list(ids) do
+    marked = Process.get(@in_step_key, [])
+
+    case Enum.find(ids, &(&1 in marked)) do
+      nil -> :ok
+      execution_id -> {:error, {:reentrant_step, execution_id}}
+    end
+  end
+
+  defp not_in_step(execution_id), do: not_in_step([execution_id])
+
+  # Marks `execution_id` as in a step for the length of `fun` - one executor
+  # call - and restores the mark as it found it on every exit: a return, a
+  # raise, a throw or an exit. A mark left behind would refuse every later
+  # door this process calls for that execution.
+  @spec in_step(execution_id(), (-> result)) :: result when result: term()
+  defp in_step(execution_id, fun) do
+    outer = Process.get(@in_step_key, [])
+    Process.put(@in_step_key, [execution_id | outer])
+
+    try do
+      fun.()
+    after
+      case outer do
+        [] -> Process.delete(@in_step_key)
+        _marked -> Process.put(@in_step_key, outer)
+      end
     end
   end
 

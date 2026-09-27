@@ -480,3 +480,66 @@ conversion is sound for the retirement it refuses, but it cannot restore
 a caller's transaction that a source's own nested repo work has already
 marked failed; a host that calls `Executions.retire_chart/4` inside its
 own transaction gets the refusal and a failed transaction together.
+
+## Amendment (2026-09-26, sp-a2ee): a door called from inside its own executor refuses
+
+Status of this amendment: proposed (2026-09-26, sp-a2ee). The record above
+stays accepted; this amendment is proposed until the operator accepts it.
+
+Pure addition: nothing above is edited. Decision 3 runs the executor
+inside the step, after the position is loaded and before the new one is
+written, and decision 5 runs that whole tail inside the execution's
+serialization strategy. Neither says what happens when the executor
+calls back into the execution it is being run for. Until this
+Amendment the answer was a lost update: a nested door read the position
+the outer step had not written yet, wrote its own, and the outer step's
+write then replaced it, with nothing reported. The Ecto adapter's lock
+did not stop the nested call, because the advisory lock it takes is
+transaction-scoped (`lock_execution/3`,
+`lib/statifier_persistence/storage/ecto.ex:1453`, read at `f756277`)
+and the nested call runs in the same connection's transaction, where
+Postgres grants the lock again to the session already holding it. The
+in-memory adapter's lock is not re-entrant (`lock_execution/3`,
+`lib/statifier_persistence/storage/in_memory.ex:757`, read at
+`f756277`), so there the nested call waited on its own caller forever.
+
+**The rule.** For the length of each executor call - one
+`StatifierPersistence.Executor.run/3`
+(`lib/statifier_persistence/executor.ex:50`, read at `f756277`) - the
+execution is marked as in a step in the calling process. The mark is
+set and cleared by `in_step/2` in `StatifierPersistence.Executions`,
+which restores it on every exit from the call: a return, a raise, a
+throw or an exit. Every public door of `StatifierPersistence.Executions`
+that takes an execution id checks the mark first, before it reads or
+writes anything, in `not_in_step/1`. The doors are `create/4`,
+`step/5`, `fail/4`, `cancel/3`, `unpark/3`, `migrate/4`,
+`migrate_tree/4` and `inputs/2`; `migrate_tree/4` checks its root and
+every id its `plans` name.
+
+**The error.** A door called for a marked execution answers
+`{:error, {:reentrant_step, execution_id}}`, a new arm of
+`t:StatifierPersistence.Executions.error/0`. It is an error rather than a
+discard because nothing about the execution is wrong: the call came
+from the one place it cannot be served, and the outer step goes on to
+persist normally. A host that needs the nested effect records the
+intent in its executor and acts on it after the outer door has
+returned.
+
+**What the rule leaves alone.** The mark names execution ids, so a door
+called for a different execution from inside an executor proceeds as
+before, and the mark is a list: an executor that steps a second
+execution marks both until each call returns. The mark belongs to the
+calling process, so a call from another process is not refused; it
+meets the serialization strategy as it always did. A host that never
+calls back into the execution it is stepping sees no change. Doors that
+take no execution id (`cascade_cancel/3`, `migrate_batch/3`,
+`retire_chart/4`, `executions_on/2`) check nothing themselves; where one
+reaches a marked execution through `cancel/3`, `migrate/4` or
+`migrate_tree/4`, that door's refusal is what it gets.
+
+**Why here.** The guard sits above every adapter and every strategy,
+like ADR-0003's identity guard, so both adapters answer the same: the
+refusal comes before any lock is asked for. The conformance suite
+carries one case for it (`StatifierPersistence.Testing.StorageConformance`,
+"facade: a door called from inside its own execution's executor
+refuses, and the outer step is stored").
