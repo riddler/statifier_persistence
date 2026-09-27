@@ -10,6 +10,27 @@ fragment in [`changelog.d/`](https://github.com/riddler/statifier_persistence/bl
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
 
+## [0.21.0] 2026-09-27
+
+Feature release: a door of `StatifierPersistence.Executions` called from
+inside the executor of the execution being stepped now refuses with
+`{:error, {:reentrant_step, execution_id}}` instead of having its write
+overwritten by the outer step with nothing reported, and
+`StatifierPersistence.Retention.prune/3` takes `single_batch: true` to
+prune one batch per call, so a host can hold one short transaction of
+its own per batch.
+
+Upgrading: no schema migration. The `statifier` floor stays `~> 2.9`. A
+host that never calls back into the execution it is stepping sees no
+change; code that matches `t:StatifierPersistence.Executions.error/0`
+exhaustively adds the `{:reentrant_step, execution_id}` arm. A prune
+that does not pass `single_batch:` is unchanged.
+
+### Added
+
+- Every public door of `StatifierPersistence.Executions` that takes an execution id (`create/4`, `step/5`, `fail/4`, `cancel/3`, `unpark/3`, `migrate/4`, `migrate_tree/4`, `inputs/2`) answers `{:error, {:reentrant_step, execution_id}}` when called for an execution whose executor is running in the calling process, instead of letting the outer step overwrite the nested call's write with nothing reported; a host that never calls back into the execution it is stepping sees no change. Code that matches `t:StatifierPersistence.Executions.error/0` exhaustively gains one arm.
+- `StatifierPersistence.Retention.prune/3` takes `single_batch: true` to prune one batch and answer its counts plus `more?`, so a host can hold one short transaction of its own per batch; its docs now say that a call inside a caller's transaction prunes every batch in that one transaction.
+
 ## [0.20.0] 2026-09-26
 
 Feature release: a host can move every execution on a chart hash in one
