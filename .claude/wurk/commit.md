@@ -64,10 +64,13 @@ version-bump row for what a release bead is.
 
 `mix.exs` holds the last released version until a release bead says
 otherwise. `CLAUDE.md`'s authority table is the authority on when that
-happens and this section does not restate it: a release (tag,
-`mix hex.publish`, GitHub release) is never an agent's, and the version-bump
-row allows the bump only on an operator-authorized release bead's branch,
-inside a campaign carrying the operator's explicit consent. Read the row
+happens and this section does not restate it: a release (`mix hex.publish`,
+GitHub release) is never an agent's; the tag of a release prep is made after
+the prep is merged to `origin/main`, by the conductor or the session that owns
+the release bead (the tagging row and the "Release preps" paragraph), never
+in a commit here; and the version-bump row allows the bump only on an
+operator-authorized release bead's branch, inside a campaign carrying the
+operator's explicit consent. Read the row
 rather than a version quoted here, which goes stale at every release. Never
 edit the version field as part of an ordinary commit.
 
