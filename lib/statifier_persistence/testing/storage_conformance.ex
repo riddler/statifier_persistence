@@ -2693,6 +2693,91 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         end
       end
 
+      # -- Facade level: a door called from inside its own executor ------
+      #
+      # ADR-0004's 2026-09-26 Amendment. The executor runs inside the step,
+      # before the new position is written; a door called for the same
+      # execution from inside it refuses, and the outer step's position is
+      # the one stored. The refusal sits above every adapter and every
+      # serialization strategy, so this case runs one that admits its own
+      # holder - the shape of the Ecto adapter's transaction-scoped lock,
+      # which is re-entrant for the connection holding it - and so needs no
+      # `lock_execution/3` and carries no tag. Without the refusal the
+      # nested step lands `x` and the outer write puts `b` over it.
+
+      defmodule ReentrantSerialization do
+        @moduledoc false
+        @behaviour StatifierPersistence.Serialization
+
+        @impl StatifierPersistence.Serialization
+        def with_execution(_config, _execution_id, fun), do: {:ok, fun.()}
+      end
+
+      # sabotage: in StatifierPersistence.Executions.step/5, bypass the
+      # not_in_step/1 check (call the serialized tail directly) -> red on
+      # both conformance suites, the nested step answered {:ok, _, _} and
+      # the stored leaf was "b" only because the outer write landed last,
+      # so the refusal assertion failed first. Verified red, reverted from a
+      # copy.
+      test "facade: a door called from inside its own execution's executor refuses, and the outer step is stored",
+           %{store: store} do
+        {:ok, machine} =
+          Statifier.compile("""
+          <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="a">
+              <state id="a">
+                  <transition event="go" target="b"><log label="reenter"/></transition>
+                  <transition event="other" target="x"/>
+              </state>
+              <state id="b"/>
+              <state id="x"/>
+          </scxml>
+          """)
+
+        execution_id = "execution-conformance-reentrant"
+        test_pid = self()
+        serialization = {ReentrantSerialization, nil}
+        quiet = fn _effect, _context -> :ok end
+
+        assert {:ok, _execution, _machine_state} =
+                 StatifierPersistence.Executions.create(store, execution_id, machine,
+                   executor: quiet,
+                   serialization: serialization
+                 )
+
+        reentering = fn _effect, %{execution_id: id} ->
+          nested =
+            StatifierPersistence.Executions.step(
+              store,
+              id,
+              machine,
+              Statifier.Event.external("other"),
+              executor: quiet,
+              serialization: serialization
+            )
+
+          send(test_pid, {:nested, nested})
+          :ok
+        end
+
+        assert {:ok, %{status: :active}, _machine_state} =
+                 StatifierPersistence.Executions.step(
+                   store,
+                   execution_id,
+                   machine,
+                   Statifier.Event.external("go"),
+                   executor: reentering,
+                   serialization: serialization
+                 )
+
+        assert_received {:nested, {:error, {:reentrant_step, ^execution_id}}}
+
+        assert {:ok, loaded} = Storage.load_execution_position(store, execution_id, machine)
+
+        assert loaded
+               |> Statifier.MachineState.active_leaf_states()
+               |> Enum.map(&Machine.id(machine, &1)) == ["b"]
+      end
+
       # -- Facade level --------------------------------------------------
 
       # sabotage: made StatifierPersistence.Storage's private ended_at/2
