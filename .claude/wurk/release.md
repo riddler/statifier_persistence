@@ -45,8 +45,9 @@ that README does not say is the *form* the moved pin takes - the exact-minor
 `~> X.Y.0` - and it does not need to: the form is this file's to name, and it
 is named under "The README install pin" below. A prep reads the form there,
 not from the fragment README and not from a previous release commit.
-That README's clause "and tag it" is the one place the two documents part, and
-only because they address different readers - see the last section here.
+That README's closing clause, "and tag it", is the tag `CLAUDE.md`'s "Release
+preps" paragraph assigns to the conductor or the session that owns the release
+bead, made on the prep once it is merged - see the last section here.
 
 ## Why the recipe names no changelog
 
@@ -201,17 +202,26 @@ No `lib/` file appears in that table, and step A explains why. Neither does
 ## What a release here still is not
 
 The skill does not tag, push, open a request or publish, and this extension
-does not either. In this repo those are the operator's, in every campaign and
-outside every campaign. `CLAUDE.md`'s authority table is explicit on both
-halves:
+does not either: the recipe ends at the release commit on the release bead's
+branch. What follows that commit is `CLAUDE.md`'s to say, and its authority
+table and "Release preps" paragraph say it:
 
-- *a release (tag, `mix hex.publish`, GitHub release)* - trigger **never**,
-  still unauthorized **always**: "publishing is the operator's, in every
-  campaign".
 - *a version bump on a release bead's branch* - allowed only on "an
   operator-authorized release bead, inside a campaign carrying the operator's
   explicit consent", and still unauthorized "on any other bead, on main, or
-  when the operator has not named this repo's release bead".
+  when the operator has not named this repo's release bead". The prep then
+  lands through the commit, push and merge rows like any other bead's work.
+- *tagging a release prep* - trigger: "the release bead's version bump is
+  merged to `origin/main`; the tag names that version at the merged commit";
+  still unauthorized "before the bump is on `origin/main`; a tag naming any
+  other version or commit". The "Release preps" paragraph names who: once the
+  prep is merged, "the conductor or the session that owns the release bead
+  tags that merged commit with the new version and pushes the tag". The tag
+  is the family norm, not a grant a campaign consent has to name.
+- *a release (`mix hex.publish`, GitHub release)* - trigger **never**, still
+  unauthorized **always**: "publishing is the operator's, in every campaign".
+  Publishing, a docs republish included, is the operator's one release step,
+  and no consent or relay delegates it.
 
 So the one thing this recipe performs - the bump plus the step B promotion, on
 a named release bead's branch, under a campaign consent that names it - is
@@ -219,7 +229,8 @@ release *prep*. `.claude/wurk/commit.md`'s "Version bump: never" section
 records the same boundary from the commit side: the version field moves only
 through a release bead, never as a convenience.
 
-This is also the one place this file and `changelog.d/README.md` differ.
-That README ends its "At release" paragraph with "and tag it", which is
-correct for its reader - the operator, who does tag. It is not an instruction
-this skill or any agent may carry out.
+`changelog.d/README.md` ends its "At release" paragraph with "and tag it".
+That clause is the tag in the list above: made on the merged prep commit, by
+the conductor or the session that owns the release bead, after the release
+commit has landed on `origin/main` - not by this skill and not inside the
+release commit. The two documents agree on it.
