@@ -396,9 +396,29 @@ defmodule StatifierPersistence.Executions do
   (ADR-0012 decision 6). An execution created on a retired hash would
   persist and then be unresumable, because the rebuild reads the chart
   back through `StatifierPersistence.Storage.fetch_chart/2` and gets
-  the retired arm. A retirement refuses for as long as anything pins
-  the hash, so a create after one is the single way an execution comes
-  to stand on a tombstone.
+  the retired arm.
+
+  A retirement refuses for as long as anything pins the hash, but a
+  create that passed this check can still leave its execution on a
+  tombstone. The check answers for the hash as it stood when it was
+  read, and the execution row is inserted later, in a separate write;
+  nothing makes the two one step against a retirement. So one
+  interleaving is not prevented: the create reads the hash as not
+  retired, a retirement of that hash then writes its tombstone, and the
+  create inserts its execution row on the tombstoned hash. The
+  retirement did not see that execution, because when it decided, no
+  row put it on the hash. On `StatifierPersistence.Storage.Ecto` the
+  retirement decides in one conditional `UPDATE` of the chart row, whose
+  `NOT EXISTS` sees, under Postgres's default READ COMMITTED, only the
+  rows committed when the statement runs; the insert and the `UPDATE`
+  write different rows of different tables, so no unique index and no
+  foreign key arbitrates between them, and the per-execution lock the
+  create takes is one a retirement never takes. Which object enforces
+  what: this check turns a create on an already-tombstoned hash into the
+  retired arm; the retirement's own write keeps a tombstone off a hash
+  that an execution it can see still pins; nothing in this package
+  refuses the interleaving above, and this documentation claims nothing
+  about a stricter isolation level a host sets.
   """
   @spec create(
           store :: Storage.t(),
@@ -963,7 +983,28 @@ defmodule StatifierPersistence.Executions do
     machines (`StatifierPersistence.Migration.Plan.validate/3`), every
     finding at once.
   - `{:chart_retired, info}` - the plan's `to` hash is tombstoned
-    (ADR-0012 decision 6).
+    (ADR-0012 decision 6). A retirement refuses for as long as anything
+    pins the hash, but a migration that passed this check can still
+    leave its execution on a tombstone. The check answers for the `to`
+    hash as it stood when it was read, and the execution row is re-pinned
+    onto it later, in a separate write; nothing makes the two one step
+    against a retirement. So one interleaving is not prevented: the
+    migration reads the `to` hash as not retired, a retirement of that
+    hash then writes its tombstone, and the migration re-pins its
+    execution row onto the tombstoned hash. The retirement did not see
+    that execution, because when it decided, no row put it on the hash.
+    On `StatifierPersistence.Storage.Ecto` the retirement decides in one
+    conditional `UPDATE` of the chart row, whose `NOT EXISTS` sees,
+    under Postgres's default READ COMMITTED, only the rows committed when
+    the statement runs; the re-pin and the `UPDATE` write different rows
+    of different tables, so no unique index and no foreign key
+    arbitrates between them, and the per-execution lock the migration
+    takes is one a retirement never takes. Which object enforces what:
+    this check turns a migration to an already-tombstoned hash into this
+    arm; the retirement's own write keeps a tombstone off a hash that an
+    execution it can see still pins; nothing in this package refuses the
+    interleaving above, and this documentation claims nothing about a
+    stricter isolation level a host sets.
   - `{:no_pin_source, states}` - the plan leaves unmapped or drops `states`,
     each a state of the from chart that could own a timer, and `opts`
     supplied no pin source (ADR-0013 decision 6, fail closed). A state the
