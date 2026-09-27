@@ -854,3 +854,42 @@ What was re-read before the flip:
   refused with nothing written and parks under `:park`.
 - **The changelog.** The 0.15.1 section of `CHANGELOG.md` names the
   refusal under Fixed.
+
+## Note (2026-09-27, sp-9us8 and sp-z07j): the retired-hash check is not atomic with a retirement
+
+This Note decides nothing and changes no status line. It records a window
+decision 4's "A to hash that ADR-0012 has tombstoned is refused with
+ADR-0012's retired arm, before any write, as `create/4` refuses one" leaves
+open, and where it is now documented. Every cite below was read on `main`
+at `16b5613`, in `lib/statifier_persistence/executions.ex` unless another
+file is named.
+
+- **The refusal answers for the hash as it was read.** The `to` hash is
+  checked with `StatifierPersistence.Storage.check_chart_retired/2` before
+  the execution's lock is taken (`plan_check/5`), and the execution row is
+  re-pinned onto that hash later, in a separate write (`repin/5`).
+- **One interleaving is not prevented.** The migration reads the `to`
+  hash as not retired, a retirement of that hash then writes its
+  tombstone, and the migration re-pins its execution row onto the
+  tombstoned hash. The retirement did not see that execution, because
+  when it decided, no row put it on the hash.
+- **Why nothing arbitrates.** The Ecto adapter decides a retirement in
+  one conditional `UPDATE` of the chart row whose `NOT EXISTS` sees, under
+  Postgres's default READ COMMITTED, only the rows committed when the
+  statement runs (`lib/statifier_persistence/storage/ecto.ex`,
+  `unpinned_chart/2`). The re-pin and that `UPDATE` write different rows
+  of different tables, with no unique index or foreign key between them,
+  and a retirement takes no per-execution lock
+  (`lib/statifier_persistence/storage/ecto.ex`, `retire_chart/3`).
+- **`create/4` has the same window.** Its check runs before its insert,
+  in a separate write (`create_open/4`), and the same interleaving leaves
+  a created execution on a tombstone.
+- **Where it is documented.** `create/4`'s `@doc` and the
+  `{:chart_retired, info}` entry of `t:migrate_error/0` state the
+  interleaving, which object enforces what, and no isolation-level claim,
+  in the same words.
+
+Decision 4's sentence stays true as written: a `to` hash tombstoned when
+the check reads it is refused before any write. Closing the window inside
+the re-pin write, or inside a create's insert, is a later change; this
+Note changes no behaviour.
