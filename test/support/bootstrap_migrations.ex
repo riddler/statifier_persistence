@@ -39,6 +39,14 @@ defmodule StatifierPersistence.BootstrapMigrations do
   Migration 110 creates the `Scoped` host's tables, V01 to V08 but V04,
   so its `tenant_id` leading column is placed on every table.
 
+  Migration 111 creates the `SharedIdScoped` host's tables the same way,
+  then replaces the executions `execution_id` unique index with one on
+  `(tenant_id, execution_id)`: the table a host that partitions by its
+  leading column keeps, where two partitions can hold one id. Building
+  it here, once, keeps that DDL out of the tests: a test that ran it
+  inside its sandbox transaction on `Scoped`'s table would hold an
+  exclusive lock the async scoped conformance module waits on.
+
   The `Kx*` hosts are not bootstrapped here: the live migration tests
   own their DDL end to end, up and down, and prove the helper itself.
   Test-only support code.
@@ -54,7 +62,8 @@ defmodule StatifierPersistence.BootstrapMigrations do
     {20_260_912_000_107, __MODULE__.ExecutionRenameTables},
     {20_260_919_000_108, __MODULE__.ChartTombstoneColumns},
     {20_260_924_000_109, __MODULE__.ExecutionEndedAtColumns},
-    {20_260_925_000_110, __MODULE__.ScopedTables}
+    {20_260_925_000_110, __MODULE__.ScopedTables},
+    {20_260_927_000_111, __MODULE__.SharedIdScopedTables}
   ]
 
   defmodule DefaultTables do
@@ -265,6 +274,34 @@ defmodule StatifierPersistence.BootstrapMigrations do
     def down do
       Migrations.down(for: EctoHosts.Scoped, from: 8, version: 5)
       Migrations.down(for: EctoHosts.Scoped, from: 3)
+    end
+  end
+
+  defmodule SharedIdScopedTables do
+    @moduledoc false
+    use Ecto.Migration
+
+    alias StatifierPersistence.Ecto.Migrations
+    alias StatifierPersistence.EctoHosts
+
+    @prefix "scoped_shared_id"
+    @executions "statifier_executions"
+
+    # The shared-id host's tables, as migration 110 builds `Scoped`'s,
+    # then its executions uniqueness moved from the id alone to the
+    # leading column and the id.
+    def up do
+      Migrations.up(for: EctoHosts.SharedIdScoped, version: 3)
+      Migrations.up(for: EctoHosts.SharedIdScoped, from: 5, version: 8)
+      drop(index(@executions, [:execution_id], prefix: @prefix))
+      create(unique_index(@executions, [:tenant_id, :execution_id], prefix: @prefix))
+    end
+
+    def down do
+      drop(index(@executions, [:tenant_id, :execution_id], prefix: @prefix))
+      create(unique_index(@executions, [:execution_id], prefix: @prefix))
+      Migrations.down(for: EctoHosts.SharedIdScoped, from: 8, version: 5)
+      Migrations.down(for: EctoHosts.SharedIdScoped, from: 3)
     end
   end
 

@@ -6,7 +6,9 @@ defmodule StatifierPersistence.EctoHosts do
   overriding every knob, a host on database-assigned keys, and
   `BlobTyped`, which puts the generic reversible transform
   (`StatifierPersistence.Test.ReversibleBlobType`) on `:blob_type`, and
-  `Scoped`, which places a host-owned `tenant_id` with `:leading_columns`.
+  `Scoped`, which places a host-owned `tenant_id` with `:leading_columns`,
+  and `SharedIdScoped`, the same placement on an executions table unique
+  on `(tenant_id, execution_id)` rather than on `execution_id`.
   Test-only support code, not part of the package's public API.
 
   The `Kx*` hosts back the live migration tests: one per key scheme, each
@@ -56,6 +58,20 @@ defmodule StatifierPersistence.EctoHosts do
     use StatifierPersistence.Ecto,
       repo: StatifierPersistence.TestRepo,
       prefix: "scoped",
+      leading_columns: [tenant_id: {:text, null: true}]
+  end
+
+  # `Scoped` again, in a schema of its own whose executions table keys
+  # its uniqueness on the leading column and the id together, so two
+  # partitions can hold one id. The bootstrap builds that table once
+  # (migration 111); a test that needs two rows under one id uses this
+  # host rather than running DDL on `Scoped`'s tables, which the async
+  # scoped conformance module shares.
+  defmodule SharedIdScoped do
+    @moduledoc false
+    use StatifierPersistence.Ecto,
+      repo: StatifierPersistence.TestRepo,
+      prefix: "scoped_shared_id",
       leading_columns: [tenant_id: {:text, null: true}]
   end
 

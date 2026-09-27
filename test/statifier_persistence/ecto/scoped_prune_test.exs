@@ -149,29 +149,32 @@ defmodule StatifierPersistence.Ecto.ScopedPruneTest do
   # outside the scope can share an id the selection chose. A host that
   # partitions by its leading column keys that uniqueness on the column
   # and the id instead, and there two partitions can hold one id. The
-  # test drops the index inside its sandbox transaction to build that
-  # table, then copies the execution's row into tenant-b under the same
-  # id.
+  # `SharedIdScoped` host's executions table is that table, built once by
+  # the suite's bootstrap, so this test runs no DDL: dropping the index on
+  # `Scoped`'s table inside the sandbox transaction held an exclusive
+  # lock the async scoped conformance module, which shares that table,
+  # waited on. The test copies the execution's row into tenant-b under
+  # the same id with one INSERT ... SELECT.
   #
   # sabotage: dropped `scoped/2` from the position blob update in the
   # Ecto adapter's prune_batch/4 -> red, the batch cleared two blobs,
   # the tenant-b row's with the tenant-a row's. Verified red, reverted
   # from a copy.
-  test "the position blob update carries the scope", %{store: store} do
-    SQL.query!(TestRepo, ~s(DROP INDEX "scoped"."statifier_executions_execution_id_index"))
+  test "the position blob update carries the scope" do
+    {:ok, store} =
+      Storage.new(Storage.Ecto, persistence: EctoHosts.SharedIdScoped, sandbox: true)
+
     finished(store, "scoped-shared", @tenant_a)
 
     SQL.query!(
       TestRepo,
-      ~s(CREATE TEMPORARY TABLE shared_copy ON COMMIT DROP AS SELECT * FROM "scoped"."statifier_executions" WHERE execution_id = $1),
+      """
+      INSERT INTO "scoped_shared_id"."statifier_executions"
+      SELECT (jsonb_populate_record(e, to_jsonb(e) || jsonb_build_object('id', e.id || '-b', 'tenant_id', 'tenant-b'))).*
+      FROM "scoped_shared_id"."statifier_executions" e
+      WHERE execution_id = $1
+      """,
       ["scoped-shared"]
-    )
-
-    SQL.query!(TestRepo, ~s(UPDATE shared_copy SET id = id || '-b', tenant_id = 'tenant-b'))
-
-    SQL.query!(
-      TestRepo,
-      ~s(INSERT INTO "scoped"."statifier_executions" SELECT * FROM shared_copy)
     )
 
     assert {:ok, %{executions: 1, position_blobs: 1, inputs: 1}} =
@@ -180,7 +183,7 @@ defmodule StatifierPersistence.Ecto.ScopedPruneTest do
     assert %{rows: rows} =
              SQL.query!(
                TestRepo,
-               ~s(SELECT tenant_id, position_blob IS NULL FROM "scoped"."statifier_executions" WHERE execution_id = $1 ORDER BY tenant_id),
+               ~s(SELECT tenant_id, position_blob IS NULL FROM "scoped_shared_id"."statifier_executions" WHERE execution_id = $1 ORDER BY tenant_id),
                ["scoped-shared"]
              )
 
