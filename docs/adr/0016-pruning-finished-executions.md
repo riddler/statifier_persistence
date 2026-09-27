@@ -420,3 +420,21 @@ conformance suite are untouched.
 This is not breaking: a host that passes no `single_batch:` sees today's
 answer. It ships in a minor with an Added changelog line, and it adds no
 schema version.
+
+## Note (2026-09-27, sp-jjo4): the row lock's cite names `due_executions/3`, which is `due_executions/4` since the scope argument
+
+The first Note's decision 8 bullet cites the Postgres row lock,
+`FOR UPDATE SKIP LOCKED`, at `due_executions/3` in `storage/ecto.ex`. The
+change that landed the sp-u4mc Amendment (`b02adbb`) gave that private
+function a fourth argument, the scope, and on `main` at `1de23b8` the lock
+is taken in `due_executions/4`
+(`lib/statifier_persistence/storage/ecto.ex`, `due_executions/4`,
+@1de23b8). That cite is read as `due_executions/4`.
+
+The sp-u4mc Amendment's "What it rests on" cites `due_executions/3` and
+`prune_batch/3` at `453f630`, where both took three arguments; that cite is
+right at the SHA it names. On `main` at `1de23b8` they are
+`due_executions/4` and `prune_batch/4`.
+
+Both cites stay as written, and this Note is how they are read. No decision
+changes, and no code changes with this Note.
