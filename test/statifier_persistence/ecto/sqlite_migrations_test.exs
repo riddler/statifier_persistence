@@ -894,7 +894,7 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
     # inputs table, and the absence of a row lock, are what this backend
     # has to parse (ADR-0016).
     #
-    # sabotage: gave Storage.Ecto's due_executions/3 its Postgres row
+    # sabotage: gave Storage.Ecto's due_executions/4 its Postgres row
     # lock on every backend -> red here, the batch raised on a lock
     # clause SQLite does not have. Verified red, reverted from a copy.
     test "Retention.prune/3 clears a finished execution's position and log and keeps its row" do
