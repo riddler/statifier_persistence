@@ -370,7 +370,7 @@ by a later Note; it does not hold the flip.
 
 ## Amendment (2026-09-26, sp-efyh): `prune/3` takes `single_batch:`, and a call inside a caller's transaction is one transaction
 
-Status of this amendment: proposed (2026-09-26, sp-efyh). The record above
+Status of this amendment: accepted (2026-09-27, sp-efyh). The record above
 and its 2026-09-25 Amendment stay accepted; this amendment is proposed
 until the operator accepts it.
 
@@ -438,3 +438,44 @@ right at the SHA it names. On `main` at `1de23b8` they are
 
 Both cites stay as written, and this Note is how they are read. No decision
 changes, and no code changes with this Note.
+
+## Note (2026-09-27, sp-zwxf): the sp-efyh Amendment is accepted
+
+The operator authorized the acceptance of the 2026-09-26 sp-efyh
+Amendment on 2026-09-27, after the code that implements it (`f756277`)
+shipped in statifier_persistence 0.21.0 (tag `v0.21.0`, `78aedd7`,
+published on Hex 2026-09-27) under an Added changelog line. That
+Amendment's own status line flips in place from proposed to accepted, and
+the record above and its 2026-09-25 Amendment stay accepted. Its "this
+amendment is proposed until the operator accepts it" is met here and stays
+as written. Every cite below was read on `main` at `bb169b7`, in
+`lib/statifier_persistence/retention.ex` unless another file is named;
+nothing under `lib/` or `test/` changed between `v0.21.0` and `bb169b7`.
+
+What was re-read before the flip:
+
+- **What it rests on.** The Ecto adapter's `prune_executions/4` doc says
+  "This transaction joins a caller's own when there is one"
+  (`lib/statifier_persistence/storage/ecto.ex`, `prune_executions/4`), and
+  `prune_batches/5` calls `Storage.prune_executions/4` again until a batch
+  answers fewer executions than `batch_size`.
+- **Decision 1.** `t:prune_opt/0` carries `{:single_batch, boolean()}`;
+  `single_batch!/1` reads it with `false` as the default and raises
+  `ArgumentError` for any other value; `prune/3` runs `prune_one_batch/4`
+  when it is `true` and `prune_batches/5` otherwise.
+- **Decision 2.** `prune_one_batch/4` answers the batch's counts with
+  `more?: counts.executions == batch_size`.
+- **Decision 3.** `Storage.prune_executions/4` runs one batch per call,
+  and its doc names `prune/3` with `single_batch: true` as the host's door
+  for one batch per host transaction
+  (`lib/statifier_persistence/storage.ex`, `prune_executions/4`); the
+  `prune/3` doc says a call inside a caller's transaction prunes every
+  batch in that one transaction.
+- **Decision 4.** The change that landed this Amendment (`f756277`)
+  touches no adapter callback, no facade arity and no file of the
+  conformance suite; its `storage.ex` lines are the facade's doc.
+- **The tests.** `test/statifier_persistence/retention_test.exs` carries
+  "prune/3 with single_batch: true answers one batch's counts plus more?"
+  and "prune/3 refuses a single_batch that is not a boolean".
+- **The changelog.** The 0.21.0 section of `CHANGELOG.md` carries the
+  Added line, and its upgrade paragraph says no schema migration.

@@ -483,7 +483,7 @@ own transaction gets the refusal and a failed transaction together.
 
 ## Amendment (2026-09-26, sp-a2ee): a door called from inside its own executor refuses
 
-Status of this amendment: proposed (2026-09-26, sp-a2ee). The record above
+Status of this amendment: accepted (2026-09-27, sp-a2ee). The record above
 stays accepted; this amendment is proposed until the operator accepts it.
 
 Pure addition: nothing above is edited. Decision 3 runs the executor
@@ -543,3 +543,50 @@ refusal comes before any lock is asked for. The conformance suite
 carries one case for it (`StatifierPersistence.Testing.StorageConformance`,
 "facade: a door called from inside its own execution's executor
 refuses, and the outer step is stored").
+
+## Note (2026-09-27, sp-zwxf): the sp-a2ee Amendment is accepted
+
+The operator authorized the acceptance of the 2026-09-26 sp-a2ee
+Amendment on 2026-09-27, after the code that implements it (`16b5613`)
+shipped in statifier_persistence 0.21.0 (tag `v0.21.0`, `78aedd7`,
+published on Hex 2026-09-27) under an Added changelog line. That
+Amendment's own status line flips in place from proposed to accepted, and
+the record above stays accepted. Its "this amendment is proposed until the
+operator accepts it" is met here and stays as written. Every cite below
+was read on `main` at `bb169b7`, in `lib/statifier_persistence/executions.ex`
+unless another file is named; nothing under `lib/` or `test/` changed
+between `v0.21.0` and `bb169b7`.
+
+What was re-read before the flip:
+
+- **The mark.** `in_step/2` puts the execution id at the head of a
+  per-process list for the length of one executor call and restores the
+  list in an `after` clause, so a return, a raise, a throw and an exit all
+  restore it; `execute_one/4` wraps each `Executor.run/3` call in it.
+- **The guard.** `not_in_step/1` is the first clause of the `with` in
+  `create/4`, `step/5`, `fail/4`, `cancel/3`, `unpark/3`, `migrate/4`,
+  `migrate_tree/4` (over its root and `Map.keys(plans)`) and `inputs/2`,
+  and those are every public function of the module that takes an
+  execution id; `ended?/1` takes an `%Execution{}`.
+- **The error.** `t:StatifierPersistence.Executions.error/0` carries the
+  `{:reentrant_step, execution_id()}` arm.
+- **What the rule leaves alone.** `cascade_cancel/3`, `migrate_batch/3`,
+  `retire_chart/4` and `executions_on/2` call `not_in_step/1` nowhere;
+  `cascade_cancel/3` reaches an execution through `cancel/3`
+  (`cancel_counted/3`), `migrate_batch/3` through `migrate/4` or
+  `migrate_tree/4` (`apply_one/2`, `apply_tree/2`), and `retire_chart/4`
+  and `executions_on/2` through no door of this module.
+- **The adapters' locks.** The Ecto adapter's `lock_execution/3` takes
+  `pg_advisory_xact_lock` inside `repo.transaction/1`
+  (`lib/statifier_persistence/storage/ecto.ex`, `lock_execution/3`), and
+  the in-memory adapter's spins in `acquire_lock/2` while the id is held
+  (`lib/statifier_persistence/storage/in_memory.ex`, `acquire_lock/2`).
+- **The conformance case.** `StatifierPersistence.Testing.StorageConformance`
+  carries "facade: a door called from inside its own execution's executor
+  refuses, and the outer step is stored".
+
+The Amendment's line cites are right at `f756277`, the SHA they name. On
+`main` at `bb169b7` `Executor.run/3` starts at line 55 of
+`lib/statifier_persistence/executor.ex`, below the callback doc the
+Amendment's own change added; the two `lock_execution/3` lines are
+unchanged. The cites stay as written, and this Note is how they are read.
