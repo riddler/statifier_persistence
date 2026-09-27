@@ -1,6 +1,6 @@
 # ADR-0017: Migrating the executions on a chart: one plan per pair of chart hashes applied to every `:active` and `:needs_migration` execution on `from`, a dry run with three per-execution answers, refuse by default and park on request, linked executions through the tree migration, classes as a composition, one verb with its report and span, and rollback as a reverse plan
 
-Status: proposed (2026-09-26)
+Status: accepted (2026-09-27, sp-4qw6)
 
 ## Context
 
@@ -392,3 +392,99 @@ is still handled by the to chart (S5), so neither does the batch.
   the host's admin.
 - Where a host stores its plans or its reports.
 - Datamodel operations beyond ADR-0013's `add`, `rename` and `remove`.
+
+## Note (2026-09-27, sp-4qw6): accepted
+
+The operator authorized this record's acceptance on 2026-09-27, after the
+code that implements it shipped in statifier_persistence 0.20.0 (tag
+`v0.20.0`, `ac63753`, published on Hex 2026-09-26). The status line at the
+top flips in place from proposed to accepted, and no other line of the
+record changes. Every cite below was read on `main` at `a1f809c`, in
+`lib/statifier_persistence/executions.ex` unless another file is named,
+and each function it names is also in `v0.20.0` except
+`not_in_step/1`, which a later record adds (below).
+
+What was re-read before the flip, decision by decision:
+
+- **Decision 1.** `migrate_batch/3` takes one `%Plan{}` and never builds
+  one, and the one plan is applied to every listed execution with no
+  per-execution plan (`migrate_batch/3`, `migrate_listed/1`).
+- **Decision 2.** The dry run reads each execution under its own
+  serialization and writes nothing (`batch_one/3`, its `dry_run: true`
+  clause), and answers `:would_migrate` with `dropped` and
+  `compatible_at`, `:would_refuse` with `migrate/4`'s refusal, or
+  `{:skipped, :terminal | :linked}` (`preview/3`, `preview_skip/1`,
+  `t:batch_preview/0`). `compatible_at` is
+  `Statifier.Position.compatible_at?/3` over the two machines and the
+  execution's export (`compatible_at?/2`).
+- **Decision 3.** `on_failure:` defaults to `:refuse` and takes `:park`
+  (`migrate_batch/3`, `check_batch_opts!/3`), and is handed to each
+  `migrate/4` or `migrate_tree/4` call, which parks or refuses as it
+  does for one execution or one tree (`apply_one/2`, `apply_tree/2`).
+- **Decision 4.** The route is chosen by the linkage: an unlinked
+  execution through `migrate/4`, a linked one through `migrate_tree/4`
+  rooted at it with `plans` holding its own id and `machines:` the plan's
+  two hashes (`batch_one/3`, its apply clause; `apply_tree/2`).
+- **Decision 5.** The batch takes no class and computes none: nothing in
+  `lib/` calls `Statifier.Chart.diff/3`.
+- **Decision 6.** The options, their defaults and the `ArgumentError` on
+  a malformed one before anything is read (`migrate_batch/3`,
+  `check_batch_opts!/3`); the report's `from`, `to`, `dry_run`, `results`
+  in ascending execution id and `counts` with every key of the mode
+  (`migrate_listed/1`, `batch_report/3`, `batch_outcomes/1`); the apply's
+  four outcomes (`t:batch_outcome/0`); the whole-batch refusals before
+  any execution is read (`migrate_listed/1`, through `plan_check/5`); the
+  span's three events, measurements and metadata (`batch_span/3`;
+  `lib/statifier_persistence/telemetry.ex`,
+  `execution_migrate_batch_stop/3`), its rows in `docs/telemetry.md`, and
+  its three names in `StatifierPersistence.Telemetry.events/0`.
+- **Decision 7.** A reverse plan whose `to` is tombstoned is refused
+  whole by the same `plan_check/5` call, before the listing; the test
+  "a reverse plan onto a retired chart is refused whole" in
+  `test/statifier_persistence/executions_migrate_batch_test.exs` pins it.
+- **Decision 8.** `StatifierPersistence.Storage.list_execution_ids_by_content_hash/3`
+  takes a non-empty status list and answers ids in ascending order
+  (`lib/statifier_persistence/storage.ex`,
+  `list_execution_ids_by_content_hash/3`); the optional callback is on
+  the behaviour (`lib/statifier_persistence/storage/adapter.ex`,
+  `c:list_execution_ids_by_content_hash/3`) and on both shipped adapters
+  (`storage/ecto.ex` and `storage/in_memory.ex`,
+  `list_execution_ids_by_content_hash/3`); the batch asks it for
+  `[:active, :needs_migration]` once (`@batch_statuses`,
+  `migrate_listed/1`). `list_active_execution_ids_by_content_hash/2` is
+  unchanged.
+- **Decision 9.** The facade answers
+  `{:error, :content_hash_query_unsupported}` without calling an adapter
+  that lacks the capability or the export, and passes an adapter's own
+  error through (`storage.ex`, `list_execution_ids_by_content_hash/3`);
+  the batch has no fallback listing (`migrate_listed/1`).
+- **Consequences.** The storage conformance cases for the listing are in
+  `StatifierPersistence.Testing.StorageConformance`, and the batch's
+  cases run over both shipped adapters in
+  `test/statifier_persistence/executions_migrate_batch_test.exs`.
+  ADR-0009's 2026-09-26 Note points here for the span.
+
+The premise surface above is read as what it says it is, the package at
+`acc6c86` before this record's code: the parked executions on a hash
+are now listed by decision 8's function, and `compatible_at?/3` now has
+this record's dry run as its caller in `lib/`.
+
+Two later dated records on `main` name changes that touch this record's
+text, and it is accepted as read with them:
+
+- **ADR-0004's 2026-09-26 Amendment** (a door called from inside its own
+  executor refuses; that Amendment is itself proposed) adds
+  `{:error, {:reentrant_step, execution_id}}` to `migrate/4`,
+  `migrate_tree/4` and `unpark/3` for an execution whose executor is
+  running in the calling process (`not_in_step/1`). The Consequences'
+  "`migrate/4`, `migrate_tree/4` and `unpark/3` do not change" is true
+  of this record's verb, which changed none of them; the Amendment is the
+  later change. The batch checks no mark itself, and an apply that
+  reaches a marked execution answers `{:refused, reason}` with that
+  refusal (`apply_one/2`, `apply_tree/2`), decision 6's arm for it.
+- **ADR-0013's 2026-09-27 Note** (the retired-hash check is not atomic
+  with a retirement) records that a `to` hash is refused as it stood
+  when the check read it. Decision 7's refusal of a reverse plan onto a
+  tombstoned `from` is true as written, for a tombstone written before
+  the check; the window that Note names is open in each `migrate/4` and
+  `migrate_tree/4` call the batch makes, as it is for one execution.
