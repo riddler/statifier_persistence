@@ -930,3 +930,54 @@ The rest of decision 9 stays true as written: `migrate/4` is the one
 sanctioned re-pin, it goes through the identity guard, and `step/5` cannot
 re-pin. A host may still write its own sweep over `executions_on/2` and
 `migrate/4`; it no longer has to.
+
+## Note (2026-09-28, sp-3q2t): a kept timer whose event the to chart no longer handles is refused
+
+This Note decides nothing and changes no status line. It records a
+finding added to the validation against the execution (decision 3) for
+the case decision 6 leaves open, a timer the plan keeps whose event the
+to chart no longer listens for, and where the rule is stated. The cites
+in `lib/statifier_persistence/migration/transform.ex` name functions the
+change that carries this Note adds; every other cite was read on `main`
+at `8d32526`, in `lib/statifier_persistence/executions.ex` unless another
+file is named.
+
+- **What decision 6 left open.** A plan that maps a state that could own
+  a timer keeps the timer, and nothing checked that the to chart still
+  listens for its event. After a rename of that event the migration
+  succeeded, the timer fired, and the event was ignored, so the
+  execution waited in that state with nothing left to move it on. Only
+  `Statifier.Chart.diff/3` showed it, as an `event_removed` entry
+  (`deps/statifier/lib/statifier/chart.ex`, `diff/3`, statifier 2.9.0).
+- **The finding.** `{:timer_event_removed, state_id, event}`, a new arm
+  of `t:migration_finding/0`, inside `{:migration_refused, findings}`
+  (`removed_event_findings/3`). For each timer owner the plan keeps, by
+  name or by the same-id default (`group_timer_owners/3`), every delayed
+  `<send>` in the places decision 6 reads (`delayed_sends/2`) whose event
+  is a literal name, with no `target` and a built-in `type`
+  (`self_event/1`), is refused when some transition of the from chart
+  listens for that name and no transition of the to chart does.
+- **"Listens for".** `Statifier.Chart.check_accepts/2` over each chart's
+  event vocabulary (`deps/statifier/lib/statifier/chart.ex`,
+  `check_accepts/2`, statifier 2.9.0): the descriptor matching transition
+  selection uses, so a to chart listening for `pickup.*` or `pickup`
+  still handles `pickup.expired`. The vocabulary is the whole chart's,
+  not the mapped state's.
+- **Not refused.** A send whose event is an `eventexpr` names no event
+  this check can read, and a send that writes a `target` or
+  `targetexpr`, a `typeexpr`, or a `type` naming another event processor
+  is not known to reach the execution itself; neither is refused this
+  way, and nor is a literal event the from chart never listened for
+  either.
+- **Static, with or without a timer pending.** A pin source's count names
+  no event (decision 6), so the finding does not wait for one: it
+  refuses whether or not a source is supplied or counts anything.
+- **Where it reaches.** Every caller of `Transform.transform/5`:
+  `migrate/4` and each node of `migrate_tree/4` (`validate_execution/5`),
+  and ADR-0017's dry run (`validate_loaded/5`). Under `on_failure: :park`
+  it parks, as every finding of decision 3 does.
+
+What decision 6 says a mapped timer keeps - its deadline, in the host's
+queue - stays true as written; a plan this finding refuses writes
+nothing, and "What this record does not decide" still leaves cancelling
+or rescheduling a mapped timer out.

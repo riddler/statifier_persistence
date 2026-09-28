@@ -83,6 +83,11 @@ defmodule StatifierPersistence.ExecutionsMigrateTest do
   </scxml>
   """
 
+  # The next revision renames the pickup deadline's event: the wait state
+  # schedules and listens for `pickup.lapsed`, so a pickup timer the from
+  # chart scheduled would fire into a chart that no longer listens for it.
+  @hold_lapsed String.replace(@hold_after, "pickup.expired", "pickup.lapsed")
+
   @invoke_types InvokeTypes.new(types: ["library:notify_patron"])
 
   defmodule SpyStrategy do
@@ -664,6 +669,198 @@ defmodule StatifierPersistence.ExecutionsMigrateTest do
       assert_raise ArgumentError, ~r/:pin_sources option must be a list/, fn ->
         migrate(ctx, "hold-bad-option", plan!(ctx, []), pin_sources: TimerQueuePinSource)
       end
+    end
+  end
+
+  describe "a kept timer whose event the to chart no longer handles" do
+    # Migrates a hold waiting in `awaiting_pickup` on `from_source` onto
+    # `to_source` under the rename plan.
+    defp migrate_onto(ctx, execution_id, from_source, to_source, opts \\ []) do
+      {from_machine, to_machine, plan} = pair!(ctx, from_source, to_source)
+      before = waiting_hold(ctx, execution_id, from_machine)
+
+      answer =
+        Executions.migrate(
+          ctx.store,
+          execution_id,
+          plan,
+          [from_machine: from_machine, to_machine: to_machine] ++ opts
+        )
+
+      {answer, before}
+    end
+
+    defp pair!(ctx, from_source, to_source) do
+      {:ok, from_machine} = Statifier.compile(from_source)
+      {:ok, to_machine} = Statifier.compile(to_source)
+      :ok = Storage.save_chart(ctx.store, from_machine, from_source)
+      :ok = Storage.save_chart(ctx.store, to_machine, to_source)
+
+      {:ok, plan} =
+        Plan.new(
+          from: from_machine.identity.content_hash,
+          to: to_machine.identity.content_hash,
+          states: %{"awaiting_pickup" => "ready_for_pickup"}
+        )
+
+      {from_machine, to_machine, plan}
+    end
+
+    # sabotage: made removed_event_findings/3 answer [] -> red over both
+    # adapters: the hold migrated onto the chart that no longer listens for
+    # its pickup deadline. Verified red, reverted from a copy.
+    test "is refused whole with the state and the event, and parks under :park", ctx do
+      {answer, before} = migrate_onto(ctx, "hold-lapsed", @hold_before, @hold_lapsed)
+
+      assert answer ==
+               {:error,
+                {:migration_refused,
+                 [{:timer_event_removed, "awaiting_pickup", "pickup.expired"}]}}
+
+      assert stored(ctx, "hold-lapsed") == before
+
+      {answer, _before} =
+        migrate_onto(ctx, "hold-lapsed-parked", @hold_before, @hold_lapsed, on_failure: :park)
+
+      assert answer ==
+               {:parked,
+                {:migration_refused,
+                 [{:timer_event_removed, "awaiting_pickup", "pickup.expired"}]}}
+
+      assert %{status: :needs_migration, content_hash: from_hash} =
+               stored(ctx, "hold-lapsed-parked")
+
+      assert from_hash == ctx.from_hash
+    end
+
+    # sabotage: made removed_event_findings/3 answer [] -> red over both
+    # adapters: the dry run answered would_migrate. Verified red, reverted
+    # from a copy.
+    test "the batch dry run answers it as would_refuse, and the apply as refused", ctx do
+      {from_machine, to_machine, plan} = pair!(ctx, @hold_before, @hold_lapsed)
+      before = waiting_hold(ctx, "hold-batched", from_machine)
+      opts = [from_machine: from_machine, to_machine: to_machine]
+
+      refusal =
+        {:migration_refused, [{:timer_event_removed, "awaiting_pickup", "pickup.expired"}]}
+
+      assert {:ok, %{results: [{"hold-batched", {:would_refuse, ^refusal}}], counts: counts}} =
+               Executions.migrate_batch(ctx.store, plan, [dry_run: true] ++ opts)
+
+      assert counts == %{would_migrate: 0, would_refuse: 1, skipped: 0}
+
+      assert {:ok, %{results: [{"hold-batched", {:refused, ^refusal}}]}} =
+               Executions.migrate_batch(ctx.store, plan, opts)
+
+      assert stored(ctx, "hold-batched") == before
+    end
+
+    # sabotage: made delayed_sends_in/2's If clause answer [] -> red over
+    # both adapters: the send inside the branch was not read. Verified red,
+    # reverted from a copy.
+    test "a delayed send nested in an <if> branch is refused too", ctx do
+      from =
+        String.replace(
+          @hold_before,
+          ~s(<send id="pickup" event="pickup.expired" delay="259200s"/>),
+          ~s(<if cond="true"><send id="pickup" event="pickup.expired" delay="259200s"/></if>)
+        )
+
+      assert {{:error,
+               {:migration_refused, [{:timer_event_removed, "awaiting_pickup", "pickup.expired"}]}},
+              _before} = migrate_onto(ctx, "hold-nested", from, @hold_lapsed)
+    end
+
+    # sabotage: made removed_event_findings/3 refuse every delayed send of
+    # every kept state, whatever its event -> red over both adapters: the
+    # eventexpr send was refused. Verified red, reverted from a copy.
+    test "a send whose event is an eventexpr is not refused", ctx do
+      from =
+        String.replace(
+          @hold_before,
+          ~s(<send id="pickup" event="pickup.expired"),
+          ~s(<send id="pickup" eventexpr="'pickup.expired'")
+        )
+
+      assert {{:ok, %Execution{status: :active}, _migrated}, _before} =
+               migrate_onto(ctx, "hold-expr", from, @hold_lapsed)
+    end
+
+    # sabotage: made removed_event_findings/3 compare the name with the to
+    # chart's descriptors as strings -> red over both adapters: `pickup.*`
+    # was read as not handling pickup.expired. Verified red, reverted from
+    # a copy.
+    test "an event the to chart still handles through a descriptor pattern is not refused",
+         ctx do
+      to =
+        String.replace(
+          @hold_after,
+          ~s(<transition event="pickup.expired"),
+          ~s(<transition event="pickup.*")
+        )
+
+      assert {{:ok, %Execution{status: :active}, _migrated}, _before} =
+               migrate_onto(ctx, "hold-pattern", @hold_before, to)
+    end
+
+    # sabotage: made removed_event_findings/3 skip the from chart's
+    # vocabulary -> red over both adapters: an event the from chart never
+    # listened for was refused. Verified red, reverted from a copy.
+    test "an event the from chart never handled either is not refused", ctx do
+      from =
+        String.replace(
+          @hold_before,
+          ~s(<transition event="pickup.expired"),
+          ~s(<transition event="pickup.lapsed")
+        )
+
+      assert {{:ok, %Execution{status: :active}, _migrated}, _before} =
+               migrate_onto(ctx, "hold-unheard", from, @hold_lapsed)
+    end
+
+    # sabotage: made self_event/1 accept a send with any target -> red over
+    # both adapters: the send to the parent was refused. Verified red,
+    # reverted from a copy.
+    test "a delayed send to another target is not refused", ctx do
+      from =
+        String.replace(
+          @hold_before,
+          ~s(<send id="pickup" event="pickup.expired"),
+          ~s(<send id="pickup" event="pickup.expired" target="#_parent")
+        )
+
+      assert {{:ok, %Execution{status: :active}, _migrated}, _before} =
+               migrate_onto(ctx, "hold-parent", from, @hold_lapsed)
+    end
+
+    # sabotage: made built_in_type?/1 answer false for every literal type ->
+    # red over both adapters: the scxml-typed send was not refused.
+    # Verified red, reverted from a copy.
+    test "a send typed as the SCXML processor is refused as an untyped one is", ctx do
+      from =
+        String.replace(
+          @hold_before,
+          ~s(<send id="pickup" event="pickup.expired"),
+          ~s(<send id="pickup" event="pickup.expired" type="scxml")
+        )
+
+      assert {{:error, {:migration_refused, [{:timer_event_removed, "awaiting_pickup", _}]}},
+              _before} = migrate_onto(ctx, "hold-scxml", from, @hold_lapsed)
+    end
+
+    # sabotage: made built_in_type?/1 answer true for every literal type ->
+    # red over both adapters: the send to the courier processor was
+    # refused. Verified red, reverted from a copy.
+    test "a delayed send to another event processor is not refused", ctx do
+      from =
+        String.replace(
+          @hold_before,
+          ~s(<send id="pickup" event="pickup.expired"),
+          ~s(<send id="pickup" event="pickup.expired" type="library:courier")
+        )
+
+      assert {{:ok, %Execution{status: :active}, _migrated}, _before} =
+               migrate_onto(ctx, "hold-courier", from, @hold_lapsed)
     end
   end
 end

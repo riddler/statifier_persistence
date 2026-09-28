@@ -10,10 +10,11 @@ defmodule StatifierPersistence.Migration.Transform do
   # leaves unmapped or drops - which `migrate/4` asks before it reads the
   # execution.
 
-  alias Statifier.{Machine, MachineState, Position}
+  alias Statifier.{Chart, Machine, MachineState, Position}
   alias Statifier.Machine.Content.{Foreach, If, Send}
   alias Statifier.Machine.Invoke
   alias Statifier.Parser.Location
+  alias Statifier.Send.Target
   alias StatifierPersistence.Executions
   alias StatifierPersistence.Migration.Plan
 
@@ -73,6 +74,7 @@ defmodule StatifierPersistence.Migration.Transform do
         invocation_findings ++
         datamodel_findings ++
         pending_timer_findings(plan, from_machine, to_machine, source_counts) ++
+        removed_event_findings(plan, from_machine, to_machine) ++
         configuration_findings(sets.configuration, to_machine)
 
     case findings do
@@ -375,18 +377,83 @@ defmodule StatifierPersistence.Migration.Transform do
           dropped: [timer_state()]
         }
   def timer_states(%Plan{} = plan, %Machine{} = from_machine, %Machine{} = to_machine) do
-    mapping = Map.merge(plan.states, plan.history)
-
-    grouped =
-      from_machine
-      |> timer_owners()
-      |> Enum.group_by(fn
-        index when is_integer(index) -> :unmapped
-        id -> map_state(id, mapping, plan.drop, to_machine)
-      end)
+    grouped = group_timer_owners(plan, from_machine, to_machine)
 
     %{unmapped: Map.get(grouped, :unmapped, []), dropped: Map.get(grouped, :dropped, [])}
   end
+
+  # The from chart's timer owners under decision 1's mapping: `:unmapped`,
+  # `:dropped`, and `:kept` for an owner the plan maps onto a state of the
+  # to chart, by name or by the same-id default.
+  @spec group_timer_owners(Plan.t(), Machine.t(), Machine.t()) ::
+          %{optional(:unmapped | :dropped | :kept) => [timer_state()]}
+  defp group_timer_owners(plan, from_machine, to_machine) do
+    mapping = Map.merge(plan.states, plan.history)
+
+    from_machine
+    |> timer_owners()
+    |> Enum.group_by(fn
+      index when is_integer(index) ->
+        :unmapped
+
+      id ->
+        case map_state(id, mapping, plan.drop, to_machine) do
+          {:ok, _target} -> :kept
+          other -> other
+        end
+    end)
+  end
+
+  # A timer the plan keeps must still be answered on the to chart. For each
+  # timer owner the plan keeps, every delayed `<send>` it could schedule to
+  # the execution itself - no `target`, a built-in `type` - whose `event` is
+  # a literal name that some transition of the from chart listens for and
+  # no transition of the to chart does, is a finding: the timer would fire
+  # after the migration and its event would be ignored. "Listens for" is
+  # `Statifier.Chart.check_accepts/2` over each chart's event vocabulary,
+  # the descriptor matching transition selection uses. An `eventexpr` names
+  # no event this check can read, and a send that writes a `target` or
+  # `targetexpr`, a `typeexpr`, or another processor's `type` is not known
+  # to reach the execution itself; neither is refused. The check is static
+  # over the two charts, because a pin source's count names no event.
+  @spec removed_event_findings(Plan.t(), Machine.t(), Machine.t()) ::
+          [Executions.migration_finding()]
+  defp removed_event_findings(plan, from_machine, to_machine) do
+    kept_events =
+      plan
+      |> group_timer_owners(from_machine, to_machine)
+      |> Map.get(:kept, [])
+      |> Enum.flat_map(fn id ->
+        {:ok, index} = Machine.index(from_machine, id)
+
+        from_machine
+        |> delayed_sends(Machine.at(from_machine, index))
+        |> Enum.flat_map(&self_event/1)
+        |> Enum.map(&{id, &1})
+      end)
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    names = kept_events |> Enum.map(&elem(&1, 1)) |> Enum.uniq()
+    %{unreachable: unhandled_to} = Chart.check_accepts(to_machine, names)
+    %{unreachable: unhandled_from} = Chart.check_accepts(from_machine, names)
+    removed = unhandled_to -- unhandled_from
+
+    for {id, event} <- kept_events, event in removed, do: {:timer_event_removed, id, event}
+  end
+
+  # The literal event name of a delayed send delivered to the sending
+  # execution's own external queue, or none.
+  defp self_event(%Send{event: {:static, name}, target: nil, type: type})
+       when is_binary(name) do
+    if built_in_type?(type), do: [name], else: []
+  end
+
+  defp self_event(%Send{}), do: []
+
+  defp built_in_type?(nil), do: true
+  defp built_in_type?({:static, type}) when is_binary(type), do: Target.supported_type?(type)
+  defp built_in_type?(_type), do: false
 
   @doc false
   # ADR-0013 decision 6's definition, static over the from chart: a state
@@ -407,17 +474,43 @@ defmodule StatifierPersistence.Migration.Transform do
   end
 
   defp owns_delayed_send?(machine, state) do
+    machine
+    |> content_blocks(state)
+    |> Enum.any?(&delayed_send_in?(machine, &1))
+  end
+
+  # The content blocks decision 6 reads in a state: its transitions' (its
+  # `<initial>` element's and a history state's default transition
+  # included), its `onentry` and `onexit`, and each `<invoke>`'s
+  # `<finalize>`.
+  defp content_blocks(machine, state) do
     transitions =
       [state.initial_transition, state.history_default | state.transitions]
       |> Enum.reject(&is_nil/1)
       |> Enum.uniq()
       |> Enum.map(&Machine.transition(machine, &1).content)
 
-    blocks =
+    transitions ++
       Enum.map(state.onentry ++ state.onexit, & &1.content) ++
-        for(%{finalize: %{content: content}} <- state.invoke, do: content)
+      for(%{finalize: %{content: content}} <- state.invoke, do: content)
+  end
 
-    Enum.any?(transitions ++ blocks, &delayed_send_in?(machine, &1))
+  # Every delayed `<send>` in the blocks `owns_delayed_send?/2` reads.
+  defp delayed_sends(machine, state) do
+    machine
+    |> content_blocks(state)
+    |> Enum.flat_map(&delayed_sends_in(machine, &1))
+  end
+
+  defp delayed_sends_in(machine, c_indexes) do
+    Enum.flat_map(c_indexes, fn c_index ->
+      case Machine.content(machine, c_index) do
+        %Send{delay: delay} = send when delay != nil -> [send]
+        %If{branches: branches} -> Enum.flat_map(branches, &delayed_sends_in(machine, &1.content))
+        %Foreach{content: content} -> delayed_sends_in(machine, content)
+        _other -> []
+      end
+    end)
   end
 
   defp delayed_send_in?(machine, c_indexes) do
