@@ -43,6 +43,15 @@ defmodule StatifierPersistence.Executor do
     same execution answers `{:error, {:reentrant_step, execution_id}}`
     rather than being served (ADR-0004's 2026-09-26 Amendment). A door for
     any other execution is served as usual.
+  - That mark lives in the calling process, so a task the executor spawns
+    that calls a door for the same execution is not refused: it meets the
+    serialization strategy, which the step still holds. Under the default
+    `StatifierPersistence.Serialization.AdapterLock` the task blocks on the
+    execution's lock (the Ecto adapter's transaction-scoped advisory lock,
+    the in-memory adapter's lock table) until the step returns, so an
+    executor that awaits such a task hangs until its await gives up.
+    `StatifierPersistence.Executions.inputs/2` takes no lock and does not
+    wait.
   """
   @callback execute(effect :: Statifier.Effect.t(), context :: context()) ::
               :ok | {:error, term()}
