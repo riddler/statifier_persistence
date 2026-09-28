@@ -129,21 +129,21 @@ end
 mix test test/my_app/sqlite_conformance_test.exs --exclude postgres
 ```
 
-Four cases carry `@tag :postgres` - the two `lock_execution/3` cases and the two
+Five cases carry `@tag :postgres` - the three `lock_execution/3` cases and the two
 metadata-listing cases - and nothing else in the suite does. A correct run
-therefore reports every other case passing and exactly those four
+therefore reports every other case passing and exactly those five
 excluded:
 
 ```
-31 tests, 0 failures, 4 excluded
+31 tests, 0 failures, 5 excluded
 ```
 
 Run it once **without** `--exclude postgres` as well, and read the
-failures. Four failures, all four of them the tagged cases, is the proof
+failures. Five failures, all five of them the tagged cases, is the proof
 that the tag is excluding what it claims to and not covering for something
-else. Two of them fail on unparseable SQL out of `lock_execution/3`; the other
+else. Three of them fail on unparseable SQL out of `lock_execution/3`; the other
 two fail on `{:error, :metadata_unsupported}` where a list was asserted,
-which is the listings declining rather than breaking. Any fifth failure is
+which is the listings declining rather than breaking. Any sixth failure is
 a real portability problem in your setup, and the exclusion would have
 hidden it.
 

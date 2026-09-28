@@ -68,9 +68,10 @@ defmodule StatifierPersistence.Testing.StorageConformance do
   The optional `c:StatifierPersistence.Storage.Adapter.lock_execution/3` gets the
   same treatment at generation time: when the adapter under test exports
   it, the suite generates the per-execution lock tests (mutual exclusion of two
-  concurrent bodies, release after a raising fun); when it does not, they
-  are not generated at all - exporting the callback is what opts an
-  adapter into its contract.
+  concurrent bodies, release after a raising fun, and a door called from
+  inside its own executor refusing before it reaches the lock); when it
+  does not, they are not generated at all - exporting the callback is what
+  opts an adapter into its contract.
 
   Opting out by not exporting is the whole story for an adapter written
   from scratch. It is not the whole story for
@@ -78,8 +79,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
   `list_executions_by_metadata/2` and `list_execution_states_by_metadata/2` for every
   Ecto backend but implements all three in Postgres-only SQL
   (`pg_advisory_xact_lock` plus `FOR UPDATE`; `jsonb` containment). Point
-  that adapter at a backend that is not Postgres and the four cases those
-  three callbacks generate are generated and fail: the lock pair on SQL
+  that adapter at a backend that is not Postgres and the five cases those
+  three callbacks generate are generated and fail: the three lock cases on SQL
   the backend does not parse, the two listings on the refusal they answer
   with instead. `list_executions_by_metadata/2` and
   `list_execution_states_by_metadata/2` consult `supports_metadata?/1` before
@@ -88,13 +89,13 @@ defmodule StatifierPersistence.Testing.StorageConformance do
   cleaner answer, but not the list these two cases assert over, so their
   tag stays where the raise put it.
 
-  So those four carry `@tag :postgres`, and such a host excludes them by
+  So those five carry `@tag :postgres`, and such a host excludes them by
   tag rather than forking the suite:
 
       mix test --exclude postgres
 
   Nothing else in the suite is tagged: every remaining case runs, and a
-  green execution with four excluded is the honest report of what that backend
+  green execution with five excluded is the honest report of what that backend
   supports. It is honest only alongside actually declining what the tag
   excludes - `serialization:` pointed at the host's own strategy rather
   than the adapter's `lock_execution/3`, and no reliance on the child listings.
@@ -2234,6 +2235,85 @@ defmodule StatifierPersistence.Testing.StorageConformance do
             end)
 
           assert {:ok, {:ok, :reacquired}} = Task.yield(task, 1_000) || Task.shutdown(task)
+        end
+
+        # ADR-0004's 2026-09-26 Amendment again, this time through the
+        # default serialization strategy, so the outer step holds the
+        # adapter's own lock_execution/3 while its executor runs. The
+        # facade case further down runs the same refusal over a strategy
+        # that admits its own holder; this one proves the refusal comes
+        # before the nested door reaches the adapter's lock, whatever that
+        # lock does with its own holder: re-entrant (the Ecto adapter's
+        # transaction-scoped lock) or not (InMemory's, which would wait
+        # for itself). The outer step runs in a task bounded by a
+        # timeout, so a lock that would wait fails the case rather than
+        # hanging it.
+        #
+        # sabotage: in StatifierPersistence.Executions.step/5, bypass the
+        # not_in_step/1 check (call the serialized tail directly) -> red on
+        # both adapters, bounded: on InMemory the nested step waits for
+        # the lock its own process holds and the task yields nothing in
+        # time; on Ecto the nested step re-enters the transaction-scoped
+        # lock and answers {:ok, _, _} instead of the refusal.
+        @tag :postgres
+        test "adapter: a door called from inside its own executor refuses before it reaches lock_execution/3",
+             %{store: store} do
+          {:ok, machine} =
+            Statifier.compile("""
+            <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="a">
+                <state id="a">
+                    <transition event="go" target="b"><log label="reenter"/></transition>
+                    <transition event="other" target="x"/>
+                </state>
+                <state id="b"/>
+                <state id="x"/>
+            </scxml>
+            """)
+
+          execution_id = "execution-conformance-reentrant-lock"
+          test_pid = self()
+          quiet = fn _effect, _context -> :ok end
+
+          assert {:ok, _execution, _machine_state} =
+                   StatifierPersistence.Executions.create(store, execution_id, machine,
+                     executor: quiet
+                   )
+
+          reentering = fn _effect, %{execution_id: id} ->
+            nested =
+              StatifierPersistence.Executions.step(
+                store,
+                id,
+                machine,
+                Statifier.Event.external("other"),
+                executor: quiet
+              )
+
+            send(test_pid, {:nested, nested})
+            :ok
+          end
+
+          task =
+            Task.async(fn ->
+              StatifierPersistence.Executions.step(
+                store,
+                execution_id,
+                machine,
+                Statifier.Event.external("go"),
+                executor: reentering
+              )
+            end)
+
+          assert {:ok, {:ok, %{status: :active}, _machine_state}} =
+                   Task.yield(task, 5_000) || Task.shutdown(task, :brutal_kill)
+
+          assert_received {:nested, {:error, {:reentrant_step, ^execution_id}}}
+
+          assert {:ok, loaded} = Storage.load_execution_position(store, execution_id, machine)
+
+          assert loaded
+                 |> Statifier.MachineState.active_leaf_states()
+                 |> Enum.map(&Machine.id(machine, &1)) == ["b"]
         end
       end
 
