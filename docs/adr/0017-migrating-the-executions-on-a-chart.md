@@ -538,3 +538,29 @@ read on `main` at `8d32526`, in `lib/statifier_persistence/executions.ex`.
 - **Nothing else changes.** Decision 6's options, outcomes and `counts`
   keys are as they were: the refusal is counted under `:would_refuse`,
   `:refused` or `:parked`.
+
+## Note (2026-09-28, sp-6euo): the proposal date and decision 6's raise
+
+This Note restores two points of wording from the 2026-09-27 acceptance
+Note; it decides nothing, and every decision above is unchanged. Every
+cite was read on `main` at `76e423c`, in
+`lib/statifier_persistence/executions.ex` unless another file is named.
+
+- **The proposal date.** This record was proposed on 2026-09-26, in
+  `d5ef602` ("Adds ADR-0017 on migrating a chart's executions"), whose
+  status line read `proposed (2026-09-26)`. The acceptance flipped that
+  line in place to `accepted (2026-09-27, sp-4qw6)` and the proposal
+  date left it (`922ad62`). The status line stays as it is; this Note
+  carries the date.
+- **Decision 6's raise.** Decision 6 says a malformed option "raises
+  before anything is read, as `migrate/4`'s do", and that holds. The
+  acceptance Note's decision 6 bullet names only "the `ArgumentError` on
+  a malformed one", which is narrower than the code: a malformed
+  `dry_run:`, `on_failure:` or `pin_sources:` raises `ArgumentError`
+  (`check_batch_opts!/3`), a missing `from_machine:` or `to_machine:`
+  raises `KeyError` from `Keyword.fetch!/2`, and a value that is not a
+  `%Statifier.Machine{}` raises `MatchError` (`migrate_batch/3`). Read
+  the bullet as: a malformed or missing option raises before anything is
+  read. The test "a malformed option raises before anything is read" in
+  `test/statifier_persistence/executions_migrate_batch_test.exs` pins
+  the `ArgumentError` case.
