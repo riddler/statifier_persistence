@@ -939,6 +939,19 @@ defmodule StatifierPersistence.Executions do
     A count names no state, so any non-zero count refuses; a plan that
     drops those states instead is not refused. A state the chart gives no
     id is named by its index.
+  - `{:timer_event_removed, state_id, event}` - the plan keeps `state_id`,
+    a state of the from chart that could own a timer, and one of its
+    delayed `<send>`s to the execution itself (no `target`, a built-in
+    `type`) names, as a literal `event`, a name some transition of the
+    from chart listens for and no transition of the to chart does. A timer
+    it scheduled would fire after the migration and its event would be
+    ignored. "Listens for" is `Statifier.Chart.check_accepts/2` over each
+    chart's event vocabulary. The check is static over the two charts,
+    because a pin source's count names no event, so it refuses whether or
+    not a timer is pending. A send whose event is an `eventexpr`, or that
+    writes a `target`, a `targetexpr`, a `typeexpr` or another event
+    processor's `type`, is never refused this way.
+    Handle the event in the to chart, or drop the state.
   - `{:illegal_configuration, state_ids}` - the transformed configuration
     is not a legal configuration of the to chart (SCXML 3.11, with the
     root added): a compound state in it without exactly one child state in
@@ -970,6 +983,7 @@ defmodule StatifierPersistence.Executions do
              :key_present | :key_absent}
           | {:pending_timers, [Plan.state_id() | non_neg_integer()],
              %{module() => PinSource.counts()}}
+          | {:timer_event_removed, Plan.state_id(), String.t()}
           | {:illegal_configuration, [Plan.state_id()]}
           | {:import_refused, term()}
 
@@ -1096,6 +1110,12 @@ defmodule StatifierPersistence.Executions do
     non-zero count refuses with a `{:pending_timers, states, source_counts}`
     finding when the plan leaves any such state unmapped, and never when it
     drops them all.
+
+  A timer the plan keeps must still be answered: a kept state's delayed
+  `<send>` to the execution itself whose literal event the from chart
+  listens for and the to chart no longer does is refused with a
+  `{:timer_event_removed, state_id, event}` finding, with or without a
+  pin source (`t:migration_finding/0`).
 
   ## Children
 

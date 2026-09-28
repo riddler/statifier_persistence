@@ -519,3 +519,22 @@ is unchanged. Every cite was read on `main` at `f45932c`, in
 
 `docs/telemetry.md` ("The batch migration span") already says both; this
 Note brings the record level with it.
+
+## Note (2026-09-28, sp-3q2t): the dry run answers the kept-timer event refusal
+
+This Note decides nothing and changes no status line. It records how
+this record's verb answers the finding ADR-0013's 2026-09-28 Note adds,
+a kept timer whose event the to chart no longer handles. Every cite was
+read on `main` at `8d32526`, in `lib/statifier_persistence/executions.ex`.
+
+- **The dry run.** The finding comes back from the transform inside
+  `{:migration_refused, findings}` (`validate_loaded/5`), and the dry run
+  answers it as `{:would_refuse, {:migration_refused, findings}}` for
+  that execution (`preview/3`), under decision 2's `:would_refuse`.
+- **The apply.** An unlinked execution answers `{:refused, reason}` with
+  the same refusal, or `{:parked, reason}` under `on_failure: :park`
+  (`apply_one/2`); a linked one answers as `migrate_tree/4` does for it
+  (`apply_tree/2`).
+- **Nothing else changes.** Decision 6's options, outcomes and `counts`
+  keys are as they were: the refusal is counted under `:would_refuse`,
+  `:refused` or `:parked`.
