@@ -18,7 +18,9 @@ defmodule StatifierPersistence.ExecutionsMigrateBatchTest do
 
   The loan case has no durable children, so the linked cases use a hold
   whose `<invoke>` started a pickup notice as a durable child, and move
-  the notice.
+  the notice. One notice chart schedules a pickup reminder as its own
+  durable child, on a chart of its own, so that a moved notice has a
+  subtree node on another hash.
 
   Every "writes nothing" case re-reads the stored records and compares
   them whole with the ones read before the call.
@@ -163,6 +165,38 @@ defmodule StatifierPersistence.ExecutionsMigrateBatchTest do
   </scxml>
   """
 
+  # A pickup notice that, while it waits, schedules a pickup reminder as
+  # its own durable child; the next revision renames the waiting state and
+  # keeps the reminder's invocation there.
+  @reminding_notice_before """
+  <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="notice_sent">
+    <state id="notice_sent">
+      <invoke id="reminder" type="library:pickup_reminder"/>
+      <transition event="notice.acknowledged" target="acknowledged"/>
+    </state>
+    <final id="acknowledged"/>
+  </scxml>
+  """
+
+  @reminding_notice_after """
+  <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="patron_notified">
+    <state id="patron_notified">
+      <invoke id="reminder" type="library:pickup_reminder"/>
+      <transition event="notice.acknowledged" target="acknowledged"/>
+    </state>
+    <final id="acknowledged"/>
+  </scxml>
+  """
+
+  @pickup_reminder """
+  <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="reminder_scheduled">
+    <state id="reminder_scheduled">
+      <transition event="reminder.sent" target="reminded"/>
+    </state>
+    <final id="reminded"/>
+  </scxml>
+  """
+
   # A loan whose return is noted as it happens: the `copy.returned`
   # transition hands the executor one <log>, which is where the
   # re-entrancy cases call back in while the loan is being stepped.
@@ -178,7 +212,7 @@ defmodule StatifierPersistence.ExecutionsMigrateBatchTest do
   </scxml>
   """
 
-  @invoke_types InvokeTypes.new(types: ["library:pickup_notice"])
+  @invoke_types InvokeTypes.new(types: ["library:pickup_notice", "library:pickup_reminder"])
 
   defmodule AdmittingStrategy do
     @moduledoc false
@@ -256,7 +290,10 @@ defmodule StatifierPersistence.ExecutionsMigrateBatchTest do
           @hold,
           @notice_before,
           @notice_after,
-          @noted_loan
+          @noted_loan,
+          @reminding_notice_before,
+          @reminding_notice_after,
+          @pickup_reminder
         ],
         fn source ->
           {:ok, machine} = Statifier.compile(source)
@@ -275,7 +312,10 @@ defmodule StatifierPersistence.ExecutionsMigrateBatchTest do
       hold: machines[@hold],
       notice_from: machines[@notice_before],
       notice_to: machines[@notice_after],
-      noted: machines[@noted_loan]
+      noted: machines[@noted_loan],
+      reminding_from: machines[@reminding_notice_before],
+      reminding_to: machines[@reminding_notice_after],
+      reminder: machines[@pickup_reminder]
     }
   end
 
@@ -359,10 +399,18 @@ defmodule StatifierPersistence.ExecutionsMigrateBatchTest do
     on_exit(fn -> :telemetry.detach(id) end)
   end
 
-  # The hold's `<invoke>` starts the pickup notice as a durable child.
-  defp notice_dispatch do
-    fn "library:pickup_notice", _params, %{invoke: %Statifier.Effect.Invoke{} = invoke} ->
-      resolved = %{invoke | content: @notice_before}
+  # The hold's `<invoke>` starts the pickup notice as a durable child, on
+  # `notice`; a reminding notice's `<invoke>` starts the pickup reminder as
+  # its own durable child.
+  defp notice_dispatch(notice) do
+    fn type, _params, %{invoke: %Statifier.Effect.Invoke{} = invoke} ->
+      content =
+        case type do
+          "library:pickup_notice" -> notice
+          "library:pickup_reminder" -> @pickup_reminder
+        end
+
+      resolved = %{invoke | content: content}
       {:start_child, resolved, {:invoke, resolved}}
     end
   end
@@ -370,10 +418,10 @@ defmodule StatifierPersistence.ExecutionsMigrateBatchTest do
   # A hold whose copy is available: it waits in `awaiting_pickup`, and its
   # pickup notice waits in `notice_sent` on the notice chart, a live
   # durable child carrying a linkage.
-  defp linked_notice!(ctx) do
+  defp linked_notice!(ctx, notice \\ @notice_before) do
     driver =
       Driver.new(ctx.store, ctx.hold,
-        dispatch: notice_dispatch(),
+        dispatch: notice_dispatch(notice),
         invoke_types: @invoke_types,
         chart_resolver: fn content_hash ->
           if content_hash == hash(ctx.hold), do: {:ok, ctx.hold}, else: :error
@@ -740,6 +788,55 @@ defmodule StatifierPersistence.ExecutionsMigrateBatchTest do
       assert leaves(notice_state) == ["patron_notified"]
 
       # The parent is on another chart and is not this batch's.
+      assert stored(ctx, "hold") == hold_before
+    end
+
+    # ADR-0017 decision 4: a node of the moved execution's subtree on
+    # another hash stays where it is.
+    #
+    # sabotage: had decide_tree/7's clean clause (executions.ex) also
+    # re-pin every live node of the tree that no plan names, onto the
+    # plan's `to` -> red over both adapters: the pickup reminder was read
+    # back on the notice's new chart. Verified red, reverted from a copy.
+    test "moves a linked execution and leaves its own durable child on another hash put", ctx do
+      notice_id = linked_notice!(ctx, @reminding_notice_before)
+      reminder_id = Linkage.child_execution_id(notice_id, "reminder", 0)
+
+      reminder_before = stored(ctx, reminder_id)
+      assert reminder_before.content_hash == hash(ctx.reminder)
+
+      assert {:ok, %Linkage{parent_execution_id: ^notice_id}} =
+               Linkage.from_metadata(reminder_before.metadata)
+
+      hold_before = stored(ctx, "hold")
+
+      assert {:ok, %{results: [{^notice_id, {:migrated, facts}}], counts: counts}} =
+               batch(
+                 ctx,
+                 plan!(ctx.reminding_from, ctx.reminding_to, %{
+                   "notice_sent" => "patron_notified"
+                 }),
+                 ctx.reminding_from,
+                 ctx.reminding_to
+               )
+
+      assert facts.to_content_hash == hash(ctx.reminding_to)
+      assert counts == %{migrated: 1, refused: 0, parked: 0, skipped: 0}
+      assert stored(ctx, notice_id).content_hash == hash(ctx.reminding_to)
+
+      {:ok, notice_state} =
+        Storage.load_execution_position(ctx.store, notice_id, ctx.reminding_to)
+
+      assert leaves(notice_state) == ["patron_notified"]
+
+      # The reminder is read back untouched - its row, its linkage and its
+      # position - on its own chart.
+      assert stored(ctx, reminder_id) == reminder_before
+
+      {:ok, reminder_state} =
+        Storage.load_execution_position(ctx.store, reminder_id, ctx.reminder)
+
+      assert leaves(reminder_state) == ["reminder_scheduled"]
       assert stored(ctx, "hold") == hold_before
     end
 
