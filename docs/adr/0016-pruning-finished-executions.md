@@ -479,3 +479,26 @@ What was re-read before the flip:
   and "prune/3 refuses a single_batch that is not a boolean".
 - **The changelog.** The 0.21.0 section of `CHANGELOG.md` carries the
   Added line, and its upgrade paragraph says no schema migration.
+
+## Note (2026-09-27, sp-bz97): the single-batch drain's exactly-full last batch
+
+This Note decides nothing; it states a boundary of the sp-efyh
+Amendment's decision 2, which says `more?` is `true` when the batch took
+`batch_size:` executions and `false` when fewer, but not what the next
+call answers when the last due batch is exactly full. Every cite was read
+on `main` at `fb277f6`, in `lib/statifier_persistence/retention.ex`
+unless another file is named.
+
+- **The boundary.** `prune_one_batch/4` answers `more?:
+  counts.executions == batch_size`, so when the last due batch holds
+  exactly `batch_size:` executions that call answers `more?: true`, and
+  the next call answers zeros with `more?: false`. A host loop that stops
+  at `more?: false` makes that one extra call; it clears nothing.
+- **The type.** The change that landed the Amendment (`f756277`) added
+  the public type `t:StatifierPersistence.Retention.batch_counts/0`, the
+  map `prune/3` answers for `single_batch: true`: `executions`,
+  `position_blobs`, `inputs` and `more?`. The Amendment's text does not
+  name it.
+- **The test.** The change that adds this Note adds, to
+  `test/statifier_persistence/retention_test.exs`, "prune/3 with single_batch: true answers more?: true for an exactly-full
+  last batch, then zeros".

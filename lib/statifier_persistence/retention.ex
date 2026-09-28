@@ -94,9 +94,11 @@ defmodule StatifierPersistence.Retention do
     `true` runs exactly one batch and answers that batch's own counts
     plus `more?`: `true` when the batch took as many executions as
     `batch_size:` allows, so another call may find more; `false` when it
-    took fewer, the same point where the default drain stops. A row
-    another transaction holds locked (on Postgres) is skipped, not
-    waited on, so it is left for a later call either way.
+    took fewer, the same point where the default drain stops. When the
+    last due batch holds exactly `batch_size:` executions, that call
+    answers `more?: true` and the next one answers zeros with `more?:
+    false`. A row another transaction holds locked (on Postgres) is
+    skipped, not waited on, so it is left for a later call either way.
 
   ## Inside a transaction of your own
 
