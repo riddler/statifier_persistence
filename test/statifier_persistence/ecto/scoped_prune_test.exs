@@ -121,19 +121,32 @@ defmodule StatifierPersistence.Ecto.ScopedPruneTest do
     end
   end
 
-  # sabotage: not run - no lib mutation reaches this under the SQL
-  # sandbox, where every connection the test owns is already inside one
-  # transaction. It pins the documented behaviour of the Ecto adapter's
-  # batch transaction joining a caller's (storage/ecto.ex,
-  # prune_executions/4): the caller's rollback undoes every batch.
+  # It pins the documented behaviour of the Ecto adapter's batch
+  # transaction joining a caller's (storage/ecto.ex, prune_executions/4):
+  # the caller's rollback undoes every batch. The counts and the nil
+  # blobs inside the transaction prove the batches pruned before the
+  # rollback, so a prune that did nothing cannot pass as undone.
+  #
+  # sabotage: made Retention.prune/3's drain answer zeros without calling
+  # a batch -> red, the counts inside the transaction were zero. Verified
+  # red, reverted from a copy. The rollback half has no such check: no lib
+  # mutation reaches it under the SQL sandbox, where every connection the
+  # test owns is already inside one transaction.
   test "prune/3 inside a caller's transaction that rolls back leaves every batch undone",
        %{store: store} do
     for n <- 1..2, do: finished(store, "rollback-a-#{n}", @tenant_a)
 
     assert {:error, :undo} =
              TestRepo.transaction(fn ->
-               {:ok, _counts} =
-                 Retention.prune(store, @cutoff, batch_size: 1, scope: @tenant_a)
+               assert {:ok, %{executions: 2, position_blobs: 2, inputs: 2}} =
+                        Retention.prune(store, @cutoff, batch_size: 1, scope: @tenant_a)
+
+               for n <- 1..2 do
+                 assert {:ok, %{position_blob: nil}} =
+                          Storage.fetch_execution(store, "rollback-a-#{n}")
+
+                 assert {:ok, []} = Storage.Ecto.list_inputs(store.opts, "rollback-a-#{n}")
+               end
 
                TestRepo.rollback(:undo)
              end)
