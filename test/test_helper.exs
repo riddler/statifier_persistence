@@ -20,9 +20,9 @@ end
 # The sandbox stays :manual except inside the modules that must run live,
 # outside the sandbox: the tests that run their own DDL (migrations_test,
 # v06_rename_test, leading_columns_test) and the tests that need a second
-# connection to meet a real lock or a caller's real transaction (the live
-# lock, held lease, caller transaction, retire race and live fan-out
-# tests). Each switches the repo to
+# connection to meet a real lock or a real commit (the live lock, held
+# lease, caller transaction, step timer store, retire race and live
+# fan-out tests). Each switches the repo to
 # :auto in its setup or setup_all and restores :manual on exit.
 #
 # The mode belongs to the one shared repo, not to the module that set it,
