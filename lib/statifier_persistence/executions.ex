@@ -1571,6 +1571,30 @@ defmodule StatifierPersistence.Executions do
   `migrate/4` checks its one plan - the static validation, a tombstoned
   `to` hash, a missing pin source - before any execution is read.
 
+  A retirement refuses for as long as anything pins the hash, but a tree
+  that passed this check can still leave a node on a tombstone. The check
+  answers for each node's `to` hash as it stood when it was read, and the
+  node's execution row is re-pinned onto it later, in the one write
+  below; nothing makes the two one step against a retirement. So one
+  interleaving is not prevented: the migration reads a node's `to` hash
+  as not retired, a retirement of that hash then writes its tombstone,
+  and the migration re-pins that node's execution row onto the
+  tombstoned hash. The retirement did not see that execution, because
+  when it decided, no row put it on the hash. On
+  `StatifierPersistence.Storage.Ecto` the retirement decides in one
+  conditional `UPDATE` of the chart row, whose `NOT EXISTS` sees, under
+  Postgres's default READ COMMITTED, only the rows committed when the
+  statement runs; the re-pin and the `UPDATE` write different rows of
+  different tables, so no unique index and no foreign key arbitrates
+  between them, and the per-execution locks the migration takes are ones
+  a retirement never takes. Which object enforces what: this check turns
+  a node whose plan moves to an already-tombstoned hash into that node's
+  `{:chart_retired, info}` inside `{:tree_refused, refusals}`; the
+  retirement's own write keeps a tombstone off a hash that an execution
+  it can see still pins; nothing in this package refuses the
+  interleaving above, and this documentation claims nothing about a
+  stricter isolation level a host sets.
+
   The tree is read through the linkage, as `cascade_cancel/3` reads it,
   through every child whatever its status (decision 2), and an id in
   `plans` outside it is refused. The exclusion of every named node is
