@@ -616,3 +616,44 @@ door called for a different execution id from inside a builder proceeds,
 and a call from another process is not refused. A builder that calls no
 door for its own execution, and a caller passing an `%Event{}`, see no
 change.
+
+## Note (2026-09-27, sp-4wwq): a dry run of `migrate_batch/3` refuses the execution being stepped
+
+The question this Note answers: a dry run of `migrate_batch/3` started
+from inside an executor, over the hash of the execution that executor is
+stepping - does it refuse that execution or preview it? It refuses it.
+
+The 2026-09-26 Amendment's refusal sits on the public doors that take an
+execution id. `migrate_batch/3` takes none, and its apply reaches each
+execution through `migrate/4` or `migrate_tree/4`, which refuse a marked
+id (`apply_one/2`, `apply_tree/2`). Its dry run reached each execution
+through no door: every cite below is in
+`lib/statifier_persistence/executions.ex` and was read at `fb277f6`,
+before this Note's change, where the dry-run clause of `batch_one/3`
+calls the serialization strategy's `with_execution/3` around `preview/3`
+and checks no mark. From inside the executor the in-memory adapter's lock
+waited on its own holder, and the Ecto adapter's advisory lock, re-entrant
+for the connection holding it, admitted the dry run to read the execution
+inside the outer step.
+
+With this Note the dry-run clause of `batch_one/3` runs `not_in_step/1`
+for the execution id before it asks the serialization strategy for
+anything, and a marked id answers `{:would_refuse, {:reentrant_step,
+execution_id}}`, the refusal the apply answers as
+`{:refused, {:reentrant_step, execution_id}}` for the same execution. It
+is counted under the dry run's existing `:would_refuse` key, and nothing
+is read or written for it. ADR-0017 decision 2 already answers
+`{:would_refuse, reason}` with `migrate/4`'s own refusal as `reason`, so
+its option set, its outcomes and its counts are unchanged.
+
+Nothing else in the Amendment moves. The error is the same
+`{:reentrant_step, execution_id}`, the doors are the same, the other
+executions the dry run lists are previewed as before, a batch that
+does not list the execution being stepped answers as before, and a call
+from another process is not refused. The acceptance Note's "What the rule leaves alone" line,
+which names `migrate_batch/3` among the functions that call
+`not_in_step/1` nowhere, is read with this Note: the batch's dry run now
+calls it once per execution it lists. The tests are in
+`test/statifier_persistence/executions_migrate_batch_test.exs`, over both
+shipped adapters, under "from inside an executor (ADR-0004's re-entrancy
+rule)".
