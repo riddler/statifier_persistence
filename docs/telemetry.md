@@ -99,8 +99,10 @@ Two shapes a reader of the emit sites will notice, both deliberate:
   `[:statifier_persistence, :effect, :failed]`. Interleaving would also
   have to place the two lifecycle effects the executor never sees
   somewhere other than where the interpreter put them.
-- **The `:initialize` span is the one span not nested inside a step
-  span.** `Interpreter.initialize/2` runs in `Executions.create/4` before
+- **The `:initialize` span is the one macrostep span not nested inside a
+  step span.** (Family two's batch migration span is not inside a step
+  either, since a batch is not a step; it is not a macrostep span.)
+  `Interpreter.initialize/2` runs in `Executions.create/4` before
   the per-execution exclusion opens, so the bridge has no step span recorded
   for that process when it fires: it is not a child of the create's
   `[:statifier_persistence, :execution, :step, :start]`/`:stop` pair, and with

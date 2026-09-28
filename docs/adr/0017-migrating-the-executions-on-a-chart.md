@@ -488,3 +488,34 @@ text, and it is accepted as read with them:
   tombstoned `from` is true as written, for a tombstone written before
   the check; the window that Note names is open in each `migrate/4` and
   `migrate_tree/4` call the batch makes, as it is for one execution.
+
+## Note (2026-09-28, sp-ii7z): the batch span on a whole-batch refusal and on a malformed option
+
+Decision 6 names the span's events, measurements and metadata, and says
+a whole-batch refusal writes nothing and a malformed option raises before
+anything is read. It does not say what the span emits in either case.
+This Note records what the code does; it decides nothing, and decision 6
+is unchanged. Every cite was read on `main` at `f45932c`, in
+`lib/statifier_persistence/executions.ex` unless another file is named.
+
+- **A whole-batch refusal closes the span with a `:stop` whose counts
+  are all zero.** There is no report to take the counts from, so the
+  `:stop` carries one measurement per outcome of the mode, each `0`
+  (`would_migrate`, `would_refuse` and `skipped` under the dry run;
+  `migrated`, `refused`, `parked` and `skipped` under the apply), beside
+  `outcome: :error` and `reason` the refusal the call answered
+  (`batch_span/3`). A host counting stops therefore counts every batch it
+  asked for, refused or not. The test "a whole-batch refusal closes it
+  with :error, the refusal and zero counts" in
+  `test/statifier_persistence/executions_migrate_batch_test.exs` pins it
+  under both modes.
+- **A malformed option emits nothing.** The options are checked before
+  the span opens, so a malformed `dry_run:`, `on_failure:` or
+  `pin_sources:` raises `ArgumentError` with no `:start`, no `:stop` and
+  no `:exception` (`check_batch_opts!/3`); a missing `from_machine:` or
+  `to_machine:` likewise raises before the span opens (`migrate_batch/3`).
+  The test "a malformed option raises before it opens" in the same file
+  pins the `ArgumentError` case.
+
+`docs/telemetry.md` ("The batch migration span") already says both; this
+Note brings the record level with it.
