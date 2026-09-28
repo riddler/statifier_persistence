@@ -1,7 +1,7 @@
-# Upgrading a host from 0.13 to 0.19
+# Upgrading a host from 0.13 to 0.22
 
 This page says what a host changes to move `statifier_persistence` from
-0.13.0 to 0.19.0, one minor at a time. A host here is the code that
+0.13.0 to 0.22.0, one minor at a time. A host here is the code that
 embeds the package: the module that calls `use StatifierPersistence.Ecto`,
 the migrations it runs, the options it passes to
 `StatifierPersistence.Executions` and `StatifierPersistence.Driver`, the
@@ -13,8 +13,9 @@ nothing.
 Take the minors in order, and move the pin with each one, as the README
 recommends: `{:statifier_persistence, "~> 0.14.0"}`, then `"~> 0.15.0"`,
 then `"~> 0.16.0"`, then `"~> 0.17.0"`, then `"~> 0.18.0"`, then
-`"~> 0.19.0"`. The `statifier` floor stays `~> 2.6` through 0.17.0;
-0.18.0 moves it to `~> 2.9`, and 0.19.0 keeps it there.
+`"~> 0.19.0"`, then `"~> 0.20.0"`, then `"~> 0.21.0"`, then `"~> 0.22.0"`.
+The `statifier` floor stays `~> 2.6` through 0.17.0; 0.18.0 moves it to
+`~> 2.9`, and every later release keeps it there.
 
 ## Before you start: the database is at V07
 
@@ -32,7 +33,7 @@ with its own migration,
 and an install still short of V06 follows the V06 ordering rule in the
 `StatifierPersistence.Ecto.Migrations` documentation first. No release before
 0.17.0 adds a migration; 0.17.0 does (V08, under "0.16 to 0.17"), and
-0.18.0 and 0.19.0 add none.
+no release from 0.18.0 through 0.22.0 adds one.
 
 ## 0.13 to 0.14
 
@@ -263,3 +264,85 @@ Schema: **NONE**. The `statifier` floor stays `~> 2.9`.
   columns you placed with `:leading_columns` ("Pruning one partition" in
   [`docs/retention.md`](retention.md#pruning-one-partition)). Left out,
   the prune covers the whole store as before: **NONE** is required.
+
+## 0.19 to 0.20
+
+Schema: **NONE**. The `statifier` floor stays `~> 2.9`.
+
+- **If you attach handlers to `StatifierPersistence.Telemetry.events/0` and
+  match the event name exhaustively**, add clauses for the three events
+  of the span `StatifierPersistence.Executions.migrate_batch/3` opens:
+  `[:statifier_persistence, :execution, :migrate_batch, :start]`,
+  `[..., :stop]` and `[..., :exception]`, or a catch-all.
+- **If your handler on `[:statifier_persistence, :adapter, :call]` matches
+  `callback` exhaustively**, add `:list_execution_ids_by_content_hash`, or
+  a catch-all.
+- **If you wrote a storage adapter of your own**, you may implement the
+  new optional callback
+  `c:StatifierPersistence.Storage.Adapter.list_execution_ids_by_content_hash/3`
+  under the
+  `c:StatifierPersistence.Storage.Adapter.supports_content_hash_query?/1`
+  capability. An adapter that leaves it out keeps working;
+  `migrate_batch/3` against it, and
+  `StatifierPersistence.Storage.list_execution_ids_by_content_hash/3`,
+  answer `{:error, :content_hash_query_unsupported}`. A host whose
+  adapters are the two this package ships: **NONE**.
+
+## 0.20 to 0.21
+
+Schema: **NONE**. The `statifier` floor stays `~> 2.9`.
+
+- **If an executor calls back into the execution it is stepping**, expect
+  `{:error, {:reentrant_step, execution_id}}` from that call. Every public
+  door of `StatifierPersistence.Executions` that takes an execution id
+  (`create/4`, `step/5`, `fail/4`, `cancel/3`, `unpark/3`, `migrate/4`,
+  `migrate_tree/4`, `inputs/2`) now refuses an execution whose executor is
+  running in the calling process, before it reads or writes anything.
+  Before, the nested call's write was overwritten by the outer step with
+  nothing reported. A door for another execution is served as before, and
+  a host that never calls back into the execution it is stepping:
+  **NONE**.
+- **If you match `t:StatifierPersistence.Executions.error/0`
+  exhaustively**, add a clause for `{:reentrant_step, execution_id}`, or a
+  catch-all.
+- `StatifierPersistence.Retention.prune/3` gains `single_batch: true`,
+  which prunes one batch and answers that batch's counts plus `more?`, so
+  a host can hold one short transaction of its own per batch. Left out,
+  the prune drains every batch as before: **NONE** is required.
+- **If you run `StatifierPersistence.Testing.StorageConformance` against a
+  storage adapter of your own**, your suite now runs one more case, "a
+  door called from inside its own execution's executor refuses, and the
+  outer step is stored". It needs no `lock_execution/3` and carries no
+  tag, so it runs by default.
+
+## 0.21 to 0.22
+
+Schema: **NONE**. The `statifier` floor stays `~> 2.9`.
+
+- **If an event builder handed to `StatifierPersistence.Executions.step/5`
+  calls back into the execution it was handed**, expect
+  `{:error, {:reentrant_step, execution_id}}` from that call, as an
+  executor gets since 0.21.0. Before, the nested write was overwritten by
+  the outer step with nothing reported. A builder that never calls back
+  into its own execution: **NONE**.
+- **If you run a dry run of `StatifierPersistence.Executions.migrate_batch/3`
+  from inside an executor or an event builder**, the execution being
+  stepped now answers `{:would_refuse, {:reentrant_step, execution_id}}`,
+  before it is read, as the apply refuses it through `migrate/4`. The
+  other executions the batch lists are previewed as before; a dry run
+  called from anywhere else: **NONE**.
+- **If you migrate executions whose chart schedules timers**, expect
+  `migrate/4`, `migrate_tree/4` and `migrate_batch/3` to refuse a plan
+  that keeps a state whose delayed `<send>` to the execution itself names,
+  as a literal event, one the from chart listens for and the to chart no
+  longer does. The refusal is `{:migration_refused, findings}` carrying
+  `{:timer_event_removed, state_id, event}` (a park under
+  `on_failure: :park`, and `{:would_refuse, {:migration_refused,
+  findings}}` in a batch dry run). The check is static over the two
+  charts, so it refuses whether or not a timer is pending. Before, the
+  migration succeeded and a timer that state had scheduled fired later
+  into a chart that ignored its event. Handle the event in the to chart,
+  or drop the state.
+- **If you match `t:StatifierPersistence.Executions.migration_finding/0`
+  exhaustively**, add a clause for `{:timer_event_removed, state_id,
+  event}`, or a catch-all.
