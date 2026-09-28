@@ -10,6 +10,33 @@ fragment in [`changelog.d/`](https://github.com/riddler/statifier_persistence/bl
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
 
+## [0.22.0] 2026-09-28
+
+Feature release: an event builder handed to
+`StatifierPersistence.Executions.step/5`, and a dry run of
+`StatifierPersistence.Executions.migrate_batch/3` started from inside a
+step, now meet the same re-entrancy refusal an executor does, and a
+migration plan that keeps a timer for an event the to chart no longer
+handles is refused with a new `{:timer_event_removed, state_id, event}`
+finding instead of succeeding.
+
+Upgrading: no schema migration. The `statifier` floor stays `~> 2.9`. A
+builder or a dry run that never calls back into the execution being
+stepped sees no change; code that matches
+`t:StatifierPersistence.Executions.migration_finding/0` exhaustively adds
+the `{:timer_event_removed, state_id, event}` arm. See
+`docs/upgrading.md`, "0.21 to 0.22".
+
+### Added
+
+- `StatifierPersistence.Testing.StorageConformance` gains a re-entrancy case for an adapter that exports `lock_execution/3`: a door called from inside its own execution's executor, under the default serialization strategy and so under the adapter's own lock, must answer `{:error, {:reentrant_step, execution_id}}` before it reaches the lock, and the outer step's position is the one stored. It carries `@tag :postgres` with the two lock cases, so a host running `Storage.Ecto` off Postgres now excludes five cases rather than four.
+
+### Changed
+
+- An event builder handed to `StatifierPersistence.Executions.step/5` runs with the execution marked as in a step, as an executor does: a door called from inside the builder for the execution being stepped answers `{:error, {:reentrant_step, execution_id}}` instead of having its write overwritten by the outer step with nothing reported. A builder that never calls back into its own execution sees no change.
+- A dry run of `StatifierPersistence.Executions.migrate_batch/3` started from inside an executor, or an event builder, answers `{:would_refuse, {:reentrant_step, execution_id}}` for the execution being stepped, before it is read, as the apply refuses it through `migrate/4`. Before, the dry run waited on its own caller's lock on the in-memory adapter and previewed the execution from inside the outer step on the Ecto adapter. The other executions the batch lists are previewed as before, and a dry run called from anywhere else sees no change.
+- `StatifierPersistence.Executions.migrate/4` refuses a plan that keeps a state whose delayed `<send>` to the execution itself names, as a literal event, one the from chart listens for and the to chart no longer does, with a `{:timer_event_removed, state_id, event}` finding inside `{:migration_refused, findings}` (a park under `on_failure: :park`). Before, the migration succeeded and a timer that state had scheduled fired later into a chart that ignored its event. The check is static over the two charts, so it refuses whether or not a timer is pending; a send whose event is an `eventexpr`, or that goes to another target or event processor, is not refused. `migrate_tree/4` checks every execution it moves the same way, and `migrate_batch/3`'s dry run answers the refusal as `{:would_refuse, {:migration_refused, findings}}`. Add a clause for the finding, or a catch-all, to every `case` over `t:StatifierPersistence.Executions.migration_finding/0`.
+
 ## [0.21.0] 2026-09-27
 
 Feature release: a door of `StatifierPersistence.Executions` called from
