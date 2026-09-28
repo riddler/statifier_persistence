@@ -590,3 +590,29 @@ The Amendment's line cites are right at `f756277`, the SHA they name. On
 `lib/statifier_persistence/executor.ex`, below the callback doc the
 Amendment's own change added; the two `lock_execution/3` lines are
 unchanged. The cites stay as written, and this Note is how they are read.
+
+## Note (2026-09-27, sp-62q0): an event builder handed to `step/5` carries the in-step mark
+
+The 2026-09-26 Amendment's rule marks the execution for the length of each
+executor call. One line is added to that rule: the execution is marked as
+well for the length of the call to an event builder handed to `step/5`,
+and a door that takes an execution id refuses a marked id from inside the
+builder exactly as it does from inside an executor.
+
+The builder of the 2026-09-01 Amendment runs inside the step, after the
+position is loaded and before the new one is written, which is the point
+the Amendment's lost update comes from: a builder that called a door for
+its own execution had that door's write replaced by the outer step's, with
+nothing reported. Every cite below is in
+`lib/statifier_persistence/executions.ex` and was read at `8d35eff`, before
+this Note's change: `step_loaded/8` calls `resolve_event/2`, which calls
+the builder, outside `in_step/2`, whose only caller was `execute_one/4`.
+With this Note `step_loaded/8` runs `resolve_event/2` inside `in_step/2`
+for the execution being stepped.
+
+Nothing else in the Amendment moves. The error is the same
+`{:error, {:reentrant_step, execution_id}}`, the doors are the same, a
+door called for a different execution id from inside a builder proceeds,
+and a call from another process is not refused. A builder that calls no
+door for its own execution, and a caller passing an `%Event{}`, see no
+change.
