@@ -657,3 +657,44 @@ calls it once per execution it lists. The tests are in
 `test/statifier_persistence/executions_migrate_batch_test.exs`, over both
 shipped adapters, under "from inside an executor (ADR-0004's re-entrancy
 rule)".
+
+## Note (2026-09-28, sp-hf3s): `inputs/2` is refused for a uniform rule, not for a lost update
+
+The 2026-09-26 Amendment gives its reason as a lost update: a nested door
+read the position the outer step had not written yet, wrote its own, and
+the outer step's write then replaced it. That reason fits the doors that
+write. `inputs/2` writes nothing, and it is on the Amendment's list of
+doors all the same. This Note says why; it decides nothing.
+
+Before the Amendment's change `inputs/2` was one call to
+`Storage.list_inputs/2`, with no mark to check and no lock to ask for,
+and its doc called it "Read-only and outside the execution's exclusion by
+design" (`inputs/2`, `lib/statifier_persistence/executions.ex`, read at
+`f756277`, the parent of the Amendment's code); the doc says so still at
+`2e65d8b`. Called from inside the executor it answered on both shipped
+adapters. The Ecto adapter read the execution's input log
+(`list_inputs/2`, `lib/statifier_persistence/storage/ecto.ex`, read at
+`f756277` and unchanged at `2e65d8b`). The in-memory adapter keeps no
+input log, so `Storage.list_inputs/2` answered `:not_supported` without
+calling the adapter
+(`list_inputs/2` and `input_log_supported?/1`,
+`lib/statifier_persistence/storage.ex`, read at the same two SHAs). So
+`inputs/2` had no write to lose, and, taking no lock, it did not wait on
+its own caller either.
+
+It is refused because the rule is uniform. The Amendment states it over
+every public door of `StatifierPersistence.Executions` that takes an
+execution id, not over the doors that write, and `inputs/2` takes one:
+it runs `not_in_step/1` first, before it reads anything, and answers
+`{:error, {:reentrant_step, execution_id}}` for the execution being
+stepped (`inputs/2` and `not_in_step/1`,
+`lib/statifier_persistence/executions.ex`, read at `2e65d8b`). The test
+is "inputs/2 refuses" in
+`test/statifier_persistence/executions_reentrant_test.exs`. A host that
+wants the log of the execution it is stepping reads it after the outer
+door has returned, as the Amendment's "The error" paragraph says for any
+nested effect.
+
+Nothing in the Amendment moves: the doors, the error and what the rule
+leaves alone stay as written, and `inputs/2` called for a different
+execution, or from another process, answers as before.
