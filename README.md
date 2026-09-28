@@ -853,6 +853,75 @@ against real Postgres:
   also already fired its initialize effects, exactly as it does outside
   a caller's transaction.
 
+### Committing timer rows with the step's position
+
+A host that keeps its delayed sends in its own table - the rows it re-arms
+after a restart, and the rows a `<cancel>` removes - has to commit those
+writes in the same transaction as the position of the step that produced
+them. statifier-ex's ADR-0074 decision 2 states the rule and what each
+split order loses: a position saved before its cancel's removal can leave
+the cancelled send pending under a position that will never run the
+`<cancel>` again, so the send fires.
+
+On the Ecto adapter, under the default serialization, the join holds by
+construction when the executor writes its timer rows through the same repo,
+from the process that called the door. A step's effects reach the executor
+before the new position is written (the `c:StatifierPersistence.Executor.execute/2`
+doc), and both run inside the one transaction `lock_execution/3` opens with
+`repo.transaction/1`. Ecto runs a transaction opened on the same repo in the
+same process as part of the one already open, so the executor's writes
+commit or roll back with the position:
+
+    defmodule MyApp.Executor do
+      @behaviour StatifierPersistence.Executor
+
+      @impl true
+      def execute({:send_delayed, delayed}, context) do
+        # Keyed by {execution_id, ordinal}: a re-driven step re-emits the
+        # same ordinal, so the insert is idempotent.
+        MyApp.Timers.arm(context.execution_id, delayed)
+      end
+
+      def execute({:cancel, cancel}, context) do
+        MyApp.Timers.cancel(context.execution_id, cancel.send_id)
+      end
+
+      def execute(_effect, _context), do: :ok
+    end
+
+where `MyApp.Timers` writes through `MyApp.Repo`, the repo the store's
+persistence module names. Pinned by
+`test/statifier_persistence/ecto/step_timer_store_transaction_test.exs`
+against real Postgres:
+
+- **A crash after a step's cancel leaves both halves as they were.** When
+  the step raises after the executor has removed the cancelled row and
+  before the position is written, the row is still pending and the saved
+  position is still the one before the step. Re-driven without the crash,
+  the step commits the removal and the new position together.
+- **A crash after a create's delayed-send insert leaves neither.** No
+  timer row and no execution row are committed.
+
+Where the join is the host's, read from the code, not pinned by that test:
+
+- **Only a raise, throw or exit rolls back.** `lock_execution/3` commits
+  whatever the step's body returns, a `{:error, _}` included, so the
+  executor's writes commit with whatever the step wrote. Effect delivery is
+  at-least-once either way: key the rows so a re-driven step's re-emitted
+  effects find them (a re-emitted cancel that matches nothing is a no-op).
+- **Another serialization strategy.** A host's own `serialization:` strategy
+  replaces `lock_execution/3`, and this package opens no transaction of its
+  own around the step, so the join is whatever that strategy provides.
+- **The in-memory adapter.** Its `lock_execution/3` takes a lock and no
+  transaction; there is nothing to join.
+- **Another repo or another process.** A timer store on a different repo,
+  or written from another process (a `Task`, a message to a GenServer),
+  runs on its own connection and commits on its own. A host whose timer
+  store cannot share the step's transaction does not meet ADR-0074
+  decision 2, and this package cannot close that gap for it.
+- **Inside a caller's transaction.** The rows commit when the caller's
+  transaction does, with the position, as the section above describes.
+
 ### Delivering while a step is in flight
 
 A host that delivers events from more than one process - a webhook
