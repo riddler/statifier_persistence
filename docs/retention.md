@@ -112,9 +112,12 @@ calling it again carries on.
 
 `more?` is `true` when the batch took as many executions as `batch_size:`
 allows, so another call may find more, and `false` when it took fewer -
-the same point where the default drain stops on its own. A row another
-transaction holds locked is skipped, not waited on, so it is left for a
-later call either way.
+the same point where the default drain stops on its own. When the last due
+batch holds exactly `batch_size:` executions, that call answers `more?:
+true` and the next one answers zeros with `more?: false`, so a loop that
+stops at `more?: false` makes one extra call that clears nothing. A row
+another transaction holds locked is skipped, not waited on, so it is left
+for a later call either way.
 
 After a prune, `Executions.inputs/2` answers `{:ok, []}` for that
 execution, which is also what an execution that took no input answers. A

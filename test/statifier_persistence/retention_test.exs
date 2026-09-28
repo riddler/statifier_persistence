@@ -144,6 +144,27 @@ defmodule StatifierPersistence.RetentionTest do
              Retention.prune(store, @cutoff, single_batch: true, batch_size: 2)
   end
 
+  # sabotage: made prune_one_batch/4 answer more?: counts.executions >
+  # batch_size -> red, the first call answered more?: false for a full
+  # batch. Verified red, reverted from a copy.
+  test "prune/3 with single_batch: true answers more?: true for an exactly-full last batch, then zeros",
+       %{store: store} do
+    for day <- 1..4, do: execution(store, "full-due-#{day}", :completed, day)
+
+    assert {:ok, %{executions: 2, position_blobs: 2, inputs: 0, more?: true}} =
+             Retention.prune(store, @cutoff, single_batch: true, batch_size: 2)
+
+    assert {:ok, %{executions: 2, position_blobs: 2, inputs: 0, more?: true}} =
+             Retention.prune(store, @cutoff, single_batch: true, batch_size: 2)
+
+    assert {:ok, %{executions: 0, position_blobs: 0, inputs: 0, more?: false}} =
+             Retention.prune(store, @cutoff, single_batch: true, batch_size: 2)
+
+    for day <- 1..4 do
+      assert {:ok, %{position_blob: nil}} = Storage.fetch_execution(store, "full-due-#{day}")
+    end
+  end
+
   # sabotage: made single_batch!/1 return its input unchanged -> red, no
   # ArgumentError was raised; each value reached the prune as truthy or
   # falsy. Verified red, reverted from a copy.
