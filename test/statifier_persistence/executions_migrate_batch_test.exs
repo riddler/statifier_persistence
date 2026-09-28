@@ -163,7 +163,36 @@ defmodule StatifierPersistence.ExecutionsMigrateBatchTest do
   </scxml>
   """
 
+  # A loan whose return is noted as it happens: the `copy.returned`
+  # transition hands the executor one <log>, which is where the
+  # re-entrancy cases call back in while the loan is being stepped.
+  @noted_loan """
+  <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="awaiting_return">
+    <state id="awaiting_return">
+      <transition event="copy.returned" target="checking_in"><log label="returned"/></transition>
+    </state>
+    <state id="checking_in">
+      <transition event="copy.checked" target="returned"/>
+    </state>
+    <final id="returned"/>
+  </scxml>
+  """
+
   @invoke_types InvokeTypes.new(types: ["library:pickup_notice"])
+
+  defmodule AdmittingStrategy do
+    @moduledoc false
+    # A serialization strategy that admits its own holder, the shape of the
+    # Ecto adapter's transaction-scoped advisory lock, which is re-entrant
+    # for the connection holding it. The in-memory re-entrancy cases hand
+    # it to the nested batch so that a missing check shows up as the
+    # stepped loan read and previewed rather than as the in-memory lock
+    # spinning on itself.
+    @behaviour StatifierPersistence.Serialization
+
+    @impl StatifierPersistence.Serialization
+    def with_execution(_config, _execution_id, fun), do: {:ok, fun.()}
+  end
 
   defmodule ReturningStrategy do
     @moduledoc false
@@ -226,7 +255,8 @@ defmodule StatifierPersistence.ExecutionsMigrateBatchTest do
           @unrenewable_loan,
           @hold,
           @notice_before,
-          @notice_after
+          @notice_after,
+          @noted_loan
         ],
         fn source ->
           {:ok, machine} = Statifier.compile(source)
@@ -244,7 +274,8 @@ defmodule StatifierPersistence.ExecutionsMigrateBatchTest do
       unrenewable: machines[@unrenewable_loan],
       hold: machines[@hold],
       notice_from: machines[@notice_before],
-      notice_to: machines[@notice_after]
+      notice_to: machines[@notice_after],
+      noted: machines[@noted_loan]
     }
   end
 
@@ -489,6 +520,93 @@ defmodule StatifierPersistence.ExecutionsMigrateBatchTest do
                batch(ctx, plan, ctx.renewable, ctx.unrenewable)
 
       assert facts.dropped == preview.dropped
+    end
+  end
+
+  describe "from inside an executor (ADR-0004's re-entrancy rule)" do
+    # The serialization the nested batch is handed: the Ecto adapter's own
+    # advisory lock, which admits the connection already holding it, and
+    # the admitting strategy over the in-memory adapter, whose own lock
+    # would spin on its holder (AdmittingStrategy says why).
+    defp nested_serialization(:ecto), do: []
+    defp nested_serialization(:in_memory), do: [serialization: {AdmittingStrategy, nil}]
+
+    # Steps `execution_id` on the noted loan with "copy.returned", calling
+    # `batch_fun` from inside the executor and sending each answer back to
+    # the test process.
+    defp step_batching(ctx, execution_id, batch_fun) do
+      test_pid = self()
+
+      executor = fn _effect, _context ->
+        send(test_pid, {:nested, batch_fun.()})
+        :ok
+      end
+
+      Executions.step(ctx.store, execution_id, ctx.noted, Event.external("copy.returned"),
+        executor: executor
+      )
+    end
+
+    # sabotage: in batch_one/3's dry-run clause (executions.ex), drop the
+    # not_in_step/1 check -> red over both adapters: the stepped loan
+    # answered {:would_migrate, _} where the refusal was asserted.
+    # Verified red, reverted from a copy.
+    test "a dry run refuses the execution being stepped and previews the others", ctx do
+      loan!(ctx, "loan-a", [], ctx.noted)
+      loan!(ctx, "loan-b", [], ctx.noted)
+      before = stored(ctx, "loan-b")
+      plan = plan!(ctx.noted, ctx.checkin)
+
+      assert {:ok, %{status: :active}, _ms} =
+               step_batching(ctx, "loan-a", fn ->
+                 batch(
+                   ctx,
+                   plan,
+                   ctx.noted,
+                   ctx.checkin,
+                   [dry_run: true] ++ nested_serialization(ctx.adapter)
+                 )
+               end)
+
+      assert_received {:nested, {:ok, %{results: results, counts: counts}}}
+
+      assert [
+               {"loan-a", {:would_refuse, {:reentrant_step, "loan-a"}}},
+               {"loan-b", {:would_migrate, %{dropped: []}}}
+             ] = results
+
+      assert counts == %{would_migrate: 1, would_refuse: 1, skipped: 0}
+
+      stepped = stored(ctx, "loan-a")
+      assert stepped.content_hash == hash(ctx.noted)
+
+      assert {:ok, machine_state} =
+               Storage.load_execution_position(ctx.store, "loan-a", ctx.noted)
+
+      assert leaves(machine_state) == ["checking_in"]
+      assert stored(ctx, "loan-b") == before
+    end
+
+    # sabotage: in batch_one/3's dry-run clause (executions.ex), drop the
+    # not_in_step/1 check -> red over both adapters: the dry run answered
+    # {:would_migrate, _} for the stepped loan the apply refused.
+    # Verified red, reverted from a copy.
+    test "the dry run and the apply answer the execution being stepped alike", ctx do
+      loan!(ctx, "loan-a", [], ctx.noted)
+      plan = plan!(ctx.noted, ctx.checkin)
+      opts = nested_serialization(ctx.adapter)
+
+      assert {:ok, %{status: :active}, _ms} =
+               step_batching(ctx, "loan-a", fn ->
+                 {batch(ctx, plan, ctx.noted, ctx.checkin, [dry_run: true] ++ opts),
+                  batch(ctx, plan, ctx.noted, ctx.checkin, opts)}
+               end)
+
+      assert_received {:nested, {{:ok, %{results: preview}}, {:ok, %{results: applied}}}}
+      assert [{"loan-a", {:would_refuse, reason}}] = preview
+      assert [{"loan-a", {:refused, ^reason}}] = applied
+      assert reason == {:reentrant_step, "loan-a"}
+      assert stored(ctx, "loan-a").content_hash == hash(ctx.noted)
     end
   end
 

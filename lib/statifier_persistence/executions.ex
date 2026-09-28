@@ -107,7 +107,11 @@ defmodule StatifierPersistence.Executions do
   `migrate_tree/4` and `inputs/2` - answers
   `{:error, {:reentrant_step, execution_id}}` for a marked id before it
   reads or writes anything. `migrate_tree/4` checks its root and every id
-  its `plans` name. Without the refusal a nested door would read the
+  its `plans` name. `migrate_batch/3` takes no execution id, but its dry
+  run answers `{:would_refuse, {:reentrant_step, execution_id}}` for a
+  marked id among the executions it lists, before it reads that one, as
+  its apply answers `{:refused, {:reentrant_step, execution_id}}` for it
+  through `migrate/4` or `migrate_tree/4`. Without the refusal a nested door would read the
   position the outer step has not written yet, write its own, and have it
   overwritten when the outer step persists, with nothing reported; the
   Ecto adapter's lock would not stop it, because its advisory lock is
@@ -1915,7 +1919,9 @@ defmodule StatifierPersistence.Executions do
     mapping.
   - `{:would_refuse, reason}` - `migrate/4` would refuse it, and `reason`
     is that refusal (`t:migrate_error/0`), `{:migration_refused, findings}`
-    for the validation against the execution.
+    for the validation against the execution, and
+    `{:reentrant_step, execution_id}` for an execution whose executor is
+    running in the calling process, answered before it is read.
   - `{:skipped, :terminal}` - the execution is terminal; there is nothing
     to move.
   - `{:skipped, :linked}` - the execution carries a linkage, so the apply
@@ -2018,7 +2024,13 @@ defmodule StatifierPersistence.Executions do
   and meets every check `migrate/4` makes - the terminal status, the
   linkage, the from hash, the pin sources, the export, the transform and
   the import - and nothing is written, so `on_failure:` changes nothing
-  (decision 2). Each answers a `t:batch_preview/0`. The dry run is
+  (decision 2). Each answers a `t:batch_preview/0`. An execution whose
+  executor, or whose event builder, is running in the calling process -
+  a dry run started from inside its own step - answers
+  `{:would_refuse, {:reentrant_step, execution_id}}` before its
+  serialization is asked for or it is read, as the apply refuses it
+  (see "A door called from inside its own executor refuses"
+  above); the other executions are previewed as before. The dry run is
   advice, never a lock: it holds no exclusion past each execution's own
   check, and the apply checks everything again.
 
@@ -2195,12 +2207,19 @@ defmodule StatifierPersistence.Executions do
   defp batch_outcomes(false = _dry_run), do: [:migrated, :refused, :parked, :skipped]
 
   # ADR-0017 decision 2: the dry run, under the execution's own
-  # serialization, writing nothing.
+  # serialization, writing nothing. An execution whose executor is running
+  # in this process is refused before its serialization is asked for, as
+  # the apply refuses it (ADR-0004's 2026-09-27 sp-4wwq Note): the
+  # in-memory adapter's lock would wait on its own holder, and the Ecto
+  # adapter's would admit it and read inside the outer step.
   @spec batch_one(map(), execution_id(), :none | {:ask, [module()]}) ::
           batch_preview() | batch_outcome()
   defp batch_one(%{dry_run: true, serialization: {strategy, config}} = batch, id, timers) do
-    case strategy.with_execution(config, id, fn -> preview(batch, id, timers) end) do
-      {:ok, preview} -> preview
+    with :ok <- not_in_step(id),
+         {:ok, preview} <-
+           strategy.with_execution(config, id, fn -> preview(batch, id, timers) end) do
+      preview
+    else
       {:error, reason} -> {:would_refuse, reason}
     end
   end
