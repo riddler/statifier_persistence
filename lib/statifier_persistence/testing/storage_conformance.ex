@@ -1729,19 +1729,30 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                    )
         end
 
-        # More ids than a small Erlang map holds, so an in-memory store's
-        # map no longer yields its values in key order.
+        # The fixture is fixed, never shuffled, and inserted in DESCENDING
+        # id order, so no store's own order is the asked one by chance: a
+        # fresh table read without an ORDER BY returns its rows in insertion
+        # order in practice (a heap scan and a scan of the content-hash
+        # index alike), here the reverse of the asked order; and more ids
+        # than a small Erlang map holds means an in-memory store's map no
+        # longer yields its values in key order. The first assertion pins
+        # the premise, so a fixture edit that sorted the insertion order
+        # fails here and not silently.
         #
         # sabotage: in the adapter under test's
         # list_execution_ids_by_content_hash/3, drop the final sort -> red
         # on both conformance suites, the ids came back in the store's own
-        # order. Verified red, reverted from a copy.
+        # order. Verified red on the in-memory and the Ecto (Postgres)
+        # suites, reverted from a copy.
         test "adapter: the listing is in ascending execution id", %{store: store} do
           save_listing_chart(store, @listing_hash)
 
-          ids = for n <- Enum.shuffle(1..40), do: "listing-order-#{n}"
+          ids = for n <- 1..40, do: "listing-order-#{n}"
+          inserted = Enum.sort(ids, :desc)
 
-          for id <- ids do
+          refute inserted == Enum.sort(ids)
+
+          for id <- inserted do
             insert_listing_execution(store, id, @listing_hash, :active)
           end
 
