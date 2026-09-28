@@ -893,3 +893,40 @@ Decision 4's sentence stays true as written: a `to` hash tombstoned when
 the check reads it is refused before any write. Closing the window inside
 the re-pin write, or inside a create's insert, is a later change; this
 Note changes no behaviour.
+
+## Note (2026-09-27, sp-hfme): decision 9's sweep and no-caller sentences are superseded by ADR-0017
+
+This Note decides nothing and changes no status line. It points from
+decision 9 to the later record that superseded two of its sentences.
+Every cite below was read on `main` at `9fc1edc`, in
+`lib/statifier_persistence/executions.ex` unless another file is named.
+
+The two sentences of decision 9 it names:
+
+- "Nothing in this package calls `migrate/4`".
+- "a host that wants every execution on a hash moved writes that sweep
+  itself, over the drained query (`Executions.executions_on/2`, ADR-0012
+  decision 3) and one `migrate/4` per execution".
+
+Both describe the package before ADR-0017
+(`docs/adr/0017-migrating-the-executions-on-a-chart.md`), which decides
+that sweep as a verb of this package, and whose Consequences say so under
+"ADR-0013 decision 9's sweep sentence has a package answer".
+
+- **The verb is the sweep.** `migrate_batch/3` takes one plan and applies
+  it to every execution its listing finds on the plan's `from` hash
+  (`migrate_listed/1`), through the listing of ADR-0017 decision 8
+  (`lib/statifier_persistence/storage.ex`,
+  `list_execution_ids_by_content_hash/3`),
+  not through `executions_on/2`.
+- **It calls `migrate/4`.** An unlinked execution is migrated with one
+  `migrate/4` (`apply_one/2`); a linked one goes through `migrate_tree/4`
+  (`apply_tree/2`), as ADR-0017 decision 4 says.
+- **Only when a host asks.** `migrate/4`'s `@doc` states that
+  `migrate_batch/3` is its one caller in this package, and that saving a
+  chart, creating an execution and stepping one never migrate anything.
+
+The rest of decision 9 stays true as written: `migrate/4` is the one
+sanctioned re-pin, it goes through the identity guard, and `step/5` cannot
+re-pin. A host may still write its own sweep over `executions_on/2` and
+`migrate/4`; it no longer has to.
