@@ -291,6 +291,72 @@ defmodule StatifierPersistence.ExecutionsReentrantTest do
     end
   end
 
+  describe "an event builder handed to step/5" do
+    # Steps `execution_id` with a builder that calls `door` with the
+    # execution id from inside the builder, sends its answer back to the
+    # test process, and then builds "go".
+    defp step_building(store, execution_id, machine, door) do
+      test_pid = self()
+
+      builder = fn _machine_state ->
+        send(test_pid, {:nested, door.(execution_id)})
+        {:ok, Event.external("go")}
+      end
+
+      Executions.step(store, execution_id, machine, builder, executor: &quiet/2)
+    end
+
+    # sabotage: in step_loaded/8, call resolve_event/2 without in_step/2 ->
+    # red, the nested step answered {:ok, %Execution{status: :active}, _}
+    # where the refusal was asserted. Verified red, reverted from a copy.
+    test "a builder calling a door for its own execution is refused", %{
+      store: store,
+      machine: machine
+    } do
+      create!(store, "reentrant-builder", machine)
+
+      result =
+        step_building(store, "reentrant-builder", machine, fn id ->
+          Executions.step(
+            store,
+            id,
+            machine,
+            Event.external("other"),
+            [executor: &quiet/2] ++ @nested
+          )
+        end)
+
+      assert_refused_and_stored(result, store, "reentrant-builder", machine)
+    end
+
+    # sabotage: make not_in_step/1 refuse whenever anything is marked
+    # (ignore the ids) -> red, the builder's mark refused the step of the
+    # other execution. Verified red, reverted from a copy.
+    test "a builder calling a door for a different execution proceeds", %{
+      store: store,
+      machine: machine
+    } do
+      create!(store, "reentrant-builder-outer", machine)
+      create!(store, "reentrant-builder-other", machine)
+
+      result =
+        step_building(store, "reentrant-builder-outer", machine, fn _id ->
+          Executions.step(
+            store,
+            "reentrant-builder-other",
+            machine,
+            Event.external("other"),
+            executor: &quiet/2
+          )
+        end)
+
+      assert {:ok, %Execution{status: :active}, _machine_state} = result
+      assert_received {:nested, {:ok, %Execution{status: :active}, _other_state}}
+      assert leaves(store, "reentrant-builder-outer", machine) == ["b"]
+      assert leaves(store, "reentrant-builder-other", machine) == ["x"]
+    end
+  end
+
   describe "what the refusal leaves alone" do
     # sabotage: make not_in_step/1 refuse whenever anything is marked
     # (ignore the ids) -> red, the step of the other execution answered

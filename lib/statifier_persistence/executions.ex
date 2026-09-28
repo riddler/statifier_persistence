@@ -99,8 +99,10 @@ defmodule StatifierPersistence.Executions do
 
   The executor runs inside the step, after the position is loaded and
   before the new one is written (ADR-0004 decision 3). For the length of
-  each executor call this module marks the execution as in a step in the
-  calling process, and every public door that takes an execution id -
+  each executor call, and of the call to an event builder handed to
+  `step/5`, which runs at the same point, this module marks the execution
+  as in a step in the calling process, and every public door that takes
+  an execution id -
   `create/4`, `step/5`, `fail/4`, `cancel/3`, `unpark/3`, `migrate/4`,
   `migrate_tree/4` and `inputs/2` - answers
   `{:error, {:reentrant_step, execution_id}}` for a marked id before it
@@ -545,7 +547,11 @@ defmodule StatifierPersistence.Executions do
   `event` may also be a `t:event_builder/0` - a fun the loaded position is
   handed, for an event only the position can build or decline. A builder
   that declines discards the delivery through the same `{:discarded, execution}`
-  arm.
+  arm. The builder runs inside the step, so the execution is marked as in a
+  step while it runs: a builder that calls a door of this module for the
+  execution it was handed gets `{:error, {:reentrant_step, execution_id}}`
+  from that door, as an executor does (see "A door called from inside its
+  own executor refuses" above).
   """
   @spec step(
           store :: Storage.t(),
@@ -2918,8 +2924,11 @@ defmodule StatifierPersistence.Executions do
     # reads the position this step is about to act on, under the exclusion
     # this step already holds, so nothing can move between the read and
     # the step. Nothing has been executed or written yet, so a decline is
-    # a discard in the full sense - the position is untouched.
-    case resolve_event(event, machine_state) do
+    # a discard in the full sense - the position is untouched. The builder
+    # runs inside the step as the executor does, so it carries the same
+    # in-step mark: a builder that calls a door for this execution is
+    # refused rather than having its write replaced by this step's.
+    case in_step(execution_id, fn -> resolve_event(event, machine_state) end) do
       {:ok, event} ->
         stepped(
           store,
@@ -3620,9 +3629,10 @@ defmodule StatifierPersistence.Executions do
   end
 
   # The in-step mark (ADR-0004's 2026-09-26 Amendment): the execution ids
-  # whose executor is running in this process, innermost first. It is a
-  # list rather than one id because an executor may step a different
-  # execution, whose own executor then runs inside the first one's: both
+  # whose executor, or whose event builder, is running in this process,
+  # innermost first. It is a list rather than one id because an executor
+  # may step a different execution, whose own executor then runs inside
+  # the first one's: both
   # are in a step until their calls return, and a door for either refuses.
   @in_step_key {__MODULE__, :in_step}
 
@@ -3643,9 +3653,10 @@ defmodule StatifierPersistence.Executions do
   defp not_in_step(execution_id), do: not_in_step([execution_id])
 
   # Marks `execution_id` as in a step for the length of `fun` - one executor
-  # call - and restores the mark as it found it on every exit: a return, a
-  # raise, a throw or an exit. A mark left behind would refuse every later
-  # door this process calls for that execution.
+  # call, or one event builder call - and restores the mark as it found it
+  # on every exit: a return, a raise, a throw or an exit. A mark left
+  # behind would refuse every later door this process calls for that
+  # execution.
   @spec in_step(execution_id(), (-> result)) :: result when result: term()
   defp in_step(execution_id, fun) do
     outer = Process.get(@in_step_key, [])
