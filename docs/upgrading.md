@@ -342,7 +342,9 @@ Schema: **NONE**. The `statifier` floor stays `~> 2.9`.
   charts, so it refuses whether or not a timer is pending. Before, the
   migration succeeded and a timer that state had scheduled fired later
   into a chart that ignored its event. Handle the event in the to chart,
-  or drop the state.
+  or drop the state. A plan that drops it is then checked against the pin
+  sources you pass (ADR-0013 decision 6): with none it answers
+  `{:no_pin_source, states}`, and a source that cannot answer refuses it.
 - **If you match `t:StatifierPersistence.Executions.migration_finding/0`
   exhaustively**, add a clause for `{:timer_event_removed, state_id,
   event}`, or a catch-all.
