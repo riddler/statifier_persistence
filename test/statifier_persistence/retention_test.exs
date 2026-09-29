@@ -147,6 +147,23 @@ defmodule StatifierPersistence.RetentionTest do
   # sabotage: made prune_one_batch/4 answer more?: counts.executions >
   # batch_size -> red, the first call answered more?: false for a full
   # batch. Verified red, reverted from a copy.
+  #
+  # No mutant of a stateless more? rule - one computed from the batch's
+  # executions count and batch_size alone - is killed by this test and
+  # not by the five-by-two test above. That test already asks the rule
+  # for (2, 2) -> true, (1, 2) -> false and (0, 2) -> false; this one
+  # asks only (2, 2) -> true and (0, 2) -> false, a subset, so any rule
+  # the test above accepts, this one accepts too (> batch_size fails
+  # both; >= batch_size passes both, equal to == while a batch never
+  # takes more than batch_size; > 0 fails only the test above).
+  #
+  # What this test adds is the rule's kind: more? says only that the
+  # batch was full, never that something due remains. The mutant only it
+  # kills reads the store instead - made prune_one_batch/4 answer more?:
+  # true when any execution still due is left after the batch -> red
+  # here, the second call answered more?: false for a full last batch,
+  # while the test above stays green (3, 1, 0 and 0 due left match its
+  # true, true, false, false). Verified red, reverted from a copy.
   test "prune/3 with single_batch: true answers more?: true for an exactly-full last batch, then zeros",
        %{store: store} do
     for day <- 1..4, do: execution(store, "full-due-#{day}", :completed, day)
