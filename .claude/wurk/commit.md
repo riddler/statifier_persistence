@@ -68,9 +68,10 @@ happens and this section does not restate it: a release (`mix hex.publish`,
 GitHub release) is never an agent's; the tag of a release prep is made after
 the prep is merged to `origin/main`, by the conductor or the session that owns
 the release bead (the tagging row and the "Release preps" paragraph), never
-in a commit here; and the version-bump row allows the bump only on an
-operator-authorized release bead's branch, inside a campaign carrying the
-operator's explicit consent. Read the row
+in a commit here; and the version-bump row allows the bump only on the
+branch of a release bead the operator has named (in the campaign plan or
+their own words), the family norm rather than a grant a campaign consent has
+to name. Read the row
 rather than a version quoted here, which goes stale at every release. Never
 edit the version field as part of an ordinary commit.
 
