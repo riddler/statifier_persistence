@@ -212,6 +212,20 @@ defmodule StatifierPersistence.ExecutionsMigrateBatchTest do
   </scxml>
   """
 
+  # A pickup notice resent as it waits: the `notice.resent` transition
+  # hands the executor one <log> and leaves the notice in `notice_sent`,
+  # which is where the linked re-entrancy case calls back in while the
+  # hold's notice is being stepped.
+  @noted_notice """
+  <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="notice_sent">
+    <state id="notice_sent">
+      <transition event="notice.resent"><log label="resent"/></transition>
+      <transition event="notice.acknowledged" target="acknowledged"/>
+    </state>
+    <final id="acknowledged"/>
+  </scxml>
+  """
+
   @invoke_types InvokeTypes.new(types: ["library:pickup_notice", "library:pickup_reminder"])
 
   defmodule AdmittingStrategy do
@@ -291,6 +305,7 @@ defmodule StatifierPersistence.ExecutionsMigrateBatchTest do
           @notice_before,
           @notice_after,
           @noted_loan,
+          @noted_notice,
           @reminding_notice_before,
           @reminding_notice_after,
           @pickup_reminder
@@ -313,6 +328,7 @@ defmodule StatifierPersistence.ExecutionsMigrateBatchTest do
       notice_from: machines[@notice_before],
       notice_to: machines[@notice_after],
       noted: machines[@noted_loan],
+      noted_notice: machines[@noted_notice],
       reminding_from: machines[@reminding_notice_before],
       reminding_to: machines[@reminding_notice_after],
       reminder: machines[@pickup_reminder]
@@ -655,6 +671,51 @@ defmodule StatifierPersistence.ExecutionsMigrateBatchTest do
       assert [{"loan-a", {:refused, ^reason}}] = applied
       assert reason == {:reentrant_step, "loan-a"}
       assert stored(ctx, "loan-a").content_hash == hash(ctx.noted)
+    end
+
+    # A linked execution being stepped: the hold's pickup notice, a durable
+    # child carrying a linkage, stepped from inside its own executor. The
+    # dry run refuses it before its linked skip, and the apply's tree
+    # migration refuses it on its root, so the two answer it alike.
+    #
+    # sabotage: in batch_one/3's dry-run clause (executions.ex), drop the
+    # not_in_step/1 check -> red over both adapters: the dry run answered
+    # {:skipped, :linked} for the stepped notice the apply refused.
+    # Verified red, reverted from a copy.
+    test "the dry run and the apply answer a linked execution being stepped alike", ctx do
+      notice_id = linked_notice!(ctx, @noted_notice)
+      plan = plan!(ctx.noted_notice, ctx.notice_to, %{"notice_sent" => "patron_notified"})
+      opts = nested_serialization(ctx.adapter)
+      test_pid = self()
+
+      executor = fn _effect, _context ->
+        send(
+          test_pid,
+          {:nested,
+           {batch(ctx, plan, ctx.noted_notice, ctx.notice_to, [dry_run: true] ++ opts),
+            batch(ctx, plan, ctx.noted_notice, ctx.notice_to, opts)}}
+        )
+
+        :ok
+      end
+
+      assert {:ok, %{status: :active}, _ms} =
+               Executions.step(
+                 ctx.store,
+                 notice_id,
+                 ctx.noted_notice,
+                 Event.external("notice.resent"),
+                 executor: executor
+               )
+
+      assert_received {:nested, {{:ok, %{results: preview}}, {:ok, %{results: applied}}}}
+      assert [{^notice_id, {:would_refuse, reason}}] = preview
+      assert [{^notice_id, {:refused, ^reason}}] = applied
+      assert reason == {:reentrant_step, notice_id}
+
+      notice = stored(ctx, notice_id)
+      assert notice.content_hash == hash(ctx.noted_notice)
+      assert {:ok, %Linkage{}} = Linkage.from_metadata(notice.metadata)
     end
   end
 
