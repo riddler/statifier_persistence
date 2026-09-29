@@ -984,7 +984,7 @@ or rescheduling a mapped timer out.
 
 ## Amendment (2026-09-28, sp-fwah): decision 3's validation against the execution refuses a kept timer whose event the to chart no longer handles
 
-Status of this amendment: proposed (2026-09-28, sp-fwah). The record above
+Status of this amendment: accepted (2026-09-28, sp-fwah). The record above
 is accepted, and so are its earlier Amendments; this one changes no other
 status line.
 
@@ -1091,3 +1091,55 @@ adds or edits.
 Decision 4's sentence stays true as written, and the 2026-09-27 Note's
 description of the check stays true of the first read: a `to` hash
 tombstoned when either read runs is refused before any write.
+
+## Note (2026-09-28, sp-830s): the sp-fwah Amendment is accepted
+
+The 2026-09-28 sp-fwah Amendment is accepted on 2026-09-28, under the
+operator's standing grant to flip a record whose code has shipped. The
+code that implements it shipped in statifier_persistence 0.22.0 (tag
+`v0.22.0`, `db26e2f`). That Amendment's own status line flips in place
+from proposed to accepted. The record above and its earlier Amendments
+stay accepted; the Amendment's "this one changes no other status line" is
+met here and stays as written. Every cite below was read at `db26e2f`, the
+tag, and again on `main` at `037f5da`, in
+`lib/statifier_persistence/migration/transform.ex` unless another file is
+named. Between the two, `lib/` changed only for the 2026-09-28 sp-3v2c
+Note above, which leaves every function cited below as it was.
+
+What was re-read before the flip:
+
+- **The rule.** The kept timer owners come from `group_timer_owners/3`,
+  their delayed sends from `delayed_sends/2`, the literal self-addressed
+  event from `self_event/1`, and the refusal from
+  `removed_event_findings/3`, which answers a name the to chart does not
+  accept and the from chart does.
+- **"Listens for".** `removed_event_findings/3` asks
+  `Statifier.Chart.check_accepts/2` of each machine; that function matches
+  under the descriptor semantics transition selection uses, in statifier
+  2.9.0, the version `mix.lock` resolves.
+- **The finding.** `t:StatifierPersistence.Executions.migration_finding/0`
+  carries the `{:timer_event_removed, Plan.state_id(), String.t()}` arm
+  (`lib/statifier_persistence/executions.ex`), and `validate_loaded/5`
+  answers every finding of the transform inside
+  `{:migration_refused, findings}`.
+- **Static.** `removed_event_findings/3` takes the plan and the two
+  machines and no source counts, and `transform/5` adds its findings to
+  those of every other check.
+- **Not refused.** `self_event/1` answers no event for an `eventexpr`, a
+  `target` or `targetexpr`, a `typeexpr`, or a `type` that is not a
+  built-in processor; a name the from chart does not accept either is not
+  in the removed list (`removed_event_findings/3`).
+- **What a refusal writes.** Under `:refuse` the refusal is answered with
+  no write, and under `:park` the execution's status is set to
+  `:needs_migration` (`lib/statifier_persistence/executions.ex`,
+  `refuse/4`, reached from `migrate_loaded/6`).
+- **Where it is enforced.** `migrate/4` through `migrate_loaded/6`,
+  `migrate_tree/4` through `validate_execution/5` for each execution it
+  moves, and `migrate_batch/3`'s dry run through `preview/3`, which answers
+  `{:would_refuse, reason}` (`lib/statifier_persistence/executions.ex`).
+- **The case.** `test/statifier_persistence/executions_migrate_test.exs`
+  carries "a kept timer whose event the to chart no longer handles", with
+  the refusal and the park, the dry run, and the sends that are not
+  refused.
+- **The changelog.** The 0.22.0 section of `CHANGELOG.md` names the
+  refusal under Changed.
