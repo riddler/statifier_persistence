@@ -2312,7 +2312,8 @@ defmodule StatifierPersistence.Executions do
   # ADR-0017 decision 2: the dry run, under the execution's own
   # serialization, writing nothing. An execution whose executor is running
   # in this process is refused before its serialization is asked for, as
-  # the apply refuses it (ADR-0004's 2026-09-27 sp-4wwq Note): the
+  # the apply refuses it (ADR-0004's Note of 2026-09-27, "a dry run of
+  # `migrate_batch/3` refuses the execution being stepped"): the
   # in-memory adapter's lock would wait on its own holder, and the Ecto
   # adapter's would admit it and read inside the outer step.
   @spec batch_one(map(), execution_id(), :none | {:ask, [module()]}) ::
