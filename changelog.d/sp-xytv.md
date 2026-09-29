@@ -1,3 +1,0 @@
-### Changed
-
-- A step whose position save answers an error after its executor ran now rolls back the executor's writes through the store's repo, and the step's input log entry, instead of committing them without the position, when it runs on `StatifierPersistence.Storage.Ecto` under the default serialization strategy and its lock opened the outermost transaction; `StatifierPersistence.Executions.step/5` answers the same error as before, and delivering the event again re-drives the whole step. Inside a caller's own transaction, under a host `serialization:` strategy and on the in-memory adapter nothing changes, and a budget-exhausted step still commits its `:failed` record.
