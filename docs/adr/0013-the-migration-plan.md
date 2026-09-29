@@ -981,3 +981,72 @@ What decision 6 says a mapped timer keeps - its deadline, in the host's
 queue - stays true as written; a plan this finding refuses writes
 nothing, and "What this record does not decide" still leaves cancelling
 or rescheduling a mapped timer out.
+
+## Amendment (2026-09-28, sp-fwah): decision 3's validation against the execution refuses a kept timer whose event the to chart no longer handles
+
+Status of this amendment: proposed (2026-09-28, sp-fwah). The record above
+is accepted, and so are its earlier Amendments; this one changes no other
+status line.
+
+Pure addition: nothing above is edited, and the 2026-09-28 sp-3q2t Note
+stays as written. That Note recorded this check and said it decided
+nothing; the check is a new refusal, and this record's precedent for a new
+refusal is an Amendment with a status line (the sp-qe8s Amendment), so
+this Amendment decides it. Every cite below was read on `main` at
+`cbc71f2`, in `lib/statifier_persistence/migration/transform.ex` unless
+another file is named; nothing under `lib/` differs between `cbc71f2` and
+the `v0.22.0` tag.
+
+**Decision 3's list gains one check, beside decision 6's.** The validation
+against the execution reads, at its end: "decision 6's timer rule holds; no
+timer the plan keeps names an event the to chart no longer handles;
+decision 7's child rule holds; and `Position.import/2` on the to machine
+answers a position." Decision 6's timer rule is unchanged; this check covers
+the case it leaves open, a timer the plan keeps.
+
+- **The rule.** For each state that could own a timer (decision 6's
+  definition) that the plan keeps, by name or by the same-id default
+  (`group_timer_owners/3`), every delayed `<send>` in the places decision 6
+  reads (`delayed_sends/2`) whose event is a literal name, with no `target`
+  and a built-in `type` (`self_event/1`), is refused when some transition of
+  the from chart listens for that name and no transition of the to chart
+  does (`removed_event_findings/3`).
+- **"Listens for".** `Statifier.Chart.check_accepts/2` over each chart's
+  event vocabulary, the descriptor matching transition selection uses, so a
+  to chart listening for `pickup.*` still handles `pickup.expired`
+  (`deps/statifier/lib/statifier/chart.ex`, `check_accepts/2`, statifier
+  2.9.0, the version `mix.lock` resolves).
+- **The finding.** `{:timer_event_removed, state_id, event}`, an arm of
+  `t:StatifierPersistence.Executions.migration_finding/0`
+  (`lib/statifier_persistence/executions.ex`), answered inside
+  `{:migration_refused, findings}` with every other finding of the
+  validation (`lib/statifier_persistence/executions.ex`,
+  `validate_loaded/5`).
+- **Static.** The check reads the plan and the two machines and no pin
+  source, so it refuses whether or not a source is supplied or counts a
+  pending timer (`removed_event_findings/3`).
+- **Not refused.** A send whose event is an `eventexpr`, or that writes a
+  `target` or `targetexpr`, a `typeexpr`, or a `type` naming another event
+  processor (`self_event/1`); and a literal event the from chart never
+  listened for either (`removed_event_findings/3`).
+- **What a refusal writes.** Nothing under `on_failure: :refuse`; under
+  `:park` the execution is parked on the from hash, as for every finding of
+  this validation (`lib/statifier_persistence/executions.ex`,
+  `migrate_loaded/6`).
+- **Where it is enforced.** In the transform every validation against the
+  execution runs (`lib/statifier_persistence/executions.ex`,
+  `validate_loaded/5`), so `migrate/4`, each execution `migrate_tree/4`
+  moves, and `migrate_batch/3`'s dry run all answer it; the dry run answers
+  `{:would_refuse, {:migration_refused, findings}}`
+  (`lib/statifier_persistence/executions.ex`, `preview/3`).
+
+**What stays as it was.** Decision 6's mapped timer keeps its deadline in
+the host's queue, and "What this record does not decide" still leaves
+cancelling or rescheduling a mapped timer out; a plan this check refuses
+writes no timer and no position.
+
+**The code has shipped.** statifier_persistence 0.22.0 carries it: the
+0.22.0 section of `CHANGELOG.md` names the refusal under Changed, and
+`test/statifier_persistence/executions_migrate_test.exs`, "a kept timer
+whose event the to chart no longer handles", pins the refusal, the park,
+the dry run and the sends that are not refused.
