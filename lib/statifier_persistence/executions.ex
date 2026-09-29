@@ -113,23 +113,23 @@ defmodule StatifierPersistence.Executions do
   each executor call, and of the call to an event builder handed to
   `step/5`, which runs at the same point, this module marks the execution
   as in a step in the calling process, and every public door that takes
-  an execution id -
-  `create/4`, `step/5`, `fail/4`, `cancel/3`, `unpark/3`, `migrate/4`,
-  `migrate_tree/4` and `inputs/2` - answers
+  an execution id - `create/4`, `step/5`, `fail/4`, `cancel/3`,
+  `unpark/3`, `migrate/4`, `migrate_tree/4` and `inputs/2` - answers
   `{:error, {:reentrant_step, execution_id}}` for a marked id before it
   reads or writes anything. `migrate_tree/4` checks its root and every id
   its `plans` name. `migrate_batch/3` takes no execution id, but its dry
   run answers `{:would_refuse, {:reentrant_step, execution_id}}` for a
   marked id among the executions it lists, before it reads that one, as
   its apply answers `{:refused, {:reentrant_step, execution_id}}` for it
-  through `migrate/4` or `migrate_tree/4`. Without the refusal a nested door would read the
-  position the outer step has not written yet, write its own, and have it
-  overwritten when the outer step persists, with nothing reported; the
-  Ecto adapter's lock would not stop it, because its advisory lock is
-  re-entrant for the connection that already holds it. A door called for
-  a different execution id, or from another process, is unaffected, and a
-  host that never calls back into the execution being stepped sees no
-  change (ADR-0004's 2026-09-26 Amendment).
+  through `migrate/4` or `migrate_tree/4`. Without the refusal a nested
+  door would read the position the outer step has not written yet, write
+  its own, and have it overwritten when the outer step persists, with
+  nothing reported; the Ecto adapter's lock would not stop it, because
+  its advisory lock is re-entrant for the connection that already holds
+  it. A door called for a different execution id, or from another
+  process, is unaffected, and a host that never calls back into the
+  execution being stepped sees no change (ADR-0004's 2026-09-26
+  Amendment).
 
   Concurrent deliveries to one execution are ordered by a pluggable per-execution
   serialization strategy (ADR-0004 decision 5): every entry point runs its
@@ -3799,8 +3799,8 @@ defmodule StatifierPersistence.Executions do
   # whose executor, or whose event builder, is running in this process,
   # innermost first. It is a list rather than one id because an executor
   # may step a different execution, whose own executor then runs inside
-  # the first one's: both
-  # are in a step until their calls return, and a door for either refuses.
+  # the first one's: both are in a step until their calls return, and a
+  # door for either refuses.
   @in_step_key {__MODULE__, :in_step}
 
   # The guard every public door that takes an execution id runs first,

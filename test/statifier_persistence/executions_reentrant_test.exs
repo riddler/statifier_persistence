@@ -355,6 +355,45 @@ defmodule StatifierPersistence.ExecutionsReentrantTest do
       assert leaves(store, "reentrant-builder-outer", machine) == ["b"]
       assert leaves(store, "reentrant-builder-other", machine) == ["x"]
     end
+
+    # ADR-0004's 2026-09-26 Amendment marks the execution in the calling
+    # process only, so a task the builder spawns is another process and
+    # its door for the same execution id is served, not refused. The
+    # nested step is handed the admitting strategy because the outer step
+    # holds the in-memory adapter's lock while the builder waits on the
+    # task.
+    # sabotage: make not_in_step/1 also read the mark from the dictionary
+    # of every process in the caller's `$callers` -> red, the task's step
+    # answered {:error, {:reentrant_step, _}} where a served step was
+    # asserted. Verified red, reverted from a copy.
+    test "a task the builder spawns is served for the same execution", %{
+      store: store,
+      machine: machine
+    } do
+      create!(store, "reentrant-builder-task", machine)
+
+      result =
+        step_building(store, "reentrant-builder-task", machine, fn id ->
+          fn ->
+            Executions.step(
+              store,
+              id,
+              machine,
+              Event.external("other"),
+              [executor: &quiet/2] ++ @nested
+            )
+          end
+          |> Task.async()
+          |> Task.await()
+        end)
+
+      assert {:ok, %Execution{status: :active}, _machine_state} = result
+      assert_received {:nested, {:ok, %Execution{status: :active}, task_state}}
+
+      assert task_state
+             |> MachineState.active_leaf_states()
+             |> Enum.map(&Machine.id(machine, &1)) == ["x"]
+    end
   end
 
   describe "what the refusal leaves alone" do
