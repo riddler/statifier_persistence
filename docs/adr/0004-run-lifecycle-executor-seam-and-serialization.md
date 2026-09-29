@@ -738,3 +738,42 @@ skips. Every cite was read on `main` at `39bdcb4`, in
   `{:refused, {:reentrant_step, execution_id}}`, since `migrate_tree/4`
   checks the mark on its root first (`migrate_tree/4`). ADR-0017 carries
   a Note of the same date that reads its own text with this one.
+
+## Note (2026-09-28, sp-nylp): the Amendment's refusal has a second conformance case, under the adapter's own lock
+
+This Note decides nothing and changes no status line. The 2026-09-26
+Amendment's "Why here" paragraph says the conformance suite carries one
+case for the refusal, and the "The conformance case" bullet of "Note
+(2026-09-27, sp-zwxf): the sp-a2ee Amendment is accepted" names the same
+one. Both were right when written. Since statifier_persistence 0.22.0
+the suite carries a second case, and both passages are read with this
+Note. Every cite was read on `main` at `29b9851`.
+
+- **The first case, unchanged.** "facade: a door called from inside its
+  own execution's executor refuses, and the outer step is stored"
+  (`StatifierPersistence.Testing.StorageConformance`) runs the refusal
+  over a serialization strategy that admits its own holder, so no
+  adapter's `lock_execution/3` is in its path. It needs no
+  `lock_execution/3`, carries no tag and runs for every adapter.
+- **The second case.** "adapter: a door called from inside its own
+  executor refuses before it reaches lock_execution/3"
+  (`StatifierPersistence.Testing.StorageConformance`) runs the same
+  refusal through the default strategy, whose `with_execution/3` hands
+  the tail to the adapter's own `lock_execution/3`
+  (`StatifierPersistence.Serialization.AdapterLock`, `with_execution/3`).
+  The nested `step/5` must answer `{:error, {:reentrant_step,
+  execution_id}}` while the outer step holds that lock, and the outer
+  step's position is the one stored. The outer step runs in a task
+  bounded by a timeout, so a lock that waits on its own holder fails the
+  case instead of hanging it.
+- **Who runs it.** Authors of a storage adapter of their own who run the
+  shipped suite against it. The case is generated only when the adapter
+  under test exports `lock_execution/3`, beside the two lock cases the
+  suite already had, and it carries `@tag :postgres` with them
+  (`StatifierPersistence.Testing.StorageConformance`, its moduledoc's
+  `lock_execution/3` paragraph). An adapter that does not export the
+  callback never sees it.
+
+The Amendment's rule, its error and what it leaves alone are unchanged;
+the second case checks the Amendment's own "the refusal comes before any
+lock is asked for" against each adapter's lock rather than a stand-in.

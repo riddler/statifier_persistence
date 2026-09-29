@@ -346,3 +346,14 @@ Schema: **NONE**. The `statifier` floor stays `~> 2.9`.
 - **If you match `t:StatifierPersistence.Executions.migration_finding/0`
   exhaustively**, add a clause for `{:timer_event_removed, state_id,
   event}`, or a catch-all.
+- **If you run `StatifierPersistence.Testing.StorageConformance` against a
+  storage adapter of your own that exports `lock_execution/3`**, your
+  suite now runs one more case, "adapter: a door called from inside its
+  own executor refuses before it reaches lock_execution/3". It is the
+  0.21.0 re-entrancy case again, run through the default serialization
+  strategy and so under your adapter's own lock: the nested door must
+  refuse before it asks for the lock, whether your lock admits its own
+  holder or would wait for it. It carries `@tag :postgres` with the two
+  lock cases, so a host running `StatifierPersistence.Storage.Ecto` off
+  Postgres now excludes five cases rather than four. An adapter that does
+  not export `lock_execution/3`: **NONE**.
