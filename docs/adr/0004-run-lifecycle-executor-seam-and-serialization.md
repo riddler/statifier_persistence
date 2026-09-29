@@ -845,7 +845,7 @@ What was re-read before the flip:
 
 ## Amendment (2026-09-28, sp-xytv): a failed position save after the effects rolls back the executor's writes
 
-Status of this amendment: proposed (2026-09-28, sp-xytv). The record above
+Status of this amendment: accepted (2026-09-28, sp-xytv). The record above
 stays accepted; this amendment is proposed until its code has shipped in a
 published version.
 
@@ -932,3 +932,42 @@ rollback to the caller", "under a host's own strategy a failed position
 save answers as before and commits" and "a budget-exhausted step still
 commits its :failed record and its executor's writes". The changelog
 names the change under Changed.
+
+## Note (2026-09-29, sp-fnay): the sp-xytv Amendment is accepted
+
+The 2026-09-28 sp-xytv Amendment is accepted on 2026-09-29, under the
+operator's standing grant to flip a record whose code has shipped. The
+code that implements it shipped in statifier_persistence 0.23.0 (tag
+`v0.23.0`, `e3d3ab4`) under a Changed changelog line. That Amendment's
+own status line flips in place from proposed to accepted; its sentence
+that it "is proposed until its code has shipped in a published version"
+is met by this Note, and the record above stays accepted. Every cite
+below was read at `e3d3ab4`, the tag, which is also `main`: no commit
+has landed on `main` since the tag.
+
+What was re-read before the flip:
+
+- **The one case.** In `lib/statifier_persistence/storage/ecto.ex`,
+  `lock_execution/3` reads `repo.in_transaction?()` before it opens its
+  transaction, and `roll_back_if/3` calls `repo.rollback/1` on the
+  marker only when that read found no transaction; the marker is
+  answered as the body's result either way.
+- **The marker.** In `lib/statifier_persistence/executions.ex`,
+  `failed_write/2` wraps the error for an `:update` only and answers an
+  `{:insert, _}` failure as it is; `serialized/5` hands the marker to
+  the lock under `StatifierPersistence.Serialization.AdapterLock` alone
+  (`marked_for/2`), unwraps it inside the body under any other
+  strategy, and unwraps the result on every path (`unmarked/1`).
+- **What still commits.** `tail_result/6` answers
+  `{:error, {:budget_exhausted, payload}}` without the marker;
+  `record_and_settle/5` in `lib/statifier_persistence/driver.ex`
+  records the outcome and then settles, outside a step's tail.
+- **The cases.** `test/statifier_persistence/ecto/step_timer_store_transaction_test.exs`
+  carries the four cases the Amendment names, by those names, and the
+  rollback case asserts the input log is unchanged.
+- **The citations outside `lib/`.** The README's "Writing inside a
+  caller's transaction" section, the 2026-09-23 sp-g7q Note above, and
+  statifier-ex's ADR-0074 decision 2 (read on that repo's `main` at
+  `f880ac17`) say what the Amendment cites them for.
+- **The changelog.** The 0.23.0 section of `CHANGELOG.md` names the
+  rollback under Changed.
