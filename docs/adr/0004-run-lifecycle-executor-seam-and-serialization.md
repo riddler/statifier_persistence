@@ -777,3 +777,37 @@ Note. Every cite was read on `main` at `29b9851`.
 The Amendment's rule, its error and what it leaves alone are unchanged;
 the second case checks the Amendment's own "the refusal comes before any
 lock is asked for" against each adapter's lock rather than a stand-in.
+
+## Amendment (2026-09-28, sp-ngnb): the event builder's call is a marked window of the rule
+
+Status of this amendment: proposed (2026-09-28, sp-ngnb). The record
+above stays accepted, and so does the 2026-09-26 Amendment.
+
+Pure addition: nothing above is edited. The 2026-09-26 Amendment's rule
+marks the execution for the length of each executor call. The
+2026-09-27 sp-62q0 Note added a second window to that rule while calling
+itself a Note; this Amendment is where the rule records it, and that
+Note stays as written and is read with this one.
+
+**The rule, widened.** The execution is marked as in a step in the
+calling process for the length of two kinds of call, not one: each
+executor call, as the 2026-09-26 Amendment says, and the call that
+resolves the event handed to `step/5`, which is where an event builder
+of the 2026-09-01 Amendment runs. That second window opens once the
+execution's position is loaded and closes when the builder returns,
+before any executor call or write of the step; the mark is restored on
+every exit from it, as for an executor call. The mark is set around
+that call by `step_loaded/8`
+(`lib/statifier_persistence/executions.ex`, read at `bcc9f9a`).
+
+**What does not move.** The doors that check the mark, the error they
+answer, and what the 2026-09-26 Amendment's "What the rule leaves
+alone" paragraph leaves alone (as the later Notes read it) are
+unchanged: inside a builder, a door called for a different execution id
+proceeds, and a call from another process is not refused. A builder
+that calls no door for its own execution, and a caller passing an
+`%Event{}`, see no change.
+
+**Shipped.** The code shipped in statifier_persistence 0.22.0 (tag
+`v0.22.0`), under a Changed line of its changelog; this Amendment adds no
+code.
