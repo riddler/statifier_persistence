@@ -698,3 +698,43 @@ nested effect.
 Nothing in the Amendment moves: the doors, the error and what the rule
 leaves alone stay as written, and `inputs/2` called for a different
 execution, or from another process, answers as before.
+
+## Note (2026-09-28, sp-2ay1): the Amendment's own "What the rule leaves alone" paragraph, and the refusal ahead of ADR-0017's skips
+
+This Note decides nothing and changes no status line. It extends the
+reading the 2026-09-27 sp-4wwq Note gives to one more paragraph, and
+says where the dry run's refusal sits against ADR-0017 decision 2's
+skips. Every cite was read on `main` at `39bdcb4`, in
+`lib/statifier_persistence/executions.ex`.
+
+- **The acceptance Note, by heading.** The line the sp-4wwq Note calls
+  the acceptance Note's "What the rule leaves alone" line is the "What
+  the rule leaves alone" bullet of "Note (2026-09-27, sp-zwxf):
+  the sp-a2ee Amendment is accepted".
+- **The Amendment's own paragraph.** The 2026-09-26 Amendment's "What
+  the rule leaves alone" paragraph says the doors that take no execution
+  id, `migrate_batch/3` among them, check nothing themselves. It is read
+  with the sp-4wwq Note, as the acceptance Note's bullet is: the dry run
+  of `migrate_batch/3` checks the mark for each execution it lists
+  (`batch_one/3`, its `dry_run: true` clause). The rest of the paragraph
+  stands: `cascade_cancel/3`, `retire_chart/4` and `executions_on/2` do
+  not call `not_in_step/1` (`cascade_cancel/3`, `retire_chart/4`,
+  `executions_on/2`), and the apply of `migrate_batch/3` meets the
+  refusal through `migrate/4` or `migrate_tree/4` (`apply_one/2`,
+  `apply_tree/2`).
+- **The sp-4wwq Note's second paragraph** is read as two claims, one
+  anchor each: before that Note's change the dry run checked no mark
+  (`batch_one/3`, read at `fb277f6`), and since it the check is the
+  dry run's first step for each execution (`batch_one/3`, read at
+  `39bdcb4`).
+- **The refusal comes before decision 2's skips.** The dry run checks
+  the mark before it reads the execution (`batch_one/3`), and ADR-0017
+  decision 2's `{:skipped, :terminal}` and `{:skipped, :linked}` are
+  taken from the record it reads (`preview_skip/1`). The check reads no
+  record, so a marked execution answers `{:would_refuse,
+  {:reentrant_step, execution_id}}` whatever its status or linkage: an
+  execution being stepped that carries a linkage answers that, not
+  `{:skipped, :linked}`. The apply answers the same execution
+  `{:refused, {:reentrant_step, execution_id}}`, since `migrate_tree/4`
+  checks the mark on its root first (`migrate_tree/4`). ADR-0017 carries
+  a Note of the same date that reads its own text with this one.

@@ -564,3 +564,30 @@ cite was read on `main` at `76e423c`, in
   read. The test "a malformed option raises before anything is read" in
   `test/statifier_persistence/executions_migrate_batch_test.exs` pins
   the `ArgumentError` case.
+
+## Note (2026-09-28, sp-2ay1): the dry run's re-entrancy refusal comes before decision 2's skips
+
+This Note decides nothing and changes no status line; decision 2's
+answers, outcomes and counts are unchanged. It reads two lines of this
+record with ADR-0004's 2026-09-27 sp-4wwq Note, under which the dry run
+answers an execution whose executor, or whose event builder, is running
+in the calling process `{:would_refuse, {:reentrant_step,
+execution_id}}`. Every cite was read on `main` at `39bdcb4`, in
+`lib/statifier_persistence/executions.ex`.
+
+- **The order.** The dry run checks the mark before it reads the
+  execution (`batch_one/3`, its `dry_run: true` clause), and decision
+  2's skips are taken from the record it reads (`preview_skip/1`). So
+  the refusal comes first, and a marked execution answers
+  `:would_refuse` whatever its status or linkage. The typedoc says the
+  refusal is "answered before it is read" (`t:batch_preview/0`).
+- **"What this record does not decide".** Its bullet "A dry run of a
+  linked execution's tree; decision 2 answers it `{:skipped, :linked}`"
+  holds for every linked execution but one marked in the calling
+  process, which answers `{:would_refuse, {:reentrant_step,
+  execution_id}}`, counted under `:would_refuse`.
+- **"The batch checks no mark itself".** That sentence of "Note
+  (2026-09-27, sp-4qw6): accepted" holds for the apply
+  (`batch_one/3`, its `dry_run: false` clause), which meets the refusal
+  through `migrate/4` or `migrate_tree/4` (`apply_one/2`,
+  `apply_tree/2`); the dry run now checks the mark itself.
