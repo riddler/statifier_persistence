@@ -755,6 +755,48 @@ defmodule StatifierPersistence.ExecutionsMigrateTest do
       assert stored(ctx, "hold-batched") == before
     end
 
+    # The hold waits in `routing`, so `awaiting_pickup` has scheduled
+    # nothing for it, and the pin source passed counts no pending timer (a
+    # plan that maps every timer owner asks none): the check reads the two
+    # charts, never the execution's configuration or a count.
+    #
+    # sabotage: made transform_export/5 keep only the findings whose state is
+    # in the exported configuration -> red over both adapters: the hold in
+    # `routing` migrated. Verified red, reverted from a copy.
+    test "refuses a hold outside the kept state with no timer counted", ctx do
+      {from_machine, to_machine, plan} = pair!(ctx, @hold_before, @hold_lapsed)
+
+      {:ok, _execution, _ms} =
+        Executions.create(ctx.store, "hold-en-route", from_machine, executor: &quiet/2)
+
+      {:ok, _execution, _ms} =
+        Executions.step(
+          ctx.store,
+          "hold-en-route",
+          from_machine,
+          Event.external("copy.available"),
+          step_opts()
+        )
+
+      before = stored(ctx, "hold-en-route")
+
+      {:ok, position} =
+        Storage.load_execution_position(ctx.store, "hold-en-route", from_machine)
+
+      assert active_ids(position) == ["hold", "routing"]
+
+      assert Executions.migrate(ctx.store, "hold-en-route", plan,
+               from_machine: from_machine,
+               to_machine: to_machine,
+               pin_sources: [QuietTimerQueue]
+             ) ==
+               {:error,
+                {:migration_refused,
+                 [{:timer_event_removed, "awaiting_pickup", "pickup.expired"}]}}
+
+      assert stored(ctx, "hold-en-route") == before
+    end
+
     # sabotage: made delayed_sends_in/2's If clause answer [] -> red over
     # both adapters: the send inside the branch was not read. Verified red,
     # reverted from a copy.

@@ -975,7 +975,10 @@ defmodule StatifierPersistence.Executions do
     not a timer is pending. A send whose event is an `eventexpr`, or that
     writes a `target`, a `targetexpr`, a `typeexpr` or another event
     processor's `type`, is never refused this way.
-    Handle the event in the to chart, or drop the state.
+    Handle the event in the to chart, or drop the state. A plan that drops
+    it is then checked against the pin sources in `opts` (ADR-0013 decision
+    6): with none supplied it answers `{:no_pin_source, states}`, and a
+    source that cannot answer refuses it.
   - `{:illegal_configuration, state_ids}` - the transformed configuration
     is not a legal configuration of the to chart (SCXML 3.11, with the
     root added): a compound state in it without exactly one child state in
