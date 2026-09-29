@@ -39,9 +39,8 @@ defmodule StatifierPersistence.Migration.TransformTest do
     Transform.timer_owners(machine)
   end
 
-  # sabotage: dropped the onentry and onexit blocks from
-  # owns_delayed_send?/2 -> red: the answer was []. Verified red, reverted
-  # from a copy.
+  # sabotage: dropped the onentry and onexit blocks from content_blocks/2
+  # -> red: the answer was []. Verified red, reverted from a copy.
   test "a delayed send in onentry makes its state an owner" do
     assert owners("""
            <state id="hold">
@@ -51,8 +50,8 @@ defmodule StatifierPersistence.Migration.TransformTest do
            """) == ["hold"]
   end
 
-  # sabotage: made owns_delayed_send?/2 read onentry blocks only (onexit
-  # left out) -> red: the answer was []. Verified red, reverted from a copy.
+  # sabotage: made content_blocks/2 read onentry blocks only (onexit left
+  # out) -> red: the answer was []. Verified red, reverted from a copy.
   test "a delayed send in onexit makes its state an owner" do
     assert owners("""
            <state id="hold">
@@ -74,7 +73,7 @@ defmodule StatifierPersistence.Migration.TransformTest do
            """) == ["hold"]
   end
 
-  # sabotage: dropped `state.transitions` from owns_delayed_send?/2's list
+  # sabotage: dropped `state.transitions` from content_blocks/2's list
   # -> red: the answer was []. Verified red, reverted from a copy.
   test "a delayed send in a transition makes the transition's source an owner" do
     assert owners("""
@@ -91,7 +90,7 @@ defmodule StatifierPersistence.Migration.TransformTest do
            """) == ["placed"]
   end
 
-  # sabotage: dropped `state.initial_transition` from owns_delayed_send?/2's
+  # sabotage: dropped `state.initial_transition` from content_blocks/2's
   # list -> red: the answer was []. Verified red, reverted from a copy.
   test "a delayed send in an <initial> element's transition makes its parent an owner" do
     assert owners("""
@@ -108,8 +107,8 @@ defmodule StatifierPersistence.Migration.TransformTest do
            """) == ["hold"]
   end
 
-  # sabotage: dropped `state.history_default` from owns_delayed_send?/2's
-  # list -> red: the answer was []. Verified red, reverted from a copy.
+  # sabotage: dropped `state.history_default` from content_blocks/2's list
+  # -> red: the answer was []. Verified red, reverted from a copy.
   test "a delayed send in a history default makes the history state an owner" do
     assert owners("""
            <state id="hold" initial="placed">
@@ -125,8 +124,8 @@ defmodule StatifierPersistence.Migration.TransformTest do
            """) == ["hold_history"]
   end
 
-  # sabotage: dropped the finalize blocks from owns_delayed_send?/2 -> red:
-  # the answer was []. Verified red, reverted from a copy.
+  # sabotage: dropped the finalize blocks from content_blocks/2 -> red: the
+  # answer was []. Verified red, reverted from a copy.
   test "a delayed send in an <invoke>'s <finalize> makes the invoking state an owner" do
     assert owners("""
            <state id="hold">

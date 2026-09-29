@@ -771,6 +771,22 @@ defmodule StatifierPersistence.ExecutionsMigrateTest do
               _before} = migrate_onto(ctx, "hold-nested", from, @hold_lapsed)
     end
 
+    # sabotage: made delayed_sends_in/2's Foreach clause answer [] -> red
+    # over both adapters: the send inside the loop body was not read and
+    # the hold migrated. Verified red, reverted from a copy.
+    test "a delayed send nested in a <foreach> body is refused too", ctx do
+      from =
+        String.replace(
+          @hold_before,
+          ~s(<send id="pickup" event="pickup.expired" delay="259200s"/>),
+          ~s(<foreach array="[branch]" item="desk"><send id="pickup" event="pickup.expired" delay="259200s"/></foreach>)
+        )
+
+      assert {{:error,
+               {:migration_refused, [{:timer_event_removed, "awaiting_pickup", "pickup.expired"}]}},
+              _before} = migrate_onto(ctx, "hold-looped", from, @hold_lapsed)
+    end
+
     # sabotage: made removed_event_findings/3 refuse every delayed send of
     # every kept state, whatever its event -> red over both adapters: the
     # eventexpr send was refused. Verified red, reverted from a copy.
@@ -861,6 +877,25 @@ defmodule StatifierPersistence.ExecutionsMigrateTest do
 
       assert {{:ok, %Execution{status: :active}, _migrated}, _before} =
                migrate_onto(ctx, "hold-courier", from, @hold_lapsed)
+    end
+
+    # A `typeexpr` has no clause of its own in built_in_type?/1: its last
+    # clause answers false for it, so the send is not known to reach the
+    # execution itself, even when the expression names the SCXML processor.
+    #
+    # sabotage: made built_in_type?/1's last clause answer true -> red over
+    # both adapters: the typeexpr send was refused. Verified red, reverted
+    # from a copy.
+    test "a send whose type is a typeexpr is not refused", ctx do
+      from =
+        String.replace(
+          @hold_before,
+          ~s(<send id="pickup" event="pickup.expired"),
+          ~s(<send id="pickup" event="pickup.expired" typeexpr="'scxml'")
+        )
+
+      assert {{:ok, %Execution{status: :active}, _migrated}, _before} =
+               migrate_onto(ctx, "hold-typeexpr", from, @hold_lapsed)
     end
   end
 end
