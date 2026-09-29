@@ -6,9 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Entries for unreleased work are not written here directly. Each issue drops a
-fragment in [`changelog.d/`](https://github.com/riddler/statifier_persistence/blob/v0.22.0/changelog.d/README.md); the fragments are assembled
+fragment in [`changelog.d/`](https://github.com/riddler/statifier_persistence/blob/v0.23.0/changelog.d/README.md); the fragments are assembled
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
+
+## [0.23.0] 2026-09-28
+
+Feature release: under the default serialization strategy, a create,
+migration or tree migration that races a retirement of its chart no
+longer leaves an execution on the retired chart on
+`StatifierPersistence.Storage.Ecto` over Postgres or on the in-memory
+adapter, and on `StatifierPersistence.Storage.Ecto` a step whose
+position save answers an error after its executor ran rolls the
+executor's writes back, when its lock opened the outermost
+transaction, instead of committing them without the position.
+
+Upgrading: no schema migration. The `statifier` floor stays `~> 2.9`.
+The writer that loses a race with a retirement answers
+`{:error, {:chart_retired, info}}`, per node inside
+`{:tree_refused, refusals}` for a tree refused by its re-read of the
+chart, or the retirement answers `{:error, {:pinned, counts}}`; both
+answers already existed. `StatifierPersistence.Executions.step/5`
+answers the same error as before when its writes roll back. See
+`docs/upgrading.md`, "0.22 to 0.23".
+
+### Added
+
+- `StatifierPersistence.Testing.StorageConformance` gains two cases for an adapter that exports `retire_chart/3`: a create, and a migration, whose hash is retired after their first check and before their write must answer `{:error, {:chart_retired, info}}` and write nothing. They run under a serialization strategy of the suite's own, need no `lock_execution/3` and carry no tag.
+
+### Changed
+
+- A create, migration or tree migration that races a retirement of its chart no longer leaves an execution on the retired chart on the Ecto adapter over Postgres or on the in-memory adapter: either the write answers `{:error, {:chart_retired, info}}` or the retirement answers `{:error, {:pinned, counts}}`. A tree refused by its re-read of the chart carries that arm per node inside `{:tree_refused, refusals}`; on the in-memory adapter a tree that loses at its write answers the bare `{:error, {:chart_retired, info}}`, and a create that loses at its insert is refused after its executor has run the create's effects. On the Ecto adapter over Postgres the write reads the chart's tombstone under a per-chart shared advisory lock it holds until it commits, and a retirement takes that lock exclusively first; on another backend, and under a host `serialization:` strategy, the window is narrowed, not closed. The winning interleaving answers what it answered before.
+- A step whose position save answers an error after its executor ran now rolls back the executor's writes through the store's repo, and the step's input log entry, instead of committing them without the position, when it runs on `StatifierPersistence.Storage.Ecto` under the default serialization strategy and its lock opened the outermost transaction; `StatifierPersistence.Executions.step/5` answers the same error as before, and delivering the event again re-drives the whole step. Inside a caller's own transaction, under a host `serialization:` strategy and on the in-memory adapter nothing changes, and a budget-exhausted step still commits its `:failed` record.
 
 ## [0.22.0] 2026-09-28
 
