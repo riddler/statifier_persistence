@@ -135,8 +135,12 @@ therefore reports every other case passing and exactly those five
 excluded:
 
 ```
-31 tests, 0 failures, 5 excluded
+... tests, 0 failures, 5 excluded
 ```
+
+The test total is left out on purpose: it grows with every conformance
+case this package adds, and a run is read by its failures and its
+exclusions, not by its total.
 
 Run it once **without** `--exclude postgres` as well, and read the
 failures. Five failures, all five of them the tagged cases, is the proof

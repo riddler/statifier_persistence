@@ -463,7 +463,7 @@ Postgres-only `lock_execution/3` and raises mid-execution.
 The five conformance cases those three callbacks generate carry
 `@tag :postgres`, so such a host runs the shipped suite green and honest:
 
-    mix test --exclude postgres   #=> 31 tests, 0 failures, 5 excluded
+    mix test --exclude postgres   #=> ... tests, 0 failures, 5 excluded
 
 [Running on a backend that is not Postgres](docs/non-postgres-backends.md)
 is the full guide: what is Postgres-only and why, how to write the
