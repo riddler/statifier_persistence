@@ -217,6 +217,50 @@ defmodule StatifierPersistence.Storage.EctoTest do
       assert [full_sql] = full
       assert full_sql =~ "chart_blob"
     end
+
+    # The retirement decides "no row" before it counts anything; that
+    # decision needs only whether the row exists, so the statement making
+    # it selects neither chart blob. The UPDATE that follows names both
+    # blobs in its SET (it nulls them), so the assertion is on the
+    # existence statement alone.
+    #
+    # sabotage: restored the full-row
+    # `repo(opts).get_by(chart_schema(opts), content_hash: content_hash)`
+    # in tombstone/3 -> red, the existence statement selected chart_blob
+    # and identity_blob. Verified red, reverted from a copy.
+    test "retire_chart/3 decides the row exists without selecting either chart blob", %{
+      default: opts
+    } do
+      :ok =
+        Storage.Ecto.save_chart(opts, %{
+          content_hash: "sha256:ecto-retire-exists",
+          identity_blob: <<1, 2, 3>>,
+          chart_blob: <<4, 5, 6>>
+        })
+
+      retirement = %{
+        retired_at: DateTime.utc_now(),
+        retired_by: "circulation-desk",
+        sources: %{}
+      }
+
+      retired =
+        statements(fn ->
+          assert {:ok, %{retired_by: "circulation-desk"}} =
+                   Storage.Ecto.retire_chart(opts, "sha256:ecto-retire-exists", retirement)
+        end)
+
+      # The hash's exclusive advisory lock stays the first statement of
+      # the retirement's transaction (ADR-0012's 2026-09-28 Amendment);
+      # the existence check follows it, and the conditional UPDATE writes
+      # the tombstone.
+      assert ["begin", lock_sql, exists_sql, update_sql, "commit"] = retired
+      assert lock_sql =~ "pg_advisory_xact_lock("
+      assert exists_sql =~ "content_hash"
+      refute exists_sql =~ "chart_blob"
+      refute exists_sql =~ "identity_blob"
+      assert update_sql =~ "UPDATE"
+    end
   end
 
   # Every statement the repo runs on this process while `fun` does.

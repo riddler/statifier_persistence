@@ -904,11 +904,12 @@ if Code.ensure_loaded?(Ecto) do
       # the conditional UPDATE's own `retired_at IS NULL` clause and to
       # `written/4`, which reads the tombstone back: one guard, in the
       # statement that writes, rather than a pre-check the statement
-      # then repeats.
-      if is_nil(repo(opts).get_by(chart_schema(opts), content_hash: content_hash)) do
-        {:error, :chart_not_found}
-      else
+      # then repeats. The miss needs only whether the row exists, so the
+      # check selects no column of it and neither chart blob is read.
+      if repo(opts).exists?(from(c in chart_schema(opts), where: c.content_hash == ^content_hash)) do
         counted(opts, content_hash, retirement)
+      else
+        {:error, :chart_not_found}
       end
     end
 
