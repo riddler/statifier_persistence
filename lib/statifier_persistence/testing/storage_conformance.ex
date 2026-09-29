@@ -68,7 +68,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
   The optional `c:StatifierPersistence.Storage.Adapter.lock_execution/3` gets the
   same treatment at generation time: when the adapter under test exports
   it, the suite generates the per-execution lock tests (mutual exclusion of two
-  concurrent bodies, release after a raising fun, and a door called from
+  concurrent bodies, release after a raising or throwing fun, and a door called from
   inside its own executor refusing before it reaches the lock); when it
   does not, they are not generated at all - exporting the callback is what
   opts an adapter into its contract.
@@ -2351,8 +2351,22 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # {:ok, fun.()}) -> red, the raise leaks the lock and the
         # reacquisition below times out (Task.yield returns nil). Verified
         # red, reverted.
+        #
+        # The throw half is ADR-0004's 2026-09-28 Amendment: a step whose
+        # position save answers an error after its effects leaves the lock by
+        # a throw, so that an adapter with a transaction rolls it back. Every
+        # adapter lets the throw reach the caller as it was thrown and
+        # releases the lock; what the body wrote is undone only where the
+        # adapter has a transaction to undo it with (the Ecto adapter), and
+        # kept where it has none (the in-memory adapter).
+        #
+        # sabotage: in StatifierPersistence.Storage.InMemory's lock_execution/3,
+        # caught a throw from fun and returned {:ok, thrown} -> red, "Expected
+        # to catch throw, got nothing". Verified red, restored from a copy.
         @tag :postgres
-        test "adapter: lock_execution/3 releases the lock after a raising fun", %{store: store} do
+        test "adapter: lock_execution/3 releases the lock after a raising or throwing fun", %{
+          store: store
+        } do
           assert_raise RuntimeError, "lock body boom", fn ->
             @conformance_adapter.lock_execution(
               store.opts,
@@ -2362,6 +2376,14 @@ defmodule StatifierPersistence.Testing.StorageConformance do
               end
             )
           end
+
+          assert catch_throw(
+                   @conformance_adapter.lock_execution(
+                     store.opts,
+                     "execution-conformance-lock-raise",
+                     fn -> throw({:lock_body, :thrown}) end
+                   )
+                 ) == {:lock_body, :thrown}
 
           task =
             Task.async(fn ->

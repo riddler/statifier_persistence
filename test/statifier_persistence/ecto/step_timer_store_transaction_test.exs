@@ -9,7 +9,10 @@ defmodule StatifierPersistence.Ecto.StepTimerStoreTransactionTest do
   A crash after the executor has handled a step's cancel (or a create's
   delayed send), and before the position is saved, must leave neither half
   committed: never a saved position past the cancel with the cancelled
-  row still pending.
+  row still pending. A step whose position save answers an error after
+  the executor ran rolls the executor's writes back with it (ADR-0004's
+  2026-09-28 Amendment), while a budget-exhausted step still commits its
+  `:failed` record and what its executor wrote.
 
   Live, outside the SQL sandbox, for `CallerTransactionTest`'s reason: the
   sandbox runs the step's `repo.transaction/1` as a savepoint inside the
@@ -44,6 +47,13 @@ defmodule StatifierPersistence.Ecto.StepTimerStoreTransactionTest do
               <cancel sendid="hold_expiry"/>
           </transition>
           <transition event="hold.expired" target="released"/>
+          <transition event="reported_lost" target="searching">
+              <cancel sendid="hold_expiry"/>
+          </transition>
+      </state>
+      <state id="searching">
+          <onentry><raise event="shelf_checked"/></onentry>
+          <transition event="shelf_checked" target="searching"/>
       </state>
       <state id="on_loan">
           <onentry><log label="loan_started"/></onentry>
@@ -127,12 +137,65 @@ defmodule StatifierPersistence.Ecto.StepTimerStoreTransactionTest do
     assert executions(execution_id) == 0
   end
 
+  # sabotage: in Executions' failed_write/2, answered the :update write's
+  # error as it is instead of through rolled_back/1 -> red on the first
+  # assertion after the step: the cancel's removal committed (no pending
+  # row). Verified red, restored from a copy.
+  test "a step whose position save answers an error rolls back the executor's timer writes",
+       %{store: store, machine: machine, execution_id: execution_id} do
+    {:ok, _execution, _state} = create(store, execution_id, machine, executor())
+    assert pending(execution_id) == ["hold_expiry"]
+    inputs_before = inputs(execution_id)
+
+    # The cancel's removal runs and returns; then the execution row is
+    # gone from under the step, through the same transaction, so the
+    # position save that follows the effects answers an error.
+    assert {:error, :execution_not_found} =
+             step(store, execution_id, machine, "picked_up", executor(remove_on: "loan_started"))
+
+    assert pending(execution_id) == ["hold_expiry"]
+    assert executions(execution_id) == 1
+    assert leaves(store, execution_id, machine) == ["on_hold"]
+    assert inputs(execution_id) == inputs_before
+
+    # Redelivered, the whole step runs again and commits both halves.
+    assert {:ok, %{status: :active}, _state} =
+             step(store, execution_id, machine, "picked_up", executor())
+
+    assert pending(execution_id) == []
+    assert leaves(store, execution_id, machine) == ["on_loan"]
+  end
+
+  # sabotage: in Executions' failed_write/2, rolled back every error a
+  # step's tail answers (tail_result/6's budget arm included) -> red: the
+  # :failed record and the cancel's removal were rolled back with it.
+  # Verified red, restored from a copy.
+  test "a budget-exhausted step still commits its :failed record and its executor's writes",
+       %{store: store, machine: machine, execution_id: execution_id} do
+    {:ok, _execution, _state} =
+      Executions.create(store, execution_id, machine,
+        executor: executor(),
+        initialize: [max_macrostep_rounds: 5]
+      )
+
+    assert pending(execution_id) == ["hold_expiry"]
+
+    assert {:error, {:budget_exhausted, _payload}} =
+             step(store, execution_id, machine, "reported_lost", executor())
+
+    assert {:ok, %{status: :failed}} = Storage.fetch_execution(store, execution_id)
+    assert pending(execution_id) == []
+  end
+
   # The host's executor: a delayed send inserts a row keyed by the send's
   # ordinal, a cancel removes the rows under its send id, both through the
   # step's own repo from the stepping process. `crash_on:` raises on the
   # named <log>, standing in for a crash later in the same step.
+  # `remove_on:` deletes the execution's own row on the named <log>, so the
+  # position save after the effects matches no row and answers an error.
   defp executor(opts \\ []) do
     crash_on = Keyword.get(opts, :crash_on)
+    remove_on = Keyword.get(opts, :remove_on)
 
     fn
       {:send_delayed, %SendDelayed{} = send}, context ->
@@ -162,6 +225,13 @@ defmodule StatifierPersistence.Ecto.StepTimerStoreTransactionTest do
 
       {:log, %Log{label: ^crash_on}}, _context when is_binary(crash_on) ->
         raise "crashed on #{crash_on}"
+
+      {:log, %Log{label: ^remove_on}}, context when is_binary(remove_on) ->
+        TestRepo.delete_all(
+          from(e in Default.Execution, where: e.execution_id == ^context.execution_id)
+        )
+
+        :ok
 
       _effect, _context ->
         :ok
@@ -199,6 +269,17 @@ defmodule StatifierPersistence.Ecto.StepTimerStoreTransactionTest do
     TestRepo.aggregate(
       from(e in Default.Execution, where: e.execution_id == ^execution_id),
       :count
+    )
+  end
+
+  # The execution's committed input log entries, in order.
+  defp inputs(execution_id) do
+    TestRepo.all(
+      from(i in Default.Input,
+        where: i.execution_id == ^execution_id,
+        order_by: i.seq,
+        select: i.seq
+      )
     )
   end
 

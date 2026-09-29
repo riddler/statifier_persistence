@@ -1504,8 +1504,12 @@ if Code.ensure_loaded?(Ecto) do
     yet - and then `SELECT ... FOR UPDATE` on the execution row when it does,
     keeping the row itself locked against every other writer for the
     rest of the transaction. Both locks are transaction-scoped, so any
-    exit from `fun` releases them: a normal return commits, and a raise
-    rolls back and propagates to the caller with nothing leaked.
+    exit from `fun` releases them: a normal return commits, and a raise,
+    throw or exit rolls back and propagates to the caller with nothing
+    leaked. A step whose position save answers an error after its effects
+    leaves `fun` by a throw for exactly that rollback (ADR-0004's
+    2026-09-28 Amendment), so the executor's writes through this repo are
+    undone with the step.
     """
     @impl Adapter
     @spec lock_execution(Adapter.opts(), Adapter.execution_id(), (-> result)) ::
