@@ -10,8 +10,10 @@ defmodule StatifierPersistence.Ecto.StepTimerStoreTransactionTest do
   delayed send), and before the position is saved, must leave neither half
   committed: never a saved position past the cancel with the cancelled
   row still pending. A step whose position save answers an error after
-  the executor ran rolls the executor's writes back with it (ADR-0004's
-  2026-09-28 Amendment), while a budget-exhausted step still commits its
+  the executor ran rolls the executor's writes back with it when its lock
+  opened the outermost transaction (ADR-0004's 2026-09-28 Amendment);
+  inside a caller's transaction it answers the same error and leaves the
+  rollback to the caller, and a budget-exhausted step still commits its
   `:failed` record and what its executor wrote.
 
   Live, outside the SQL sandbox, for `CallerTransactionTest`'s reason: the
@@ -29,9 +31,21 @@ defmodule StatifierPersistence.Ecto.StepTimerStoreTransactionTest do
   alias Statifier.Event
   alias StatifierPersistence.EctoHosts.Default
   alias StatifierPersistence.{Executions, Storage}
+  alias StatifierPersistence.Storage.Ecto, as: EctoStorage
   alias StatifierPersistence.TestRepo
 
   @timers "sp_test_loan_hold_timers"
+
+  # A host's own serialization strategy that happens to order steps with
+  # the Ecto adapter's lock: not the default strategy, so a failed position
+  # save commits what the step wrote, as before.
+  defmodule HostLockStrategy do
+    @behaviour StatifierPersistence.Serialization
+
+    @impl true
+    def with_execution(store, execution_id, fun),
+      do: EctoStorage.lock_execution(store.opts, execution_id, fun)
+  end
 
   # A library hold: placing it arms a delayed expiry, picking the book up
   # cancels that expiry. Each state logs on entry, after the send, so the
@@ -138,7 +152,7 @@ defmodule StatifierPersistence.Ecto.StepTimerStoreTransactionTest do
   end
 
   # sabotage: in Executions' failed_write/2, answered the :update write's
-  # error as it is instead of through rolled_back/1 -> red on the first
+  # error as it is instead of through roll_back/1 -> red on the first
   # assertion after the step: the cancel's removal committed (no pending
   # row). Verified red, restored from a copy.
   test "a step whose position save answers an error rolls back the executor's timer writes",
@@ -185,6 +199,62 @@ defmodule StatifierPersistence.Ecto.StepTimerStoreTransactionTest do
 
     assert {:ok, %{status: :failed}} = Storage.fetch_execution(store, execution_id)
     assert pending(execution_id) == []
+  end
+
+  # sabotage: in Storage.Ecto's roll_back_if/3, rolled back whether or not
+  # the lock opened the outermost transaction -> red: the caller's
+  # ROLLBACK TO SAVEPOINT answered an error on a transaction already
+  # failed. Verified red, restored from a copy.
+  test "inside a caller's transaction a failed position save answers as before and leaves the rollback to the caller",
+       %{store: store, machine: machine, execution_id: execution_id} do
+    {:ok, _execution, _state} = create(store, execution_id, machine, executor())
+
+    assert {:ok, {:error, :execution_not_found}} =
+             TestRepo.transaction(fn ->
+               TestRepo.query!("SAVEPOINT caller_step")
+
+               answer =
+                 step(
+                   store,
+                   execution_id,
+                   machine,
+                   "picked_up",
+                   executor(remove_on: "loan_started")
+                 )
+
+               # The caller undoes the step to its own savepoint and goes on.
+               assert {:ok, _result} = TestRepo.query("ROLLBACK TO SAVEPOINT caller_step")
+
+               assert {:ok, _result} =
+                        TestRepo.query(
+                          "INSERT INTO #{@timers} (execution_id, ordinal, send_id, event) " <>
+                            "VALUES ($1, 99, 'renewal_reminder', 'renewal.due')",
+                          [execution_id]
+                        )
+
+               answer
+             end)
+
+    assert pending(execution_id) == ["hold_expiry", "renewal_reminder"]
+    assert leaves(store, execution_id, machine) == ["on_hold"]
+  end
+
+  # sabotage: in Executions' marked_for/2, passed the roll-back marker to
+  # every strategy instead of the default one -> red: under the host's
+  # strategy the cancel's removal was rolled back. Verified red, restored
+  # from a copy.
+  test "under a host's own strategy a failed position save answers as before and commits",
+       %{store: store, machine: machine, execution_id: execution_id} do
+    {:ok, _execution, _state} = create(store, execution_id, machine, executor())
+
+    assert {:error, :execution_not_found} =
+             Executions.step(store, execution_id, machine, Event.external("picked_up"),
+               executor: executor(remove_on: "loan_started"),
+               serialization: {HostLockStrategy, store}
+             )
+
+    assert pending(execution_id) == []
+    assert executions(execution_id) == 0
   end
 
   # The host's executor: a delayed send inserts a row keyed by the send's

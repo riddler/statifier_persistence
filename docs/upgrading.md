@@ -394,13 +394,12 @@ Schema: **NONE**. The `statifier` floor stays `~> 2.9`.
   `StatifierPersistence.Storage.Ecto` is `{:error, :execution_not_found}`
   for a row gone from under the step), those writes now roll back with
   the step instead of committing without its position, and so does the
-  step's input log entry. `StatifierPersistence.Executions.step/5` answers
-  the same error as before; deliver the event again to re-drive the whole
-  step. Inside a transaction of your own, the rollback marks that
-  transaction failed, and it ends in `{:error, :rollback}`. On
-  `StatifierPersistence.Storage.InMemory`, or under a `serialization:`
-  strategy of your own, the step leaves the strategy's body by a throw:
-  the in-memory adapter keeps what was written, and a strategy of your own
-  must let the throw through, undoing the body's writes if it can. A
+  step's input log entry, when the step runs under the default
+  serialization strategy and its lock opened the outermost transaction.
+  `StatifierPersistence.Executions.step/5` answers the same error as
+  before; deliver the event again to re-drive the whole step. Inside a
+  transaction of your own, under a `serialization:` strategy of your own,
+  and on `StatifierPersistence.Storage.InMemory`, nothing changes: the
+  step answers the same error and the rollback, if any, is yours. A
   budget-exhausted step still commits its `:failed` record. A host whose
   position saves never fail: **NONE**.

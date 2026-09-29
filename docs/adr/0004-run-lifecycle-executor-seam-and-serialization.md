@@ -861,43 +861,50 @@ committed what the executor wrote through the same repo - a host's timer
 rows, for one - without the position those rows belong to, which is the
 split statifier-ex's ADR-0074 decision 2 asks a timer store to close.
 
-**The decision** (ruled by the operator, 2026-09-28). The executor's
-writes and the step's position save are one unit in both directions:
-they commit together, and when the save answers an error they are undone
-together. When the `:update` write that follows a step's effects answers
-an error, the step leaves its serialization strategy by a throw rather
-than a return, so the strategy's own exit path runs, and the step still
-answers that error, in the same shape as before. The throw is made by
-`failed_write/2` and caught by `serialized/5`, which hands the error back
-as the step's answer (both in `lib/statifier_persistence/executions.ex`,
-added with this Amendment). A redelivery re-drives the whole step: the
-effects run again and the save is tried again, which decision 3's
-at-least-once property already makes safe.
+**The decision** (ruled by the operator, 2026-09-28). Where this package
+owns the transaction, the executor's writes and the step's position save
+are one unit in both directions: they commit together, and when the save
+answers an error they are rolled back together. That is one case: the
+default serialization strategy
+(`StatifierPersistence.Serialization.AdapterLock`) over the Ecto adapter,
+when the step's `lock_execution/3` opened the outermost transaction. There
+the transaction is rolled back - the executor's writes through the
+store's repo from the calling process, the step's input log entry and
+anything else the step wrote - and the step answers the save's error, in
+the same shape as before. A redelivery re-drives the whole step, which
+decision 3's at-least-once property already makes safe.
 
-**What each adapter guarantees.**
+**Everywhere else, nothing changes.** The step answers the save's error
+and what was written stays, exactly as before this Amendment:
 
-- **The Ecto adapter under the default strategy.** `lock_execution/3`
-  rolls its transaction back on any exit from its body that is not a
-  return, so the executor's writes through the store's repo from the
-  calling process, the step's input log entry and anything else the step
-  wrote are undone. Inside a caller's own transaction the rollback marks
-  that transaction failed, as the 2026-09-23 sp-g7q Note above describes,
-  and the caller's transaction ends in `{:error, :rollback}`.
-- **The in-memory adapter.** Its `lock_execution/3`
-  (`lib/statifier_persistence/storage/in_memory.ex`, read at `0e034dc`)
-  takes a lock and no transaction. The throw releases the lock and undoes
-  nothing: what the step wrote before the failed save stays.
-- **A host's own strategy.** The throw passes through its body. What it
-  undoes on that exit is the strategy's own; the
-  `c:StatifierPersistence.Serialization.with_execution/3` doc says so.
+- **Inside a caller's own transaction.** The transaction is the caller's,
+  and so is the rollback: the caller may undo the step to a savepoint of
+  its own and go on, or roll back, or commit. Rolling back here would fail
+  the caller's transaction under it, as the 2026-09-23 sp-g7q Note above
+  describes for a nested failure.
+- **Under a host's own `serialization:` strategy.** No new obligation lands
+  on `StatifierPersistence.Serialization`: the strategy's body returns the
+  step's answer as it always did.
+- **On the in-memory adapter** (`lib/statifier_persistence/storage/in_memory.ex`,
+  read at `0e034dc`). Its lock takes no transaction and has nothing to roll
+  back.
 
-The conformance case "adapter: lock_execution/3 releases the lock after a
-raising or throwing fun" (`StatifierPersistence.Testing.StorageConformance`)
-pins what every adapter owes: the throw reaches the caller as thrown and
-the lock is released.
+**How.** When the `:update` write that follows a step's effects answers
+an error, `failed_write/2` wraps the error in a marker, and `serialized/5`
+unwraps it back to the error on every path, so no caller sees it. The
+marker reaches the adapter's `lock_execution/3` only under the default
+strategy; under any other it is unwrapped inside the body. The Ecto
+adapter's `lock_execution/3` checks whether the repo was already in a
+transaction before it opens its own, and rolls back on the marker only
+when it was not. An adapter of another package returns the marker as it
+returns any result, and no adapter or conformance contract changes.
+(`failed_write/2`, `serialized/5` in
+`lib/statifier_persistence/executions.ex`, and `lock_execution/3` in
+`lib/statifier_persistence/storage/ecto.ex`, as changed with this
+Amendment.)
 
-**What does not roll back.** Only a failed save after the effects does.
-These keep committing, as before:
+**What does not roll back, even in that one case.** Only a failed save
+after the effects does. These keep committing, as before:
 
 - A budget-exhausted step. `tail_result/6` answers
   `{:error, {:budget_exhausted, payload}}` after the `:failed` record is
@@ -917,8 +924,11 @@ the interpreter saw, as a replay log of the execution that happened. An
 entry kept for a step whose position was never saved would replay a step
 that did not happen, and the redelivery appends the event again.
 
-**Pinned.** `test/statifier_persistence/ecto/step_timer_store_transaction_test.exs`
-carries "a step whose position save answers an error rolls back the
-executor's timer writes" and "a budget-exhausted step still commits its
-:failed record and its executor's writes", against real Postgres. The
-changelog names the change under Changed.
+**Pinned.** `test/statifier_persistence/ecto/step_timer_store_transaction_test.exs`,
+against real Postgres, carries "a step whose position save answers an
+error rolls back the executor's timer writes", "inside a caller's
+transaction a failed position save answers as before and leaves the
+rollback to the caller", "under a host's own strategy a failed position
+save answers as before and commits" and "a budget-exhausted step still
+commits its :failed record and its executor's writes". The changelog
+names the change under Changed.

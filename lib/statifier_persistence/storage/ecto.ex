@@ -1504,12 +1504,15 @@ if Code.ensure_loaded?(Ecto) do
     yet - and then `SELECT ... FOR UPDATE` on the execution row when it does,
     keeping the row itself locked against every other writer for the
     rest of the transaction. Both locks are transaction-scoped, so any
-    exit from `fun` releases them: a normal return commits, and a raise,
-    throw or exit rolls back and propagates to the caller with nothing
-    leaked. A step whose position save answers an error after its effects
-    leaves `fun` by a throw for exactly that rollback (ADR-0004's
-    2026-09-28 Amendment), so the executor's writes through this repo are
-    undone with the step.
+    exit from `fun` releases them: a normal return commits, and a raise
+    rolls back and propagates to the caller with nothing leaked.
+
+    One return rolls back as well (ADR-0004's 2026-09-28 Amendment): the
+    marker `StatifierPersistence.Executions` answers for a step whose
+    position save failed after its effects. It is rolled back only when
+    this call opened the outermost transaction; inside a caller's own
+    transaction it commits like any other return, and the rollback is the
+    caller's. Either way the marker is returned as the body's result.
     """
     @impl Adapter
     @spec lock_execution(Adapter.opts(), Adapter.execution_id(), (-> result)) ::
@@ -1518,6 +1521,7 @@ if Code.ensure_loaded?(Ecto) do
     def lock_execution(opts, execution_id, fun) do
       repo = repo(opts)
       schema = execution_schema(opts)
+      outermost? = not repo.in_transaction?()
 
       transaction =
         repo.transaction(fn ->
@@ -1535,14 +1539,23 @@ if Code.ensure_loaded?(Ecto) do
               )
             )
 
-          fun.()
+          fun.() |> roll_back_if(repo, outermost?)
         end)
 
       case transaction do
         {:ok, result} -> {:ok, result}
+        {:error, {StatifierPersistence.Executions, :roll_back, _error} = marked} -> {:ok, marked}
         {:error, reason} -> {:error, {:adapter, reason}}
       end
     end
+
+    # A step's roll-back marker is acted on only in a transaction this lock
+    # opened outermost; nested in a caller's, it is returned and commits.
+    @spec roll_back_if(result, module(), boolean()) :: result when result: term()
+    defp roll_back_if({StatifierPersistence.Executions, :roll_back, _error} = marked, repo, true),
+      do: repo.rollback(marked)
+
+    defp roll_back_if(result, _repo, _outermost?), do: result
 
     @spec to_execution_record(struct()) :: Adapter.execution_record()
     defp to_execution_record(row) do
