@@ -223,10 +223,11 @@ does not either: the recipe ends at the release commit on the release bead's
 branch. What follows that commit is `CLAUDE.md`'s to say, and its authority
 table and "Release preps" paragraph say it:
 
-- *a version bump on a release bead's branch* - allowed only on "an
-  operator-authorized release bead, inside a campaign carrying the operator's
-  explicit consent", and still unauthorized "on any other bead, on main, or
-  when the operator has not named this repo's release bead". The prep then
+- *a version bump on a release bead's branch* - allowed on "a release bead
+  the operator has named (in the campaign plan or their own words) - the
+  family norm, not a grant a campaign consent has to name", and still
+  unauthorized "on any other bead, on main, or when the operator has not
+  named this repo's release bead". The prep then
   lands through the commit, push and merge rows like any other bead's work.
 - *tagging a release prep* - trigger: "the release bead's version bump is
   merged to `origin/main`; the tag names that version at the merged commit";
@@ -241,10 +242,10 @@ table and "Release preps" paragraph say it:
   and no consent or relay delegates it.
 
 So the one thing this recipe performs - the bump plus the step B promotion, on
-a named release bead's branch, under a campaign consent that names it - is
-release *prep*. `.claude/wurk/commit.md`'s "Version bump: never" section
-records the same boundary from the commit side: the version field moves only
-through a release bead, never as a convenience.
+the branch of a release bead the operator has named - is release *prep*.
+`.claude/wurk/commit.md`'s "Version bump: never" section records the same
+boundary from the commit side: the version field moves only through a
+release bead, never as a convenience.
 
 `changelog.d/README.md` ends its "At release" paragraph with "and tag it".
 That clause is the tag in the list above: made on the merged prep commit, by
