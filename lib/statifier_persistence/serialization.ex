@@ -25,6 +25,13 @@ defmodule StatifierPersistence.Serialization do
   later body loads. It explicitly does NOT promise cross-execution ordering or
   fairness: bodies for different execution ids may interleave freely, and a
   contended execution id may serve waiters in any order.
+
+  A body may leave by a raise, a throw or an exit as well as by a return,
+  and the strategy lets each reach its caller unchanged. A step whose
+  position save answers an error after its effects throws on purpose
+  (ADR-0004's 2026-09-28 Amendment): a strategy that can undo what the
+  body wrote undoes it on that exit, as the default does over the Ecto
+  adapter, and one that cannot keeps it.
   """
   @callback with_execution(config :: term(), execution_id :: String.t(), fun :: (-> result)) ::
               {:ok, result} | {:error, term()}

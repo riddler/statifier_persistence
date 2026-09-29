@@ -389,3 +389,18 @@ Schema: **NONE**. The `statifier` floor stays `~> 2.9`.
   now runs two more cases, a create and a migration whose hash is retired
   after their first check. They need no `lock_execution/3` and carry no
   tag.
+- **If your executor writes through the store's repo and a step's
+  position save can answer an error** (the only such error found on
+  `StatifierPersistence.Storage.Ecto` is `{:error, :execution_not_found}`
+  for a row gone from under the step), those writes now roll back with
+  the step instead of committing without its position, and so does the
+  step's input log entry. `StatifierPersistence.Executions.step/5` answers
+  the same error as before; deliver the event again to re-drive the whole
+  step. Inside a transaction of your own, the rollback marks that
+  transaction failed, and it ends in `{:error, :rollback}`. On
+  `StatifierPersistence.Storage.InMemory`, or under a `serialization:`
+  strategy of your own, the step leaves the strategy's body by a throw:
+  the in-memory adapter keeps what was written, and a strategy of your own
+  must let the throw through, undoing the body's writes if it can. A
+  budget-exhausted step still commits its `:failed` record. A host whose
+  position saves never fail: **NONE**.

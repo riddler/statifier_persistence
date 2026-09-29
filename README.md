@@ -906,11 +906,16 @@ against real Postgres:
 
 Where the join is the host's, read from the code, not pinned by that test:
 
-- **Only a raise, throw or exit rolls back.** `lock_execution/3` commits
-  whatever the step's body returns, a `{:error, _}` included, so the
-  executor's writes commit with whatever the step wrote. Effect delivery is
-  at-least-once either way: key the rows so a re-driven step's re-emitted
-  effects find them (a re-emitted cancel that matches nothing is a no-op).
+- **A failed position save rolls back.** When the position save that
+  follows a step's effects answers an error, the step leaves
+  `lock_execution/3` by a throw, so the transaction rolls back with the
+  executor's writes in it, and the step still answers the save's error;
+  redelivered, the whole step runs again. Every other answer the step's
+  body returns commits: a budget-exhausted step answers
+  `{:error, {:budget_exhausted, payload}}` after its `:failed` record and
+  your rows are written. Effect delivery is at-least-once either way: key
+  the rows so a re-driven step's re-emitted effects find them (a
+  re-emitted cancel that matches nothing is a no-op).
 - **Another serialization strategy.** A host's own `serialization:` strategy
   replaces `lock_execution/3`, and this package opens no transaction of its
   own around the step, so the join is whatever that strategy provides.

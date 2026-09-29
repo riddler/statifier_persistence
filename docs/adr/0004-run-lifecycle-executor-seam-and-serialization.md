@@ -842,3 +842,83 @@ What was re-read before the flip:
   carries "a builder calling a door for its own execution is refused".
 - **The changelog.** The 0.22.0 section of `CHANGELOG.md` names the
   builder's refusal under Changed.
+
+## Amendment (2026-09-28, sp-xytv): a failed position save after the effects rolls back the executor's writes
+
+Status of this amendment: proposed (2026-09-28, sp-xytv). The record above
+stays accepted; this amendment is proposed until its code has shipped in a
+published version.
+
+Pure addition: nothing above is edited. Decision 3 orders a step as
+execute the effects, then persist, and decision 5 runs that whole tail
+inside the execution's serialization strategy. Neither said what becomes
+of the executor's writes when the persist that follows them answers an
+error. Until this Amendment the Ecto adapter's `lock_execution/3`
+(`lib/statifier_persistence/storage/ecto.ex`, read at `0e034dc`) committed
+whatever the body returned, an `{:error, _}` included. A step whose
+position save answered an error after its executor ran therefore
+committed what the executor wrote through the same repo - a host's timer
+rows, for one - without the position those rows belong to, which is the
+split statifier-ex's ADR-0074 decision 2 asks a timer store to close.
+
+**The decision** (ruled by the operator, 2026-09-28). The executor's
+writes and the step's position save are one unit in both directions:
+they commit together, and when the save answers an error they are undone
+together. When the `:update` write that follows a step's effects answers
+an error, the step leaves its serialization strategy by a throw rather
+than a return, so the strategy's own exit path runs, and the step still
+answers that error, in the same shape as before. The throw is made by
+`failed_write/2` and caught by `serialized/5`, which hands the error back
+as the step's answer (both in `lib/statifier_persistence/executions.ex`,
+added with this Amendment). A redelivery re-drives the whole step: the
+effects run again and the save is tried again, which decision 3's
+at-least-once property already makes safe.
+
+**What each adapter guarantees.**
+
+- **The Ecto adapter under the default strategy.** `lock_execution/3`
+  rolls its transaction back on any exit from its body that is not a
+  return, so the executor's writes through the store's repo from the
+  calling process, the step's input log entry and anything else the step
+  wrote are undone. Inside a caller's own transaction the rollback marks
+  that transaction failed, as the 2026-09-23 sp-g7q Note above describes,
+  and the caller's transaction ends in `{:error, :rollback}`.
+- **The in-memory adapter.** Its `lock_execution/3`
+  (`lib/statifier_persistence/storage/in_memory.ex`, read at `0e034dc`)
+  takes a lock and no transaction. The throw releases the lock and undoes
+  nothing: what the step wrote before the failed save stays.
+- **A host's own strategy.** The throw passes through its body. What it
+  undoes on that exit is the strategy's own; the
+  `c:StatifierPersistence.Serialization.with_execution/3` doc says so.
+
+The conformance case "adapter: lock_execution/3 releases the lock after a
+raising or throwing fun" (`StatifierPersistence.Testing.StorageConformance`)
+pins what every adapter owes: the throw reaches the caller as thrown and
+the lock is released.
+
+**What does not roll back.** Only a failed save after the effects does.
+These keep committing, as before:
+
+- A budget-exhausted step. `tail_result/6` answers
+  `{:error, {:budget_exhausted, payload}}` after the `:failed` record is
+  written (decision 1), so that record and the executor's writes commit.
+- `StatifierPersistence.Driver`'s record-then-settle. `record_and_settle/5`
+  (`lib/statifier_persistence/driver.ex`, read at `0e034dc`) records a
+  child's outcome and may then answer a settlement error; it is not a
+  step's tail and commits what it wrote.
+- A create whose insert is refused. It answers as before. On Postgres the
+  failed `INSERT` has already aborted the transaction it ran in (the
+  README's "Writing inside a caller's transaction"), so nothing it wrote
+  commits either way.
+- A refusal or discard before the effects. Nothing has been executed.
+
+**The input log entry goes with the step.** ADR-0010 appends only inputs
+the interpreter saw, as a replay log of the execution that happened. An
+entry kept for a step whose position was never saved would replay a step
+that did not happen, and the redelivery appends the event again.
+
+**Pinned.** `test/statifier_persistence/ecto/step_timer_store_transaction_test.exs`
+carries "a step whose position save answers an error rolls back the
+executor's timer writes" and "a budget-exhausted step still commits its
+:failed record and its executor's writes", against real Postgres. The
+changelog names the change under Changed.
