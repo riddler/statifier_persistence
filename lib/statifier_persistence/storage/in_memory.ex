@@ -176,6 +176,12 @@ defmodule StatifierPersistence.Storage.InMemory do
   the map is stored with the record and returned by `fetch_execution/2` verbatim,
   whatever Elixir terms it holds - an Agent has no type system to refuse
   one.
+
+  A record on a hash a retirement has tombstoned is refused with
+  `{:error, {:chart_retired, info}}` in the same state transition
+  (ADR-0012's 2026-09-28 Amendment): `retire_chart/3` is one transition
+  too, so a create and a retirement of its hash are ordered by the Agent
+  and never both succeed.
   """
   @impl Adapter
   @spec insert_execution(Adapter.opts(), Adapter.execution_record()) ::
@@ -188,12 +194,41 @@ defmodule StatifierPersistence.Storage.InMemory do
       |> Map.put_new(:ended_at, nil)
 
     Agent.get_and_update(pid(opts), fn state ->
-      if Map.has_key?(state.executions, execution_id) do
-        {{:error, :execution_exists}, state}
-      else
-        {:ok, put_in(state, [:executions, execution_id], execution_record)}
+      cond do
+        Map.has_key?(state.executions, execution_id) ->
+          {{:error, :execution_exists}, state}
+
+        info = tombstone_on(state, execution_record.content_hash) ->
+          {{:error, {:chart_retired, info}}, state}
+
+        true ->
+          {:ok, put_in(state, [:executions, execution_id], execution_record)}
       end
     end)
+  end
+
+  # The tombstone on `content_hash` as the state holds it, or nil: the
+  # check the writers that put an execution on a hash make inside their
+  # own transition (ADR-0012's 2026-09-28 Amendment).
+  @spec tombstone_on(state(), Adapter.content_hash()) :: Adapter.retired_info() | nil
+  defp tombstone_on(state, content_hash),
+    do: retired_info(get_in(state, [:charts, content_hash]))
+
+  # A write that moves an execution onto another hash - a migration's
+  # re-pin - is refused when that hash is tombstoned. A write that leaves
+  # the execution on its own hash is not asked: the execution already
+  # pinned the hash, so no retirement could have tombstoned it.
+  @spec repin_refusal(state(), Adapter.execution_record(), Adapter.execution_record()) ::
+          {:chart_retired, Adapter.retired_info()} | nil
+  defp repin_refusal(state, execution_record, stored) do
+    content_hash = Map.get(execution_record, :content_hash)
+
+    with true <- content_hash != stored.content_hash,
+         %{} = info <- tombstone_on(state, content_hash) do
+      {:chart_retired, info}
+    else
+      _unrefused -> nil
+    end
   end
 
   @doc """
@@ -221,6 +256,11 @@ defmodule StatifierPersistence.Storage.InMemory do
   `ended_at` is the third: a stored stamp is kept whatever the given
   record carries, and only a record with no stamp stored takes the given
   one.
+
+  A record that moves the execution onto another hash - a migration's
+  re-pin - is refused with `{:error, {:chart_retired, info}}` when that
+  hash is tombstoned, in the same state transition (ADR-0012's
+  2026-09-28 Amendment).
   """
   @impl Adapter
   @spec update_execution(Adapter.opts(), Adapter.execution_record()) ::
@@ -228,14 +268,24 @@ defmodule StatifierPersistence.Storage.InMemory do
   def update_execution(opts, %{execution_id: execution_id} = execution_record) do
     Agent.get_and_update(pid(opts), fn state ->
       case state.executions do
-        %{^execution_id => stored} ->
-          {:ok,
-           put_in(state, [:executions, execution_id], carry_forward(execution_record, stored))}
-
-        _absent ->
-          {{:error, :execution_not_found}, state}
+        %{^execution_id => stored} -> overwrite(state, execution_record, stored)
+        _absent -> {{:error, :execution_not_found}, state}
       end
     end)
+  end
+
+  # The overwrite inside `update_execution/2`'s transition, or the retired
+  # arm for a re-pin onto a tombstoned hash with the state unchanged.
+  @spec overwrite(state(), Adapter.execution_record(), Adapter.execution_record()) ::
+          {:ok | {:error, Adapter.error()}, state()}
+  defp overwrite(state, %{execution_id: execution_id} = execution_record, stored) do
+    case repin_refusal(state, execution_record, stored) do
+      nil ->
+        {:ok, put_in(state, [:executions, execution_id], carry_forward(execution_record, stored))}
+
+      refusal ->
+        {{:error, refusal}, state}
+    end
   end
 
   @spec carry_forward(Adapter.execution_record(), Adapter.execution_record()) ::
@@ -680,33 +730,43 @@ defmodule StatifierPersistence.Storage.InMemory do
   `Agent.get_and_update/2`, which is this adapter's transaction: the copy
   replaces the state only when every write applied, and a write naming an
   execution that is not stored answers `{:error, :execution_not_found}`
-  with the state unchanged.
+  with the state unchanged. A re-pin onto a tombstoned hash answers
+  `{:error, {:chart_retired, info}}`, also with the state unchanged
+  (ADR-0012's 2026-09-28 Amendment).
   """
   @impl Adapter
   @spec write_tree_migration(Adapter.opts(), [Adapter.tree_write()]) ::
           :ok | {:error, Adapter.error()}
   def write_tree_migration(opts, writes) when is_list(writes) do
     Agent.get_and_update(pid(opts), fn state ->
-      case Enum.reduce_while(writes, {:ok, state.executions}, &tree_write/2) do
+      case Enum.reduce_while(writes, {:ok, state.executions}, &tree_write(state, &1, &2)) do
         {:ok, executions} -> {:ok, %{state | executions: executions}}
         {:error, _reason} = error -> {error, state}
       end
     end)
   end
 
-  @spec tree_write(Adapter.tree_write(), {:ok, map()}) ::
+  @spec tree_write(state(), Adapter.tree_write(), {:ok, map()}) ::
           {:cont, {:ok, map()}} | {:halt, {:error, Adapter.error()}}
-  defp tree_write(write, {:ok, executions}) do
+  defp tree_write(state, write, {:ok, executions}) do
     execution_id = tree_write_id(write)
 
     case executions do
       %{^execution_id => stored} ->
-        {:cont, {:ok, Map.put(executions, execution_id, tree_written(write, stored))}}
+        case tree_refusal(state, write, stored) do
+          nil -> {:cont, {:ok, Map.put(executions, execution_id, tree_written(write, stored))}}
+          refusal -> {:halt, {:error, refusal}}
+        end
 
       _absent ->
         {:halt, {:error, :execution_not_found}}
     end
   end
+
+  defp tree_refusal(state, {:repin, record, _linkage_hash}, stored),
+    do: repin_refusal(state, record, stored)
+
+  defp tree_refusal(_state, {:park, _execution_id}, _stored), do: nil
 
   defp tree_write_id({:repin, %{execution_id: execution_id}, _linkage_hash}), do: execution_id
   defp tree_write_id({:park, execution_id}), do: execution_id

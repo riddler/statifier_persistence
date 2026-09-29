@@ -648,3 +648,103 @@ their sources through the same walk, but under the execution's lock
 at `97ef1f7`), which on the Ecto adapter is a transaction this package
 opens. This Note does not decide what a migration answers when a source's
 repo work fails there.
+
+## Amendment (2026-09-28, sp-3v2c): a retirement takes its hash's exclusive lock first, and a write that puts an execution on a hash reads the tombstone under the shared one
+
+Status of this amendment: proposed (2026-09-28, sp-3v2c). The record
+above is accepted; this amendment does not change its status line.
+
+Decision 6 makes the count and the tombstone one transaction, so a pin
+that has committed when the conditional `UPDATE` runs refuses it. It
+cannot see a write that has read the hash as not retired and not yet
+committed: a create, a migration or a tree migration that checked the
+hash, and then inserted or re-pinned its execution after the tombstone
+was written. ADR-0013's 2026-09-27 Note records that window for
+`create/4` and `migrate/4`, and `migrate_tree/4`'s `@doc` stated it for
+itself (`lib/statifier_persistence/executions.ex`, read at `cbc71f2`).
+This amendment closes it where the store can hold a lock across the
+write. The functions it names in `lib/` are the ones the change that
+carries it adds or edits; every other cite was read on `main` at
+`cbc71f2`.
+
+**Decision 6's transaction takes a per-hash lock as its first
+statement.** On the Ecto adapter over Postgres, the retirement's
+transaction takes the exclusive transaction-scoped advisory lock on the
+key `(namespace, hashtext(content_hash))` before it reads anything
+(`lib/statifier_persistence/storage/ecto.ex`, `retire_chart/3` and
+`chart_lock/3`). The key is Postgres's two-`int4` form, so it never
+collides with the one-`bigint` per-execution lock of ADR-0004 decision 5
+(`lock_execution/3`).
+
+**A write that puts an execution on a hash reads its tombstone again,
+under the shared lock, inside the transaction the write commits in.**
+`create/4` reads it under the execution's exclusion before any effect is
+executed and before the insert (`create_open/4`); `migrate/4` reads the
+`to` hash there before the execution is read (`migrate_tail/6`);
+`migrate_tree/4` reads every node's `to` hash under the tree's
+exclusions before the tree is read (`recheck_retired/2`). Each read is
+`StatifierPersistence.Storage.check_chart_retired/2`, and on the Ecto
+adapter over Postgres its read takes the shared form of the same lock
+(`lib/statifier_persistence/storage/ecto.ex`, `fetch_retired_info/2`).
+Under the default serialization strategy that read runs inside the
+transaction `lock_execution/3` opens, so the lock is held until the
+insert or the re-pin commits. The two orders:
+
+- A retirement that arrives while a write holds the shared lock waits
+  for the write's commit; its `NOT EXISTS` then sees the execution, and
+  it refuses with `{:error, {:pinned, counts}}`.
+- A write that arrives while a retirement holds the exclusive lock waits
+  for the retirement's commit, reads the tombstone, and answers
+  `{:error, {:chart_retired, info}}`, having executed no effect and
+  written nothing (`{:tree_refused, refusals}` carrying that arm per node,
+  for a tree).
+
+**Decision 5's "retirable" is read under the lock.** Zero pins means
+retirable when the counts are taken under the exclusive lock. A write
+that has read the hash and not committed is not one of decision 1's four
+pin kinds, and it gains no count in decision 3's map; the lock is what
+keeps it from being retired out from under, by making the retirement
+wait until it is a row the counts can see.
+
+**The in-memory adapter checks inside its own transition.**
+`StatifierPersistence.Storage.InMemory`'s retirement is one Agent
+transition, and so are its writes. `insert_execution/2`, an
+`update_execution/2` that moves an execution onto another hash, and a
+re-pin in `write_tree_migration/2` refuse a record on a tombstoned hash
+with the retired arm and leave the state unchanged
+(`lib/statifier_persistence/storage/in_memory.ex`, `tombstone_on/2` and
+`repin_refusal/3`). A write that leaves the execution on its own hash is
+not asked: the execution already pinned it. On this adapter a create
+that loses the race is refused at its insert, after its effects have
+run.
+
+**Where the window stays open.** An Ecto backend that is not Postgres
+takes no advisory lock, and a host `serialization:` strategy opens no
+database transaction for the lock to be held in. There the second read
+narrows the window without closing it: a retirement can still commit
+after it and before the write. `create/4`'s `@doc`, the
+`{:chart_retired, info}` entry of `t:migrate_error/0` and
+`migrate_tree/4`'s `@doc` state which store and strategy close it and
+which narrow it.
+
+**What a host sees.** Only the losing interleaving changes: the write
+answers `{:error, {:chart_retired, info}}` where it used to land on the
+tombstone, or the retirement answers `{:error, {:pinned, counts}}` where
+it used to tombstone a hash an execution was about to stand on. The
+winning interleaving answers what it answered before. There is no schema
+change and no new adapter callback, and the answer is no new type:
+`{:chart_retired, retired_info()}` is already an arm of the adapter's
+error (`lib/statifier_persistence/storage/adapter.ex`, `t:error/0`). The
+lock's first key is a constant of the Ecto adapter
+(`@chart_lock_namespace`); a host whose own two-key advisory locks use
+the same first key shares this key space.
+
+**Pinned by.** The live Postgres cases of
+`test/statifier_persistence/ecto/retire_chart_race_test.exs` race a
+retirement against a create in both orders and against a migration; the
+conformance suite's "facade:" cases retire the hash between a create's
+or a migration's first read and its write
+(`lib/statifier_persistence/testing/storage_conformance.ex`,
+`RetiringSerialization`); `test/statifier_persistence/executions_migrate_tree_test.exs`
+does the same for a tree; and `test/statifier_persistence/storage/in_memory_test.exs`
+pins the in-memory adapter's refusals.

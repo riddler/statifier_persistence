@@ -357,3 +357,29 @@ Schema: **NONE**. The `statifier` floor stays `~> 2.9`.
   lock cases, so a host running `StatifierPersistence.Storage.Ecto` off
   Postgres now excludes five cases rather than four. An adapter that does
   not export `lock_execution/3`: **NONE**.
+
+## 0.22 to 0.23
+
+Schema: **NONE**. The `statifier` floor stays `~> 2.9`.
+
+- **If a create, migration or tree migration can run while the same
+  chart is being retired**, expect the one that loses the race to refuse.
+  `StatifierPersistence.Executions.create/4` and `migrate/4` answer
+  `{:error, {:chart_retired, info}}`, and `migrate_tree/4` answers
+  `{:error, {:tree_refused, refusals}}` carrying that arm for the node,
+  where before the write could land its execution on the retired chart;
+  or `retire_chart/4` answers `{:error, {:pinned, counts}}`, where before
+  it could retire a chart an execution was about to stand on. Both
+  answers already existed. This holds on `StatifierPersistence.Storage.Ecto`
+  over Postgres under the default serialization strategy, and on
+  `StatifierPersistence.Storage.InMemory`; on another backend, or under a
+  `serialization:` strategy of your own, the window is narrowed and not
+  closed. A host that never retires a chart while writing to it: **NONE**.
+- **If your own two-key Postgres advisory locks use `1397769032` as their
+  first key**, they now share a key space with the Ecto adapter's
+  per-chart lock; pick another first key.
+- **If you run `StatifierPersistence.Testing.StorageConformance` against a
+  storage adapter of your own that exports `retire_chart/3`**, your suite
+  now runs two more cases, a create and a migration whose hash is retired
+  after their first check. They need no `lock_execution/3` and carry no
+  tag.

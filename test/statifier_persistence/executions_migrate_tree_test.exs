@@ -80,6 +80,23 @@ defmodule StatifierPersistence.ExecutionsMigrateTreeTest do
 
   @invoke_types InvokeTypes.new(types: ["library:pickup_notice"])
 
+  # A serialization strategy that retires one hash before it runs the
+  # tree's body, and takes no lock of its own: the place a retirement
+  # committing after `migrate_tree/4`'s first read of the tombstone and
+  # before its write lands. Only the first call's retirement can win; the
+  # later ones answer the retired arm and are reported all the same.
+  defmodule RetiringSerialization do
+    @moduledoc false
+    @behaviour StatifierPersistence.Serialization
+
+    @impl StatifierPersistence.Serialization
+    def with_execution({store, content_hash, test_pid}, _execution_id, fun) do
+      retired = Storage.retire_chart(store, content_hash, retired_by: "circulation-desk")
+      send(test_pid, {:retired_between, retired})
+      {:ok, fun.()}
+    end
+  end
+
   @doc false
   def forward(name, _measurements, metadata, %{pid: pid}) do
     send(pid, {:telemetry, name, metadata})
@@ -414,6 +431,33 @@ defmodule StatifierPersistence.ExecutionsMigrateTreeTest do
     # machine in machines: for a missing hash -> red over both adapters:
     # the refusals did not name the missing machine. Verified red,
     # reverted from a copy.
+    # ADR-0012's 2026-09-28 Amendment: the `to` hashes are read again
+    # under the tree's exclusions, before the unit is written.
+    #
+    # sabotage: in StatifierPersistence.Executions.migrate_tree_locked/4,
+    # drop the recheck_retired/2 step -> red on both adapters: on Ecto the
+    # tree answered {:ok, _} and re-pinned the pickup notice onto the
+    # tombstoned hash; in memory the unit's own write refused, answering a
+    # bare {:error, {:chart_retired, info}} rather than the tree's
+    # refusal. Verified red, reverted from a copy.
+    test "a to hash retired after the first check refuses the tree, even under :park", ctx do
+      {hold_before, notice_before} = waiting_tree(ctx)
+      notice_to = hash(ctx.notice_to)
+
+      assert {:error, {:tree_refused, refusals}} =
+               migrate_tree(ctx, plans(ctx),
+                 on_failure: :park,
+                 serialization: {RetiringSerialization, {ctx.store, notice_to, self()}}
+               )
+
+      assert [{notice_id, {:chart_retired, info}}] = Map.to_list(refusals)
+      assert notice_id == ctx.notice_id
+      assert_received {:retired_between, {:ok, ^info}}
+
+      assert stored(ctx, ctx.hold_id) == hold_before
+      assert stored(ctx, ctx.notice_id) == notice_before
+    end
+
     test "a plan whose machine is missing is refused before any execution is read", ctx do
       {hold_before, notice_before} = waiting_tree(ctx)
       missing = hash(ctx.notice_to)

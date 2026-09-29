@@ -1050,3 +1050,44 @@ writes no timer and no position.
 `test/statifier_persistence/executions_migrate_test.exs`, "a kept timer
 whose event the to chart no longer handles", pins the refusal, the park,
 the dry run and the sends that are not refused.
+
+## Note (2026-09-28, sp-3v2c): the retired-hash window of the 2026-09-27 Note is closed where the store holds a lock across the write
+
+This Note decides nothing and changes no status line. The 2026-09-27
+Note (sp-9us8 and sp-z07j) records that a migration's retired-hash check
+answers for the `to` hash as it was read, and ends: "Closing the window
+inside the re-pin write, or inside a create's insert, is a later
+change". That change is ADR-0012's 2026-09-28 Amendment (sp-3v2c), which
+is where the rule is decided; this Note points to it. The functions
+named below in `lib/` are the ones the change that carries this Note
+adds or edits.
+
+- **The check runs again under the lock.** `migrate/4` reads the `to`
+  hash's tombstone a second time under the execution's exclusion, before
+  the execution is read and before the re-pin (`migrate_tail/6`);
+  `migrate_tree/4` does the same for every node (`recheck_retired/2`), and
+  `create/4` before any effect and before its insert (`create_open/4`),
+  all in `lib/statifier_persistence/executions.ex`.
+- **On the Ecto adapter over Postgres the window is closed.** That read
+  holds the hash's shared advisory lock until the write commits, and a
+  retirement takes the exclusive lock as its first statement
+  (`lib/statifier_persistence/storage/ecto.ex`, `fetch_retired_info/2`
+  and `retire_chart/3`): either the migration answers
+  `{:error, {:chart_retired, info}}` and re-pins nothing, or the
+  retirement refuses as pinned.
+- **On the in-memory adapter the write refuses.** A re-pin onto a
+  tombstoned hash answers the retired arm inside the adapter's own
+  transition (`lib/statifier_persistence/storage/in_memory.ex`,
+  `repin_refusal/3`).
+- **Elsewhere it is narrowed.** On an Ecto backend that is not Postgres,
+  and under a host `serialization:` strategy, a retirement can still
+  commit between the second read and the re-pin.
+- **Where it is documented.** `create/4`'s `@doc`, the
+  `{:chart_retired, info}` entry of `t:migrate_error/0` and
+  `migrate_tree/4`'s `@doc` now state the second read, the lock, and
+  where the window stays open, in place of the sentences that said
+  nothing in this package refuses the interleaving.
+
+Decision 4's sentence stays true as written, and the 2026-09-27 Note's
+description of the check stays true of the first read: a `to` hash
+tombstoned when either read runs is refused before any write.

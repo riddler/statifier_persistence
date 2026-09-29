@@ -204,7 +204,11 @@ defmodule StatifierPersistence.Storage.EctoTest do
 
       full = statements(fn -> Storage.Ecto.fetch_chart(opts, "sha256:ecto-narrow-read") end)
 
-      assert [narrow_sql] = narrow
+      # The hash's shared advisory lock comes first (ADR-0012's 2026-09-28
+      # Amendment); it selects nothing from the chart row.
+      assert [lock_sql, narrow_sql] = narrow
+      assert lock_sql =~ "pg_advisory_xact_lock_shared"
+      refute lock_sql =~ "chart_blob"
       assert narrow_sql =~ "retired_at"
       assert narrow_sql =~ "retired_by"
       refute narrow_sql =~ "chart_blob"
