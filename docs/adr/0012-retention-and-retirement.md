@@ -651,7 +651,7 @@ repo work fails there.
 
 ## Amendment (2026-09-28, sp-3v2c): a retirement takes its hash's exclusive lock first, and a write that puts an execution on a hash reads the tombstone under the shared one
 
-Status of this amendment: proposed (2026-09-28, sp-3v2c). The record
+Status of this amendment: accepted (2026-09-28, sp-3v2c). The record
 above is accepted; this amendment does not change its status line.
 
 Decision 6 makes the count and the tombstone one transaction, so a pin
@@ -748,3 +748,65 @@ or a migration's first read and its write
 `RetiringSerialization`); `test/statifier_persistence/executions_migrate_tree_test.exs`
 does the same for a tree; and `test/statifier_persistence/storage/in_memory_test.exs`
 pins the in-memory adapter's refusals.
+
+## Note (2026-09-29, sp-fnay): the sp-3v2c Amendment is accepted
+
+The 2026-09-28 sp-3v2c Amendment is accepted on 2026-09-29, under the
+operator's standing grant to flip a record whose code has shipped. The
+code that implements it shipped in statifier_persistence 0.23.0 (tag
+`v0.23.0`, `e3d3ab4`) under a Changed and an Added line of its
+changelog. That Amendment's own status line flips in place from proposed
+to accepted, and its sentence "The record above is accepted" still
+holds; the record above stays accepted. Every cite below was read at
+`e3d3ab4`, the tag, which is also `main`: no commit has landed on
+`main` since the tag.
+
+What was re-read before the flip:
+
+- **The exclusive lock first.** In
+  `lib/statifier_persistence/storage/ecto.ex`, `retire_chart/3` takes
+  `chart_lock/3` in `:exclusive` mode as the first statement of its
+  transaction, before `tombstone/3` reads the row; `chart_lock/3` issues
+  `pg_advisory_xact_lock` or `pg_advisory_xact_lock_shared` on the
+  two-`int4` key `(@chart_lock_namespace, hashtext(content_hash))`, and
+  only when the repo's adapter is Postgres. `lock_execution/3` takes the
+  one-key `hashtextextended` lock.
+- **The shared read.** `fetch_retired_info/2` takes `chart_lock/3` in
+  `:shared` mode before it reads the tombstone, and
+  `StatifierPersistence.Storage.check_chart_retired/2` reaches it when
+  the adapter declares the narrow read.
+- **The three writers.** In `lib/statifier_persistence/executions.ex`,
+  `create_open/4` checks once before `initialize/2` and again inside
+  `serialized/5` through `unless_retired/3`, before the executor runs
+  the effects and before the insert; `migrate_tail/6`, which `migrate/4`
+  runs inside its strategy's `with_execution`, checks the `to` hash
+  before `fetch_execution/2`; `migrate_tree_locked/4`, run under
+  `with_exclusions`, calls `recheck_retired/2` before `read_tree/2`, and
+  a tombstoned hash is that node's entry in `{:tree_refused, refusals}`.
+- **The in-memory adapter.** In
+  `lib/statifier_persistence/storage/in_memory.ex`, `insert_execution/2`
+  refuses with `tombstone_on/2`, and `update_execution/2` and
+  `write_tree_migration/2` refuse a re-pin through `repin_refusal/3`,
+  each inside one `Agent.get_and_update/2` transition with the state
+  unchanged; `repin_refusal/3` asks nothing of a write that stays on its
+  own hash.
+- **Where the window stays open.** `create/4`'s `@doc`, the
+  `{:chart_retired, info}` entry of `t:migrate_error/0` and
+  `migrate_tree/4`'s `@doc` each say that the lock closes the window on
+  Postgres under the default strategy, and that another backend or a
+  host strategy narrows it.
+- **No new answer.** `{:chart_retired, retired_info()}` is an arm of
+  `t:error/0` in `lib/statifier_persistence/storage/adapter.ex`.
+- **The cases.** `test/statifier_persistence/ecto/retire_chart_race_test.exs`
+  carries "a retirement that arrives during a create waits for it and
+  refuses as pinned", "a create that arrives during a retirement waits
+  for it and answers the retired arm" and "a migration that arrives
+  during the to hash's retirement answers the retired arm";
+  `lib/statifier_persistence/testing/storage_conformance.ex` defines
+  `RetiringSerialization` and carries the two "facade:" cases for a
+  create and a migration whose hash is retired after the first check;
+  `test/statifier_persistence/executions_migrate_tree_test.exs` and
+  `test/statifier_persistence/storage/in_memory_test.exs` assert the
+  `{:chart_retired, info}` answer.
+- **The changelog.** The 0.23.0 section of `CHANGELOG.md` names the race
+  under Changed and the two conformance cases under Added.
