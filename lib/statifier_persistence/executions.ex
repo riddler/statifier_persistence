@@ -21,13 +21,15 @@ defmodule StatifierPersistence.Executions do
   exception and never a silent step.
 
   A step whose position save answers an error after its effects ran
-  undoes the effects' writes with it (ADR-0004's 2026-09-28 Amendment):
-  the step leaves its serialization strategy by a throw rather than a
-  return, so the strategy's own exit path runs. On the Ecto adapter under
-  the default strategy that rolls back the step's transaction - the
-  executor's writes through the same repo, the input log entry and the
-  position together - and the step still answers the save's error. The
-  in-memory adapter's lock has no transaction and keeps what was written.
+  rolls back the executor's writes with it (ADR-0004's 2026-09-28
+  Amendment) in one case only: the default serialization strategy over
+  the Ecto adapter, when the step's lock opened the outermost
+  transaction. That transaction is rolled back - the executor's writes
+  through the same repo, the input log entry and the position together -
+  and the step still answers the save's error. Inside a caller's own
+  transaction, under a `serialization:` strategy of the host's, and on
+  the in-memory adapter, the step answers the same error and what was
+  written stays, as before.
 
   ## A parked execution takes no event
 
@@ -178,8 +180,12 @@ defmodule StatifierPersistence.Executions do
   # a real consumer, not an amendment.
   @driver :persistence
 
-  # The tag of `rolled_back/1`'s throw, caught only by `serialized/5`.
-  @rolled_back {__MODULE__, :rolled_back}
+  # The tag of `roll_back/1`'s marker (ADR-0004's 2026-09-28 Amendment):
+  # a step body's answer that asks the Ecto adapter's lock to roll back.
+  # `serialized/5` always unwraps it, so no caller ever sees it.
+  @roll_back :roll_back
+
+  @typep roll_back :: {module(), :roll_back, {:error, error()}}
 
   # A family-one macrostep span in flight: the `System.monotonic_time/0`
   # reading the stop half measures `duration` against, and the
@@ -622,7 +628,10 @@ defmodule StatifierPersistence.Executions do
           Executor.t(),
           entry()
         ) ::
-          {:ok, Execution.t(), MachineState.t()} | {:discarded, Execution.t()} | {:error, error()}
+          {:ok, Execution.t(), MachineState.t()}
+          | {:discarded, Execution.t()}
+          | {:error, error()}
+          | roll_back()
   defp step_tail(store, execution_id, machine, event, opts, executor, entry) do
     case Storage.fetch_execution(store, execution_id) do
       {:ok, %{status: status} = execution_record}
@@ -2818,12 +2827,13 @@ defmodule StatifierPersistence.Executions do
   # amendment). Nothing is rescued to a value: the caller sees the raise it
   # would have seen without the span.
   #
-  # The one throw that is not an exception is `rolled_back/1`'s (ADR-0004's
-  # 2026-09-28 Amendment): the body left the strategy by a throw so that
-  # the strategy undid what it wrote, and the answer it carries is the
-  # step's own, returned here as if the body had returned it. The throw
-  # never crosses a nested `serialized/5`, because the innermost catch is
-  # the one for the step that threw.
+  # A body may answer `roll_back/1`'s marker (ADR-0004's 2026-09-28
+  # Amendment). Under the default strategy it reaches the adapter's
+  # `lock_execution/3`, which the Ecto adapter reads to roll back a
+  # transaction it opened outermost; any other adapter returns it as a
+  # plain result. Under any other strategy it is unwrapped inside the
+  # body, so a host's strategy never sees it. Either way the step answers
+  # the error the marker carries.
   @spec serialized(Storage.t(), execution_id(), entry(), keyword(), (-> result)) ::
           result | {:error, error()}
         when result: term()
@@ -2837,12 +2847,9 @@ defmodule StatifierPersistence.Executions do
       try do
         strategy.with_execution(config, execution_id, fn ->
           emit_lock(lock_start, execution_id, strategy, :acquired, nil)
-          fun.()
+          fun.() |> marked_for(strategy)
         end)
       catch
-        :throw, {@rolled_back, result} ->
-          {:ok, result}
-
         kind, reason ->
           Telemetry.execution_step_exception(started_at,
             execution_id: execution_id,
@@ -2856,7 +2863,7 @@ defmodule StatifierPersistence.Executions do
           :erlang.raise(kind, reason, __STACKTRACE__)
       end
 
-    result = unlocked(locked, lock_start, execution_id, strategy)
+    result = locked |> unlocked(lock_start, execution_id, strategy) |> unmarked()
 
     Telemetry.execution_step_stop(
       started_at,
@@ -2865,6 +2872,17 @@ defmodule StatifierPersistence.Executions do
 
     result
   end
+
+  # The marker goes to the default strategy's adapter lock only.
+  @spec marked_for(term(), module()) :: term()
+  defp marked_for({StatifierPersistence.Executions, @roll_back, _error} = marked, AdapterLock),
+    do: marked
+
+  defp marked_for(result, _strategy), do: unmarked(result)
+
+  @spec unmarked(term()) :: term()
+  defp unmarked({StatifierPersistence.Executions, @roll_back, error}), do: error
+  defp unmarked(result), do: result
 
   @spec unlocked({:ok, result} | {:error, term()}, integer(), execution_id(), module()) ::
           result | {:error, error()}
@@ -3014,7 +3032,10 @@ defmodule StatifierPersistence.Executions do
           Executor.t(),
           entry()
         ) ::
-          {:ok, Execution.t(), MachineState.t()} | {:discarded, Execution.t()} | {:error, error()}
+          {:ok, Execution.t(), MachineState.t()}
+          | {:discarded, Execution.t()}
+          | {:error, error()}
+          | roll_back()
   defp step_loaded(
          store,
          execution_id,
@@ -3086,7 +3107,10 @@ defmodule StatifierPersistence.Executions do
           step_reporter(),
           DateTime.t()
         ) ::
-          {:ok, Execution.t(), MachineState.t()} | {:discarded, Execution.t()} | {:error, error()}
+          {:ok, Execution.t(), MachineState.t()}
+          | {:discarded, Execution.t()}
+          | {:error, error()}
+          | roll_back()
   defp stepped(store, execution_id, machine_state, event, executor, entry, reporter, stamp) do
     session_id = session_id(machine_state)
     span = open_macrostep(machine_state, session_id, :event, event)
@@ -3211,7 +3235,7 @@ defmodule StatifierPersistence.Executions do
           {:insert, Adapter.metadata()} | :update,
           step_reporter(),
           DateTime.t()
-        ) :: {:ok, Execution.t(), MachineState.t()} | {:error, error()}
+        ) :: {:ok, Execution.t(), MachineState.t()} | {:error, error()} | roll_back()
   defp persist_tail(store, execution_id, machine_state, effects, executor, write, reporter, now) do
     case Machine.identity(machine_state.machine) do
       nil ->
@@ -3254,23 +3278,21 @@ defmodule StatifierPersistence.Executions do
   end
 
   # ADR-0004's 2026-09-28 Amendment: a step's position save that answers an
-  # error after the executor has run undoes the executor's writes with it,
-  # so a redelivery re-drives the whole step rather than one half of it.
-  # Only the step's `:update` rolls back. A create's refused insert answers
-  # as it did: on Postgres the failed `INSERT` has already aborted the
-  # transaction it ran in (the README's "Writing inside a caller's
-  # transaction"), so nothing it wrote commits either way.
+  # error after the executor has run asks for the executor's writes to be
+  # rolled back with it, so a redelivery re-drives the whole step rather
+  # than one half of it. Only the step's `:update` asks. A create's refused
+  # insert answers as it did: on Postgres the failed `INSERT` has already
+  # aborted the transaction it ran in (the README's "Writing inside a
+  # caller's transaction"), so nothing it wrote commits either way.
   @spec failed_write({:insert, Adapter.metadata()} | :update, {:error, error()}) ::
-          {:error, error()}
-  defp failed_write(:update, error), do: rolled_back(error)
+          {:error, error()} | roll_back()
+  defp failed_write(:update, error), do: roll_back(error)
   defp failed_write({:insert, _metadata}, error), do: error
 
-  # Leaves the serialization strategy's body by a throw, so the strategy's
-  # exit path undoes what the body wrote (the Ecto adapter's
-  # `lock_execution/3` rolls its transaction back on any exit that is not a
-  # return), and `serialized/5` hands `result` back as the step's answer.
-  @spec rolled_back({:error, error()}) :: no_return()
-  defp rolled_back(result), do: throw({@rolled_back, result})
+  # The marker `serialized/5` unwraps back to `error`; only the Ecto
+  # adapter's `lock_execution/3` acts on it.
+  @spec roll_back({:error, error()}) :: roll_back()
+  defp roll_back(error), do: {StatifierPersistence.Executions, @roll_back, error}
 
   # ADR-0008's `after_step:` amendment, clause 1's list and clause 3's
   # order, on this side of the seam: the whole effect list, reported once
