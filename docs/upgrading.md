@@ -372,9 +372,13 @@ Schema: **NONE**. The `statifier` floor stays `~> 2.9`.
   it could retire a chart an execution was about to stand on. Both
   answers already existed. This holds on `StatifierPersistence.Storage.Ecto`
   over Postgres under the default serialization strategy, and on
-  `StatifierPersistence.Storage.InMemory`; on another backend, or under a
-  `serialization:` strategy of your own, the window is narrowed and not
-  closed. A host that never retires a chart while writing to it: **NONE**.
+  `StatifierPersistence.Storage.InMemory` with two differences there: a
+  tree that loses at its write, rather than at its re-read of the chart,
+  answers the bare `{:error, {:chart_retired, info}}`, and a create that
+  loses at its insert is refused after its executor has run the create's
+  effects. On another backend, or under a `serialization:` strategy of
+  your own, the window is narrowed and not closed. A host that never
+  retires a chart while writing to it: **NONE**.
 - **If your own two-key Postgres advisory locks use `1397769032` as their
   first key**, they now share a key space with the Ecto adapter's
   per-chart lock; pick another first key.
