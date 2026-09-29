@@ -404,27 +404,33 @@ defmodule StatifierPersistence.Executions do
   back through `StatifierPersistence.Storage.fetch_chart/2` and gets
   the retired arm.
 
-  A retirement refuses for as long as anything pins the hash, but a
-  create that passed this check can still leave its execution on a
-  tombstone. The check answers for the hash as it stood when it was
-  read, and the execution row is inserted later, in a separate write;
-  nothing makes the two one step against a retirement. So one
-  interleaving is not prevented: the create reads the hash as not
-  retired, a retirement of that hash then writes its tombstone, and the
-  create inserts its execution row on the tombstoned hash. The
-  retirement did not see that execution, because when it decided, no
-  row put it on the hash. On `StatifierPersistence.Storage.Ecto` the
-  retirement decides in one conditional `UPDATE` of the chart row, whose
-  `NOT EXISTS` sees, under Postgres's default READ COMMITTED, only the
-  rows committed when the statement runs; the insert and the `UPDATE`
-  write different rows of different tables, so no unique index and no
-  foreign key arbitrates between them, and the per-execution lock the
-  create takes is one a retirement never takes. Which object enforces
-  what: this check turns a create on an already-tombstoned hash into the
-  retired arm; the retirement's own write keeps a tombstone off a hash
-  that an execution it can see still pins; nothing in this package
-  refuses the interleaving above, and this documentation claims nothing
-  about a stricter isolation level a host sets.
+  The check runs twice (ADR-0012's 2026-09-28 Amendment): once here,
+  before `initialize/2`, and again under the execution's exclusion,
+  before any effect is executed and before the insert. A retirement
+  that committed between the two is refused by the second read, and the
+  create executes no effect and writes nothing.
+
+  On `StatifierPersistence.Storage.Ecto` over Postgres, under the
+  default serialization strategy, the second read takes the hash's
+  shared advisory lock inside the transaction `lock_execution/3` opens,
+  the one the insert commits in, and a retirement takes the same lock
+  exclusively as its first statement. So the two are ordered: a
+  retirement that arrives while the create holds the lock waits for the
+  create to commit and then refuses as pinned, and a create that arrives
+  while a retirement holds it waits for the retirement to commit and
+  then answers `{:error, {:chart_retired, info}}`. Neither lands on the
+  other.
+
+  Where no such lock is held the interleaving is narrowed, not closed:
+  on an Ecto backend that is not Postgres, which takes no advisory lock,
+  and under a host `serialization:` strategy, whose exclusion is no
+  database transaction for the lock to be held in. There a retirement
+  can still commit after the second read and before the insert, and the
+  create's execution then stands on the tombstone.
+  `StatifierPersistence.Storage.InMemory` refuses that insert in its own
+  state transition with the retired arm, after the create's effects
+  have run. This documentation claims nothing about a stricter
+  isolation level a host sets.
   """
   @spec create(
           store :: Storage.t(),
@@ -485,7 +491,7 @@ defmodule StatifierPersistence.Executions do
 
       reporter = Keyword.get(opts, :step_reporter)
 
-      serialized(store, execution_id, :create, opts, fn ->
+      persist = fn ->
         persist_tail(
           store,
           execution_id,
@@ -496,8 +502,26 @@ defmodule StatifierPersistence.Executions do
           reporter,
           DateTime.utc_now()
         )
+      end
+
+      # ADR-0012's 2026-09-28 Amendment: the tombstone is read again
+      # under the exclusion, before any effect and before the insert.
+      # A retirement that committed after the check above refuses the
+      # create here, and on the Ecto adapter over Postgres the read
+      # takes the hash's shared lock, which this transaction holds
+      # until the insert commits.
+      serialized(store, execution_id, :create, opts, fn ->
+        unless_retired(store, machine, persist)
       end)
     end
+  end
+
+  # Runs `fun` only when `machine`'s hash is not tombstoned, and answers
+  # the retired arm otherwise (ADR-0012's 2026-09-28 Amendment).
+  @spec unless_retired(Storage.t(), Machine.t(), (-> result)) :: result | {:error, error()}
+        when result: term()
+  defp unless_retired(store, machine, fun) do
+    with :ok <- Storage.check_chart_retired(store, machine), do: fun.()
   end
 
   # A host writing into the reserved namespace collides with the package
@@ -1007,28 +1031,20 @@ defmodule StatifierPersistence.Executions do
     machines (`StatifierPersistence.Migration.Plan.validate/3`), every
     finding at once.
   - `{:chart_retired, info}` - the plan's `to` hash is tombstoned
-    (ADR-0012 decision 6). A retirement refuses for as long as anything
-    pins the hash, but a migration that passed this check can still
-    leave its execution on a tombstone. The check answers for the `to`
-    hash as it stood when it was read, and the execution row is re-pinned
-    onto it later, in a separate write; nothing makes the two one step
-    against a retirement. So one interleaving is not prevented: the
-    migration reads the `to` hash as not retired, a retirement of that
-    hash then writes its tombstone, and the migration re-pins its
-    execution row onto the tombstoned hash. The retirement did not see
-    that execution, because when it decided, no row put it on the hash.
-    On `StatifierPersistence.Storage.Ecto` the retirement decides in one
-    conditional `UPDATE` of the chart row, whose `NOT EXISTS` sees,
-    under Postgres's default READ COMMITTED, only the rows committed when
-    the statement runs; the re-pin and the `UPDATE` write different rows
-    of different tables, so no unique index and no foreign key
-    arbitrates between them, and the per-execution lock the migration
-    takes is one a retirement never takes. Which object enforces what:
-    this check turns a migration to an already-tombstoned hash into this
-    arm; the retirement's own write keeps a tombstone off a hash that an
-    execution it can see still pins; nothing in this package refuses the
-    interleaving above, and this documentation claims nothing about a
-    stricter isolation level a host sets.
+    (ADR-0012 decision 6). The `to` hash is read before the execution
+    is, and again under its exclusion, before the re-pin (ADR-0012's
+    2026-09-28 Amendment), and either read refuses with this arm and
+    writes nothing under either `on_failure:`. On
+    `StatifierPersistence.Storage.Ecto` over Postgres, under the default
+    serialization strategy, the second read holds the hash's shared
+    advisory lock until the re-pin commits, and a retirement takes it
+    exclusively as its first statement, so a retirement racing the
+    migration either waits and refuses as pinned or commits first and
+    this arm is answered. On another Ecto backend, and under a host
+    `serialization:` strategy, a retirement committing after the second
+    read and before the re-pin still leaves the execution on the
+    tombstone; `StatifierPersistence.Storage.InMemory` refuses that
+    re-pin in its own state transition.
   - `{:no_pin_source, states}` - the plan leaves unmapped or drops `states`,
     each a state of the from chart that could own a timer, and `opts`
     supplied no pin source (ADR-0013 decision 6, fail closed). A state the
@@ -1315,8 +1331,13 @@ defmodule StatifierPersistence.Executions do
           {:ok, Execution.t(), migrated()}
           | {:parked, {:migration_refused, [migration_finding()]}}
           | {:error, migrate_error()}
-  defp migrate_tail(store, execution_id, plan, machines, timers, on_failure) do
-    with {:ok, record} <- Storage.fetch_execution(store, execution_id),
+  defp migrate_tail(store, execution_id, plan, {_from, to_machine} = machines, timers, on_failure) do
+    # ADR-0012's 2026-09-28 Amendment: the `to` hash's tombstone is read
+    # again under the exclusion, before the execution is read and before
+    # the re-pin, and a refusal here writes nothing under either
+    # `on_failure:`, as `plan_check/5`'s does.
+    with :ok <- Storage.check_chart_retired(store, to_machine),
+         {:ok, record} <- Storage.fetch_execution(store, execution_id),
          :ok <- check_unlinked(record),
          :ok <- check_record(record, plan) do
       migrate_loaded(store, record, plan, machines, timers, on_failure)
@@ -1571,29 +1592,21 @@ defmodule StatifierPersistence.Executions do
   `migrate/4` checks its one plan - the static validation, a tombstoned
   `to` hash, a missing pin source - before any execution is read.
 
-  A retirement refuses for as long as anything pins the hash, but a tree
-  that passed this check can still leave a node on a tombstone. The check
-  answers for each node's `to` hash as it stood when it was read, and the
-  node's execution row is re-pinned onto it later, in the one write
-  below; nothing makes the two one step against a retirement. So one
-  interleaving is not prevented: the migration reads a node's `to` hash
-  as not retired, a retirement of that hash then writes its tombstone,
-  and the migration re-pins that node's execution row onto the
-  tombstoned hash. The retirement did not see that execution, because
-  when it decided, no row put it on the hash. On
-  `StatifierPersistence.Storage.Ecto` the retirement decides in one
-  conditional `UPDATE` of the chart row, whose `NOT EXISTS` sees, under
-  Postgres's default READ COMMITTED, only the rows committed when the
-  statement runs; the re-pin and the `UPDATE` write different rows of
-  different tables, so no unique index and no foreign key arbitrates
-  between them, and the per-execution locks the migration takes are ones
-  a retirement never takes. Which object enforces what: this check turns
-  a node whose plan moves to an already-tombstoned hash into that node's
-  `{:chart_retired, info}` inside `{:tree_refused, refusals}`; the
-  retirement's own write keeps a tombstone off a hash that an execution
-  it can see still pins; nothing in this package refuses the
-  interleaving above, and this documentation claims nothing about a
-  stricter isolation level a host sets.
+  Every node's `to` hash is read again under the tree's exclusions,
+  before the tree is read and before the one write (ADR-0012's
+  2026-09-28 Amendment); a tombstoned one is that node's
+  `{:chart_retired, info}` inside `{:tree_refused, refusals}`, and
+  nothing is written under either `on_failure:`. On
+  `StatifierPersistence.Storage.Ecto` over Postgres, under the default
+  serialization strategy, each read holds that hash's shared advisory
+  lock until the unit commits, and a retirement takes it exclusively as
+  its first statement, so a retirement racing the tree either waits and
+  refuses as pinned or commits first and the tree is refused. On another
+  Ecto backend, and under a host `serialization:` strategy, a retirement
+  committing after the second read and before the write still leaves a
+  node on the tombstone; `StatifierPersistence.Storage.InMemory` refuses
+  that unit in its own state transition, and the tree then answers the
+  adapter's bare `{:error, {:chart_retired, info}}`.
 
   The tree is read through the linkage, as `cascade_cancel/3` reads it,
   through every child whatever its status (decision 2), and an id in
@@ -1844,7 +1857,8 @@ defmodule StatifierPersistence.Executions do
           | {:parked, {:tree_refused, %{execution_id() => tree_refusal()}}}
           | {:error, migrate_tree_error()}
   defp migrate_tree_locked(store, root_execution_id, prepared, on_failure) do
-    with {:ok, tree} <- read_tree(store, root_execution_id),
+    with :ok <- recheck_retired(store, prepared),
+         {:ok, tree} <- read_tree(store, root_execution_id),
          :ok <- check_named(prepared, tree) do
       leaves_up = tree.order |> Enum.reverse() |> Enum.filter(&Map.has_key?(prepared, &1))
 
@@ -1865,6 +1879,27 @@ defmodule StatifierPersistence.Executions do
 
       decide_tree(store, tree, leaves_up, prepared, validated, refusals, on_failure)
     end
+  end
+
+  # ADR-0012's 2026-09-28 Amendment: every node's `to` hash is read again
+  # under the tree's exclusions, before the tree is read and before the
+  # unit is written, in ascending id as `prepare_tree/4` reads them. A
+  # tombstoned one refuses the tree as `prepare_tree/4` refuses it, and
+  # nothing is written under either `on_failure:`.
+  @spec recheck_retired(Storage.t(), %{execution_id() => prepared()}) ::
+          :ok | {:error, migrate_tree_error()}
+  defp recheck_retired(store, prepared) do
+    refusals =
+      prepared
+      |> Enum.sort()
+      |> Enum.reduce(%{}, fn {id, %{machines: {_from, to_machine}}}, refusals ->
+        case Storage.check_chart_retired(store, to_machine) do
+          :ok -> refusals
+          {:error, reason} -> Map.put(refusals, id, reason)
+        end
+      end)
+
+    if refusals == %{}, do: :ok, else: {:error, {:tree_refused, refusals}}
   end
 
   @spec validate_node(Storage.t(), Adapter.execution_record(), prepared()) ::

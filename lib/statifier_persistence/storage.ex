@@ -232,7 +232,13 @@ defmodule StatifierPersistence.Storage do
   *before* the write must not do it for a create that will be refused.
   `StatifierPersistence.Executions.create/4` runs it ahead of
   `Statifier.Interpreter.initialize/2`, so an execution on a retired
-  chart fires no effect on its way to the refusal.
+  chart fires no effect on its way to the refusal, and again under the
+  execution's exclusion before the insert; `migrate/4` and
+  `migrate_tree/4` likewise read the `to` hash twice (ADR-0012's
+  2026-09-28 Amendment). On `StatifierPersistence.Storage.Ecto` over
+  Postgres the narrow read below takes the hash's shared advisory lock,
+  which a caller inside a transaction holds until it ends, and which a
+  retirement takes exclusively.
 
   The read does not transfer the chart's bytes when the adapter declares
   the optional

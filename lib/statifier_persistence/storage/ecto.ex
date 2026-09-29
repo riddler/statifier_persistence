@@ -84,6 +84,14 @@ if Code.ensure_loaded?(Ecto) do
       children: 0
     }
 
+    # The first key of the per-hash advisory lock (ADR-0012's 2026-09-28
+    # Amendment). The lock is taken in Postgres's two-`int4` form,
+    # `(namespace, hashtext(content_hash))`, which is a key space of its
+    # own: the per-execution lock of `lock_execution/3` is the one-`bigint`
+    # form, and a one-key lock never conflicts with a two-key one. The
+    # value is the four ASCII bytes "SPCH" read as an integer.
+    @chart_lock_namespace 0x53504348
+
     @doc """
     Resolves the `:persistence` host module into the handle every other
     callback takes: the host's repo, its three generated schema modules,
@@ -217,12 +225,50 @@ if Code.ensure_loaded?(Ecto) do
     One `SELECT` of `retired_at` and `retired_by` on the unique index,
     restricted to a tombstoned row, so neither chart blob crosses the
     wire and the cost does not grow with the chart.
+
+    On Postgres the read is preceded by the hash's shared advisory lock,
+    `pg_advisory_xact_lock_shared`, in the key space `retire_chart/3`'s
+    exclusive lock is taken in (ADR-0012's 2026-09-28 Amendment). The
+    lock is transaction-scoped: inside a transaction - the one
+    `lock_execution/3` opens around a create or a migration is the case
+    this exists for - it is held until that transaction ends, so no
+    retirement of the hash can decide until the write that read it has
+    committed or rolled back, and a retirement already holding the lock
+    is waited for, so the read that follows sees its tombstone. Outside
+    a transaction it is released when the statement ends. On any other
+    backend no lock is taken.
     """
     @impl Adapter
     @spec fetch_retired_info(Adapter.opts(), Adapter.content_hash()) ::
             {:ok, Adapter.retired_info() | nil}
     def fetch_retired_info(opts, content_hash) do
+      :ok = chart_lock(opts, content_hash, :shared)
       {:ok, retired_info(opts, content_hash)}
+    end
+
+    # The per-hash advisory lock (ADR-0012's 2026-09-28 Amendment):
+    # shared for a writer that reads the hash's tombstone before putting
+    # an execution on it, exclusive for a retirement. Transaction-scoped,
+    # Postgres only; on any other backend it takes nothing.
+    @spec chart_lock(Adapter.opts(), Adapter.content_hash(), :shared | :exclusive) :: :ok
+    defp chart_lock(opts, content_hash, mode) do
+      repo = repo(opts)
+
+      if repo.__adapter__() == Ecto.Adapters.Postgres do
+        function =
+          case mode do
+            :shared -> "pg_advisory_xact_lock_shared"
+            :exclusive -> "pg_advisory_xact_lock"
+          end
+
+        %{rows: [[_void]]} =
+          repo.query!("SELECT #{function}($1::int4, hashtext($2::text))", [
+            @chart_lock_namespace,
+            content_hash
+          ])
+      end
+
+      :ok
     end
 
     # The tombstone on one hash, or nil for a hash that has none - which
@@ -816,6 +862,17 @@ if Code.ensure_loaded?(Ecto) do
     the counts are taken again and reported, or the retired arm is
     answered if a concurrent retirement won.
 
+    On Postgres the transaction's first statement takes the hash's
+    exclusive advisory lock (ADR-0012's 2026-09-28 Amendment), the one
+    `fetch_retired_info/2` takes shared. A create or a migration that
+    read the hash inside its own transaction still holds the shared
+    lock, so the retirement waits for it to commit, and the `NOT EXISTS`
+    then sees the execution it put on the hash and the retirement
+    refuses as pinned. That is what closes the interleaving the
+    conditional `UPDATE` alone cannot: a write that read the hash as not
+    retired and had not yet committed when the statement ran. On any
+    other backend no lock is taken and that interleaving stays open.
+
     This transaction joins a caller's own when there is one, and it
     takes no per-execution lock: the two contracts the README's
     "Writing inside a caller's transaction" and "Delivering while a
@@ -832,7 +889,10 @@ if Code.ensure_loaded?(Ecto) do
       # there is nothing to undo, and rolling back here would abort a
       # caller's own transaction over an answer that changed no row.
       {:ok, answer} =
-        repo(opts).transaction(fn -> tombstone(opts, content_hash, retirement) end)
+        repo(opts).transaction(fn ->
+          :ok = chart_lock(opts, content_hash, :exclusive)
+          tombstone(opts, content_hash, retirement)
+        end)
 
       answer
     end

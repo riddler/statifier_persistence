@@ -19,6 +19,14 @@ defmodule StatifierPersistence.Ecto.RetireChartRaceTest do
   writer below would be waiting on connection ownership rather than
   committing beside the first. Here the two are real pooled connections
   and the second one's `COMMIT` is one the first can see.
+
+  The conditional `UPDATE` cannot see a write that has read the hash as
+  not retired and not yet committed. ADR-0012's 2026-09-28 Amendment
+  closes that interleaving with a per-hash advisory lock: a create or a
+  migration reads the tombstone under the hash's shared lock inside its
+  own transaction, and a retirement takes the exclusive lock as its first
+  statement. The last cases below race the two on two connections, in
+  both orders.
   """
 
   # Its own rows, outside any sandbox: nothing here may run beside
@@ -28,8 +36,10 @@ defmodule StatifierPersistence.Ecto.RetireChartRaceTest do
   import Ecto.Query, only: [from: 2]
 
   alias Ecto.Adapters.SQL.Sandbox
+  alias Statifier.Machine
   alias StatifierPersistence.EctoHosts.Default
   alias StatifierPersistence.{Executions, Storage}
+  alias StatifierPersistence.Migration.Plan
   alias StatifierPersistence.TestRepo
 
   @prefix "retire-race-"
@@ -134,6 +144,200 @@ defmodule StatifierPersistence.Ecto.RetireChartRaceTest do
     assert row.identity_blob == nil
     assert row.chart_blob == nil
     assert row.retired_by == "ops@example.test"
+  end
+
+  # The retirement arrives while a create holds the hash: the create has
+  # read the tombstone and is running its effects, its row not yet
+  # inserted. The retirement waits for the create's commit and then sees
+  # the execution it must not retire out from under.
+  #
+  # sabotage: in Storage.Ecto.retire_chart/3, drop the exclusive
+  # chart_lock/3 call -> red, the retirement answered {:ok, _} while the
+  # create was still in its effects instead of waiting. The same case is
+  # red when fetch_retired_info/2's shared lock is dropped, and when
+  # create_open/4's second read is. Verified red, reverted from a copy.
+  test "a retirement that arrives during a create waits for it and refuses as pinned", %{
+    store: store
+  } do
+    {machine, content_hash, source} = loan_chart(store)
+    execution_id = @prefix <> "create-first-#{System.unique_integer([:positive])}"
+    test_pid = self()
+
+    # Parks on the first effect only; any later one runs straight through.
+    in_effects = fn effect, _context ->
+      send(test_pid, {:effect, effect})
+
+      if Process.put(:parked, true) == nil do
+        send(test_pid, {:in_effects, self()})
+
+        receive do
+          :go -> :ok
+        end
+      end
+
+      :ok
+    end
+
+    create =
+      Task.async(fn -> Executions.create(store, execution_id, machine, executor: in_effects) end)
+
+    assert_receive {:in_effects, create_pid}, 5_000
+
+    retire =
+      Task.async(fn ->
+        Storage.retire_chart(store, content_hash, retired_by: "circulation-desk")
+      end)
+
+    # Still waiting on the create's shared lock.
+    assert Task.yield(retire, 300) == nil
+
+    send(create_pid, :go)
+    assert {:ok, _execution, _machine_state} = Task.await(create, 5_000)
+    assert {:error, {:pinned, counts}} = Task.await(retire, 5_000)
+    assert counts.executions.active == 1
+
+    assert {:ok, chart} = Storage.fetch_chart(store, content_hash)
+    assert chart.chart_blob == source
+  end
+
+  # The create arrives while a retirement holds the hash, its tombstone
+  # written and not yet committed. The create waits for the commit, reads
+  # the tombstone, and refuses before any effect.
+  #
+  # sabotage: in Storage.Ecto.fetch_retired_info/2, drop the shared
+  # chart_lock/3 call -> red, the create read the hash as not retired
+  # while the tombstone was uncommitted and answered {:ok, _, _} instead
+  # of waiting. Red too with retire_chart/3's exclusive lock dropped.
+  # Verified red, reverted from a copy.
+  test "a create that arrives during a retirement waits for it and answers the retired arm", %{
+    store: store
+  } do
+    {machine, content_hash, _source} = loan_chart(store)
+    execution_id = @prefix <> "retire-first-#{System.unique_integer([:positive])}"
+    test_pid = self()
+    retire = hold_retirement(store, content_hash)
+    assert_receive {:retired_uncommitted, retire_pid, {:ok, info}}, 5_000
+
+    recording = fn effect, _context ->
+      send(test_pid, {:effect, effect})
+      :ok
+    end
+
+    create =
+      Task.async(fn -> Executions.create(store, execution_id, machine, executor: recording) end)
+
+    # Still waiting on the retirement's exclusive lock.
+    assert Task.yield(create, 300) == nil
+
+    send(retire_pid, :commit)
+    assert {:ok, ^info} = Task.await(retire, 5_000)
+    assert {:error, {:chart_retired, ^info}} = Task.await(create, 5_000)
+
+    refute_received {:effect, _effect}
+    assert {:error, :execution_not_found} = Storage.fetch_execution(store, execution_id)
+  end
+
+  # The same order for a migration: the `to` hash's retirement holds the
+  # lock, and the migration waits, reads the tombstone and re-pins
+  # nothing.
+  #
+  # sabotage: the fetch_retired_info/2 mutation above -> red, the
+  # migration answered instead of waiting on the uncommitted tombstone;
+  # red too with retire_chart/3's exclusive lock dropped. Verified red,
+  # reverted from a copy.
+  test "a migration that arrives during the to hash's retirement answers the retired arm", %{
+    store: store
+  } do
+    {from_machine, from_hash, _from_source} = loan_chart(store)
+    {to_machine, to_hash, _to_source} = loan_chart(store)
+    execution_id = @prefix <> "migrate-#{System.unique_integer([:positive])}"
+
+    assert {:ok, _execution, _machine_state} =
+             Executions.create(store, execution_id, from_machine,
+               executor: fn _effect, _context -> :ok end
+             )
+
+    {:ok, plan} =
+      Plan.new(
+        from: from_hash,
+        to: to_hash,
+        states: %{final_id(from_machine) => final_id(to_machine)}
+      )
+
+    retire = hold_retirement(store, to_hash)
+    assert_receive {:retired_uncommitted, retire_pid, {:ok, info}}, 5_000
+
+    migrate =
+      Task.async(fn ->
+        Executions.migrate(store, execution_id, plan,
+          from_machine: from_machine,
+          to_machine: to_machine
+        )
+      end)
+
+    assert Task.yield(migrate, 300) == nil
+
+    send(retire_pid, :commit)
+    assert {:ok, ^info} = Task.await(retire, 5_000)
+    assert {:error, {:chart_retired, ^info}} = Task.await(migrate, 5_000)
+
+    assert {:ok, %{content_hash: ^from_hash, status: :active}} =
+             Storage.fetch_execution(store, execution_id)
+  end
+
+  # A library loan chart of its own for each call: the final state's id
+  # carries a fresh integer, so its content hash is one no other case
+  # shares, and the row is deleted when the case ends.
+  defp loan_chart(store) do
+    returned = "returned_#{System.unique_integer([:positive])}"
+
+    source = """
+    <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="on_loan">
+        <state id="on_loan">
+            <onentry><log label="loan-opened"/></onentry>
+            <transition event="book.returned" target="#{returned}"/>
+        </state>
+        <final id="#{returned}"/>
+    </scxml>
+    """
+
+    {:ok, machine} = Statifier.compile(source)
+    content_hash = Machine.identity(machine).content_hash
+    :ok = Storage.save_chart(store, machine, source)
+    on_exit(fn -> delete_hash(content_hash) end)
+    {machine, content_hash, source}
+  end
+
+  defp final_id(machine) do
+    machine.states
+    |> Tuple.to_list()
+    |> Enum.map(& &1.id)
+    |> Enum.find(&(is_binary(&1) and String.starts_with?(&1, "returned_")))
+  end
+
+  # A retirement on a connection of its own, its transaction held open
+  # after the tombstone is written until the case sends `:commit`.
+  defp hold_retirement(store, content_hash) do
+    test_pid = self()
+
+    Task.async(fn ->
+      {:ok, answer} =
+        TestRepo.transaction(fn ->
+          answer = Storage.retire_chart(store, content_hash, retired_by: "circulation-desk")
+          send(test_pid, {:retired_uncommitted, self(), answer})
+
+          receive do
+            :commit -> answer
+          end
+        end)
+
+      answer
+    end)
+  end
+
+  defp delete_hash(content_hash) do
+    TestRepo.delete_all(from(e in Default.Execution, where: e.content_hash == ^content_hash))
+    TestRepo.delete_all(from(c in Default.Chart, where: c.content_hash == ^content_hash))
   end
 
   defp save_chart(store, content_hash) do

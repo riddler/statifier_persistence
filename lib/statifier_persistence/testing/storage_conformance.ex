@@ -139,6 +139,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
       alias Statifier.Machine
       alias Statifier.Machine.Identity
       alias StatifierPersistence.Execution.Linkage
+      alias StatifierPersistence.Migration.Plan
       alias StatifierPersistence.Storage
       alias StatifierPersistence.Testing.Charts
 
@@ -1653,6 +1654,145 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                    )
 
           assert ids == ["retire-listed-active"]
+        end
+
+        # -- Facade level: a retirement between the check and the write ----
+        #
+        # ADR-0012's 2026-09-28 Amendment. create/4 and migrate/4 read the
+        # tombstone once before their exclusion and again inside it,
+        # before any effect and before any write (migrate_tree/4 does the
+        # same, and is pinned beside its own tree cases). The
+        # serialization strategy below retires the hash the write is about
+        # to put an execution on, then runs the write's body with no lock
+        # of its own - the place a retirement committing after the first
+        # read and before the write lands. The write answers the retired
+        # arm and writes nothing, on every adapter. That a retirement
+        # cannot commit while the write holds the hash's shared lock, on
+        # the Ecto adapter over Postgres, is a live-connection property
+        # and is pinned outside this suite.
+
+        defmodule RetiringSerialization do
+          @moduledoc false
+          @behaviour StatifierPersistence.Serialization
+
+          @impl StatifierPersistence.Serialization
+          def with_execution({adapter, opts, content_hash, test_pid}, _execution_id, fun) do
+            retired =
+              adapter.retire_chart(opts, content_hash, %{
+                retired_at: DateTime.utc_now(),
+                retired_by: "conformance-operator",
+                sources: %{}
+              })
+
+            send(test_pid, {:retired_between, retired})
+            {:ok, fun.()}
+          end
+        end
+
+        @loan_source """
+        <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="on_loan">
+            <state id="on_loan">
+                <onentry><log label="loan-opened"/></onentry>
+                <transition event="book.returned" target="returned"/>
+            </state>
+            <final id="returned"/>
+        </scxml>
+        """
+
+        @renewed_source """
+        <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="checked_out">
+            <state id="checked_out">
+                <onentry><log label="loan-opened"/></onentry>
+                <transition event="book.returned" target="returned"/>
+            </state>
+            <final id="returned"/>
+        </scxml>
+        """
+
+        # sabotage: in StatifierPersistence.Executions.create_open/4, drop
+        # the check_chart_retired/2 read inside the serialized body (call
+        # persist_tail/8 directly) -> red on the in-memory, Ecto and
+        # narrow-read-less conformance suites: on Ecto the create answered
+        # {:ok, _, _} and inserted its execution onto the tombstoned hash;
+        # on the in-memory adapter its insert refused, but only after the
+        # create's effects had reached the executor. Verified red, reverted
+        # from a copy.
+        test "facade: a create whose hash is retired after the first check refuses and writes nothing",
+             %{store: store} do
+          {:ok, machine} = Statifier.compile(@loan_source)
+          :ok = Storage.save_chart(store, machine, @loan_source)
+          content_hash = Machine.identity(machine).content_hash
+          test_pid = self()
+          executor = fn effect, _context -> send(test_pid, {:effect, effect}) && :ok end
+
+          assert {:error, {:chart_retired, info}} =
+                   StatifierPersistence.Executions.create(
+                     store,
+                     "retire-between-create",
+                     machine,
+                     executor: executor,
+                     serialization:
+                       {RetiringSerialization,
+                        {@conformance_adapter, store.opts, content_hash, test_pid}}
+                   )
+
+          assert_received {:retired_between, {:ok, ^info}}
+          refute_received {:effect, _effect}
+
+          assert {:error, :execution_not_found} =
+                   Storage.fetch_execution(store, "retire-between-create")
+        end
+
+        # sabotage: in StatifierPersistence.Executions.migrate_tail/6, drop
+        # the check_chart_retired/2 read of the to machine -> red on the
+        # Ecto conformance suite: the migration answered {:ok, _, _} and
+        # re-pinned the execution onto the tombstoned hash. The in-memory
+        # suites stay green under it, because that adapter's own
+        # update_execution/2 refuses the re-pin with the same answer; its
+        # own case in in_memory_test.exs pins that. Verified red, reverted
+        # from a copy.
+        test "facade: a migration whose to hash is retired after the first check refuses and writes nothing",
+             %{store: store} do
+          {:ok, from_machine} = Statifier.compile(@loan_source)
+          {:ok, to_machine} = Statifier.compile(@renewed_source)
+          :ok = Storage.save_chart(store, from_machine, @loan_source)
+          :ok = Storage.save_chart(store, to_machine, @renewed_source)
+          from_hash = Machine.identity(from_machine).content_hash
+          to_hash = Machine.identity(to_machine).content_hash
+          quiet = fn _effect, _context -> :ok end
+
+          assert {:ok, _execution, _machine_state} =
+                   StatifierPersistence.Executions.create(
+                     store,
+                     "retire-between-migrate",
+                     from_machine,
+                     executor: quiet
+                   )
+
+          {:ok, plan} =
+            Plan.new(
+              from: from_hash,
+              to: to_hash,
+              states: %{"on_loan" => "checked_out"}
+            )
+
+          assert {:error, {:chart_retired, info}} =
+                   StatifierPersistence.Executions.migrate(
+                     store,
+                     "retire-between-migrate",
+                     plan,
+                     from_machine: from_machine,
+                     to_machine: to_machine,
+                     on_failure: :park,
+                     serialization:
+                       {RetiringSerialization,
+                        {@conformance_adapter, store.opts, to_hash, self()}}
+                   )
+
+          assert_received {:retired_between, {:ok, ^info}}
+
+          assert {:ok, %{content_hash: ^from_hash, status: :active}} =
+                   Storage.fetch_execution(store, "retire-between-migrate")
         end
 
         defp retirement(sources \\ %{}) do
