@@ -868,9 +868,11 @@ construction when the executor writes its timer rows through the same repo,
 from the process that called the door. A step's effects reach the executor
 before the new position is written (the `c:StatifierPersistence.Executor.execute/2`
 doc), and both run inside the one transaction `lock_execution/3` opens with
-`repo.transaction/1`. Ecto runs a transaction opened on the same repo in the
-same process as part of the one already open, so the executor's writes
-commit or roll back with the position:
+`repo.transaction/1`. While that transaction is open, any write through the
+same repo in the same process, or a nested transaction on it, runs on the
+connection the step's transaction holds (Ecto's ordinary rule, not this
+package's). The executor needs no transaction of its own: its writes commit
+or roll back with the position:
 
     defmodule MyApp.Executor do
       @behaviour StatifierPersistence.Executor
