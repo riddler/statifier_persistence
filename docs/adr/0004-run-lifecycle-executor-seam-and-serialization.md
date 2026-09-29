@@ -780,7 +780,7 @@ lock is asked for" against each adapter's lock rather than a stand-in.
 
 ## Amendment (2026-09-28, sp-ngnb): the event builder's call is a marked window of the rule
 
-Status of this amendment: proposed (2026-09-28, sp-ngnb). The record
+Status of this amendment: accepted (2026-09-28, sp-ngnb). The record
 above stays accepted, and so does the 2026-09-26 Amendment.
 
 Pure addition: nothing above is edited. The 2026-09-26 Amendment's rule
@@ -811,3 +811,34 @@ that calls no door for its own execution, and a caller passing an
 **Shipped.** The code shipped in statifier_persistence 0.22.0 (tag
 `v0.22.0`), under a Changed line of its changelog; this Amendment adds no
 code.
+
+## Note (2026-09-28, sp-830s): the sp-ngnb Amendment is accepted
+
+The 2026-09-28 sp-ngnb Amendment is accepted on 2026-09-28, under the
+operator's standing grant to flip a record whose code has shipped. The
+code that implements it shipped in statifier_persistence 0.22.0 (tag
+`v0.22.0`, `db26e2f`) under a Changed changelog line. That Amendment's
+own status line flips in place from proposed to accepted; the record
+above and the 2026-09-26 Amendment stay accepted. Every cite below was
+read at `db26e2f`, the tag, and again on `main` at `037f5da`, in
+`lib/statifier_persistence/executions.ex` unless another file is named.
+Between the two, `lib/` changed only for the retired-hash recheck of
+ADR-0012's 2026-09-28 Amendment, which leaves every function cited below
+as it was.
+
+What was re-read before the flip:
+
+- **The window.** `step_loaded/8` runs `resolve_event/2`, which calls the
+  builder, inside `in_step/2` for the execution being stepped, before
+  `stepped/8` runs the executor or writes; `step_tail/7` calls
+  `step_loaded/8` only once the position is loaded.
+- **The restore.** `in_step/2` restores the mark in an `after` clause, so
+  every exit from the builder restores it.
+- **What does not move.** `not_in_step/1` answers
+  `{:error, {:reentrant_step, execution_id}}` for a marked id only, the
+  mark is per process, and a `%Event{}` passes through `resolve_event/2`
+  unchanged.
+- **The case.** `test/statifier_persistence/executions_reentrant_test.exs`
+  carries "a builder calling a door for its own execution is refused".
+- **The changelog.** The 0.22.0 section of `CHANGELOG.md` names the
+  builder's refusal under Changed.
