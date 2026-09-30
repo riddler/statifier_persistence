@@ -6,9 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Entries for unreleased work are not written here directly. Each issue drops a
-fragment in [`changelog.d/`](https://github.com/riddler/statifier_persistence/blob/v0.23.1/changelog.d/README.md); the fragments are assembled
+fragment in [`changelog.d/`](https://github.com/riddler/statifier_persistence/blob/v0.24.0/changelog.d/README.md); the fragments are assembled
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
+
+## [0.24.0] 2026-09-30
+
+Feature release: on Postgres, `StatifierPersistence.Storage.Ecto` keys
+its per-chart advisory lock by the store as well as the content hash, so
+two stores in one database no longer wait on each other, and
+`StatifierPersistence.Testing.StorageConformance` names everything it
+defines in a host test module under one reserved prefix.
+
+Upgrading: no schema migration, the `statifier` floor stays `~> 2.9`,
+and no answer a host matches is added or removed. **A host test module
+that called one of the conformance suite's helpers by its old name adds
+the `conformance_` prefix.** See `docs/upgrading.md`, "0.23 to 0.24".
+
+### Changed
+
+- `StatifierPersistence.Testing.StorageConformance` defines every attribute, function and nested module it puts into a host test module under one reserved prefix, `conformance_` (`Conformance` for a nested module), and its moduledoc states that prefix as the host contract, so a host module's own helpers no longer collide with the suite's; a host test module that called one of the suite's helpers by its old name (`input_log_execution/2`, for one) adds the prefix, and the telemetry handler `__conformance_forward_adapter_call__/4` is now `conformance_forward_adapter_call/4`.
+- `StatifierPersistence.Storage.Ecto` keys its per-chart advisory lock on Postgres by the store (the chart table under its prefix) as well as the content hash, so two stores in one database no longer wait on each other for a hash they share; every caller of one store still shares the lock, the first key is unchanged, and a host that held its own advisory locks against the old key sees no overlap it did not see before.
 
 ## [0.23.1] 2026-09-29
 
