@@ -1,7 +1,7 @@
-# Upgrading a host from 0.13 to 0.22
+# Upgrading a host from 0.13 to 0.23
 
 This page says what a host changes to move `statifier_persistence` from
-0.13.0 to 0.22.0, one minor at a time. A host here is the code that
+0.13.0 to 0.23.0, one minor at a time. A host here is the code that
 embeds the package: the module that calls `use StatifierPersistence.Ecto`,
 the migrations it runs, the options it passes to
 `StatifierPersistence.Executions` and `StatifierPersistence.Driver`, the
@@ -13,7 +13,8 @@ nothing.
 Take the minors in order, and move the pin with each one, as the README
 recommends: `{:statifier_persistence, "~> 0.14.0"}`, then `"~> 0.15.0"`,
 then `"~> 0.16.0"`, then `"~> 0.17.0"`, then `"~> 0.18.0"`, then
-`"~> 0.19.0"`, then `"~> 0.20.0"`, then `"~> 0.21.0"`, then `"~> 0.22.0"`.
+`"~> 0.19.0"`, then `"~> 0.20.0"`, then `"~> 0.21.0"`, then `"~> 0.22.0"`,
+then `"~> 0.23.0"`.
 The `statifier` floor stays `~> 2.6` through 0.17.0; 0.18.0 moves it to
 `~> 2.9`, and every later release keeps it there.
 
@@ -33,7 +34,8 @@ with its own migration,
 and an install still short of V06 follows the V06 ordering rule in the
 `StatifierPersistence.Ecto.Migrations` documentation first. No release before
 0.17.0 adds a migration; 0.17.0 does (V08, under "0.16 to 0.17"), and
-no release from 0.18.0 through 0.22.0 adds one.
+no release from 0.18.0 through 0.23.0 adds one, and neither does the
+0.23.1 patch.
 
 ## 0.13 to 0.14
 
