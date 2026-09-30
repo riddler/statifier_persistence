@@ -410,7 +410,7 @@ Schema: **NONE**. The `statifier` floor stays `~> 2.9`.
 
 ### 0.23.1
 
-**NONE.** Schema: **NONE**, the `statifier` floor stays `~> 2.9`, and no
+Schema: **NONE**, the `statifier` floor stays `~> 2.9`, and no
 answer a host matches is added or removed.
 
 - **If you run `StatifierPersistence.Testing.StorageConformance` from two
