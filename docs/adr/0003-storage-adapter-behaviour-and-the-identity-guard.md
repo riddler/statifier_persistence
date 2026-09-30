@@ -154,3 +154,59 @@ as a new decision.)*
   host-retained SCXML source for `chart_blob`, and does not need to: the
   guard, the keys, and the error vocabulary above hold regardless of which
   a host picks.
+
+## Amendment (2026-09-29): every name the conformance suite defines in a host module carries one reserved prefix
+
+Status of this amendment: proposed (2026-09-29). The record above is
+accepted; this amendment does not change its status line.
+
+Decision 5 ships the conformance suite as a test-case template that a
+host module `use`s. What the `use` defines in that module was not part
+of the record: module attributes, private helper functions, one public
+function and nested modules, a few under a `conformance` prefix and most
+under plain names a host test module could already be using. A host
+that used one of them collided with the suite: a `def` of the same name
+and arity as the suite's `defp` does not compile, a second clause of a
+private function is never reached, a nested module is redefined, and an
+attribute set above the `use` is overwritten below it. This amendment
+makes the names part of decision 5's contract. Ruled by the operator,
+2026-09-29. The cites in `lib/` and `test/` are to the change that
+carries this amendment; every other cite was read on `main` at
+`c720da0`.
+
+**One reserved prefix.** Every name the template's `using` block
+defines in the host module starts with `conformance`: module attributes
+and functions, private and public, with `conformance_`, and nested
+modules with `Conformance`
+(`lib/statifier_persistence/testing/storage_conformance.ex`, the `using`
+block). The spelling is the one the suite's attributes already carried.
+The one public function, the telemetry handler one case attaches, was
+spelled with a leading double underscore; it is now
+`conformance_forward_adapter_call/4`, so a single spelling covers every
+kind of name.
+
+**The prefix is the host's contract.** The suite's moduledoc states it:
+the names under the prefix are the suite's, a host module that defines
+an attribute, a function or a nested module under it collides with the
+suite and that collision is the host's to fix, and every other
+attribute, function and nested module name is the host's. The generated
+tests' names, each starting `adapter:` or `facade:`, are named there
+too. `test/statifier_persistence/storage/reserved_prefix_conformance_test.exs`
+holds the contract: a host module that keeps an attribute, a nested
+module and a private function under names the suite once defined
+without the prefix, and runs the suite's own cases beside them.
+
+**The aliases are named, not removed.** The template also writes six
+aliases into the host module. An alias holds to the end of the module,
+so a host alias above the `use` with one of the same last names is
+replaced below it. They stay, and the moduledoc names all six and the
+two ways around them: alias below the `use`, or under a name of the
+host's own with `as:`. Removing them would spell every module in the
+template in full for no change in what a host can do.
+
+**A host that called a helper by its old name must rename the call.**
+The template defines its helpers inside the host module, so a host test
+module could call them, and one in this repository did
+(`test/statifier_persistence/storage/setup_ordering_conformance_test.exs`).
+Such a call no longer compiles until it carries the prefix. Nothing a
+generated case asserts changes.
