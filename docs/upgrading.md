@@ -362,6 +362,8 @@ Schema: **NONE**. The `statifier` floor stays `~> 2.9`.
 
 ## 0.22 to 0.23
 
+### 0.23.0
+
 Schema: **NONE**. The `statifier` floor stays `~> 2.9`.
 
 - **If a create, migration or tree migration can run while the same
@@ -403,3 +405,15 @@ Schema: **NONE**. The `statifier` floor stays `~> 2.9`.
   step answers the same error and the rollback, if any, is yours. A
   budget-exhausted step still commits its `:failed` record. A host whose
   position saves never fail: **NONE**.
+
+### 0.23.1
+
+**NONE.** Schema: **NONE**, the `statifier` floor stays `~> 2.9`, and no
+answer a host matches is added or removed.
+
+- **If you run `StatifierPersistence.Testing.StorageConformance` from two
+  or more async test modules against one Postgres database**, the suite
+  no longer deadlocks (`40P01`) in the tombstone-check case or in the
+  cases that retire a hash after a create's or a migration's first
+  check: each module that uses the suite now retires chart hashes of its
+  own, derived from the module's name. Nothing in your suite changes.
