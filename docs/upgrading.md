@@ -1,7 +1,7 @@
-# Upgrading a host from 0.13 to 0.23
+# Upgrading a host from 0.13 to 0.24
 
 This page says what a host changes to move `statifier_persistence` from
-0.13.0 to 0.23.0, one minor at a time. A host here is the code that
+0.13.0 to 0.24.0, one minor at a time. A host here is the code that
 embeds the package: the module that calls `use StatifierPersistence.Ecto`,
 the migrations it runs, the options it passes to
 `StatifierPersistence.Executions` and `StatifierPersistence.Driver`, the
@@ -14,7 +14,7 @@ Take the minors in order, and move the pin with each one, as the README
 recommends: `{:statifier_persistence, "~> 0.14.0"}`, then `"~> 0.15.0"`,
 then `"~> 0.16.0"`, then `"~> 0.17.0"`, then `"~> 0.18.0"`, then
 `"~> 0.19.0"`, then `"~> 0.20.0"`, then `"~> 0.21.0"`, then `"~> 0.22.0"`,
-then `"~> 0.23.0"`.
+then `"~> 0.23.0"`, then `"~> 0.24.0"`.
 The `statifier` floor stays `~> 2.6` through 0.17.0; 0.18.0 moves it to
 `~> 2.9`, and every later release keeps it there.
 
@@ -34,7 +34,7 @@ with its own migration,
 and an install still short of V06 follows the V06 ordering rule in the
 `StatifierPersistence.Ecto.Migrations` documentation first. No release before
 0.17.0 adds a migration; 0.17.0 does (V08, under "0.16 to 0.17"), and
-no release from 0.18.0 through 0.23.0 adds one, and neither does the
+no release from 0.18.0 through 0.24.0 adds one, and neither does the
 0.23.1 patch.
 
 ## 0.13 to 0.14
@@ -419,3 +419,32 @@ answer a host matches is added or removed.
   cases that retire a hash after a create's or a migration's first
   check: each module that uses the suite now retires chart hashes of its
   own, derived from the module's name. Nothing in your suite changes.
+
+## 0.23 to 0.24
+
+Schema: **NONE**. The `statifier` floor stays `~> 2.9`, and no answer a
+host matches is added or removed.
+
+- **If two stores share one Postgres database**, two hosts or two test
+  suites each with its own charts table, they no longer wait on each
+  other for a chart hash they share: the Ecto adapter's per-chart
+  advisory lock is now keyed by the store (the charts table under its
+  prefix) as well as the content hash. Every caller of one store still
+  shares the lock, and creates, migrations and retirements on one store
+  are ordered as in 0.23.0. The lock's first key, `1397769032`, is
+  unchanged, so a host whose own two-key advisory locks use another
+  first key, as "0.22 to 0.23" asks, sees no overlap it did not see
+  before. What the lock reaches is in
+  [What the chart lock reaches](chart-lock.md). **NONE**.
+- **If a test module of yours uses
+  `StatifierPersistence.Testing.StorageConformance` and calls one of the
+  helpers the suite defines in it** (`input_log_execution/2`, for one),
+  add the prefix to the call: every attribute, function and nested
+  module the suite puts into your module is now named under one reserved
+  prefix, `conformance_` (`Conformance` for a nested module), and the
+  suite's moduledoc states that prefix as the contract. The telemetry
+  handler `__conformance_forward_adapter_call__/4` is now
+  `conformance_forward_adapter_call/4`. A helper of your own that shared
+  a name with one of the suite's no longer collides with it; one named
+  under the prefix does. A module that calls none of the suite's
+  helpers: **NONE**.
