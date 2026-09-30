@@ -86,10 +86,12 @@ if Code.ensure_loaded?(Ecto) do
 
     # The first key of the per-hash advisory lock (ADR-0012's 2026-09-28
     # Amendment). The lock is taken in Postgres's two-`int4` form,
-    # `(namespace, hashtext(content_hash))`, which is a key space of its
-    # own: the per-execution lock of `lock_execution/3` is the one-`bigint`
-    # form, and a one-key lock never conflicts with a two-key one. The
-    # value is the four ASCII bytes "SPCH" read as an integer.
+    # `(namespace, hashtext(store <> " " <> content_hash))` with the store
+    # from `chart_store/1` (ADR-0012's 2026-09-29 Amendment), which is a
+    # key space of its own: the per-execution lock of `lock_execution/3`
+    # is the one-`bigint` form, and a one-key lock never conflicts with a
+    # two-key one. The value is the four ASCII bytes "SPCH" read as an
+    # integer.
     @chart_lock_namespace 0x53504348
 
     @doc """
@@ -249,7 +251,10 @@ if Code.ensure_loaded?(Ecto) do
     # The per-hash advisory lock (ADR-0012's 2026-09-28 Amendment):
     # shared for a writer that reads the hash's tombstone before putting
     # an execution on it, exclusive for a retirement. Transaction-scoped,
-    # Postgres only; on any other backend it takes nothing.
+    # Postgres only; on any other backend it takes nothing. The second key
+    # hashes the store with the content hash, so two stores in one
+    # database never wait on each other while every caller of one store
+    # still meets on one key per hash.
     @spec chart_lock(Adapter.opts(), Adapter.content_hash(), :shared | :exclusive) :: :ok
     defp chart_lock(opts, content_hash, mode) do
       repo = repo(opts)
@@ -264,12 +269,34 @@ if Code.ensure_loaded?(Ecto) do
         %{rows: [[_void]]} =
           repo.query!("SELECT #{function}($1::int4, hashtext($2::text))", [
             @chart_lock_namespace,
-            content_hash
+            chart_store(opts) <> " " <> content_hash
           ])
       end
 
       :ok
     end
+
+    # The store the chart lock is scoped to (ADR-0012's 2026-09-29
+    # Amendment): the chart schema's table under its prefix when it has
+    # one, read the way `supports_chart_retirement?/1` reads them, each
+    # part a double-quoted identifier with any quote inside doubled. The
+    # quoting makes the identity end at its last closing quote, so no two
+    # stores and hashes join to one text. A table with no prefix is named
+    # bare: which schema it resolves to is the connection's `search_path`,
+    # and that is not part of the key.
+    @spec chart_store(Adapter.opts()) :: String.t()
+    defp chart_store(opts) do
+      schema = chart_schema(opts)
+      table = quote_identifier(schema.__schema__(:source))
+
+      case schema.__schema__(:prefix) do
+        nil -> table
+        prefix -> quote_identifier(prefix) <> "." <> table
+      end
+    end
+
+    @spec quote_identifier(String.t()) :: String.t()
+    defp quote_identifier(name), do: ~s(") <> String.replace(name, ~s("), ~s("")) <> ~s(")
 
     # The tombstone on one hash, or nil for a hash that has none - which
     # includes a hash with no row at all, because "no row" is
