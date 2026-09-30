@@ -147,6 +147,22 @@ defmodule StatifierPersistence.Testing.StorageConformance do
       @conformance_adapter_opts conformance_adapter_opts
       @conformance_prune_scope conformance_prune_scope
 
+      # Every chart hash a generated case retires is this host module's
+      # own. On Postgres a retirement takes the hash's advisory lock
+      # exclusive, the tombstone read takes it shared, and the key is
+      # database-wide: no table, prefix or schema is in it. Cases in one
+      # module run one at a time, but two async modules running this
+      # suite against one database run the same case at once, each in a
+      # sandbox transaction that lasts the whole test; with one shared
+      # hash, a case that reads a tombstone and then retires the hash
+      # upgrades its shared lock while the other module's copy holds
+      # the same shared lock, and Postgres answers 40P01. A suffix
+      # derived from the module name keeps each host on keys of its own.
+      @conformance_hash_suffix :sha256
+                               |> :crypto.hash(inspect(__MODULE__))
+                               |> Base.encode16(case: :lower)
+                               |> binary_part(0, 16)
+
       setup do
         {:ok, store} = Storage.new(@conformance_adapter, @conformance_adapter_opts)
 
@@ -1274,7 +1290,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
 
       if Code.ensure_loaded?(conformance_adapter) and
            function_exported?(conformance_adapter, :retire_chart, 3) do
-        @retire_hash "sha256:conformance-retire"
+        @retire_hash "sha256:conformance-retire-" <> @conformance_hash_suffix
 
         # sabotage: drop the adapter under test's guard on the :active
         # arm - the `Adapter.pinned?(counts) -> ...` cond clause in the
@@ -1608,7 +1624,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           assert {:error, :chart_not_found} =
                    @conformance_adapter.retire_chart(
                      store.opts,
-                     "sha256:conformance-retire-never-stored",
+                     "sha256:conformance-retire-never-stored-" <> @conformance_hash_suffix,
                      retirement()
                    )
         end
@@ -1696,6 +1712,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                 <transition event="book.returned" target="returned"/>
             </state>
             <final id="returned"/>
+            <!-- conformance host #{@conformance_hash_suffix} -->
         </scxml>
         """
 
@@ -1706,6 +1723,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                 <transition event="book.returned" target="returned"/>
             </state>
             <final id="returned"/>
+            <!-- conformance host #{@conformance_hash_suffix} -->
         </scxml>
         """
 
@@ -2090,7 +2108,9 @@ defmodule StatifierPersistence.Testing.StorageConformance do
       # Reverted from a copy.
       test "facade: a retirement either runs or is declined at open", %{store: store} do
         answer =
-          Storage.retire_chart(store, "sha256:conformance-retire-capability",
+          Storage.retire_chart(
+            store,
+            "sha256:conformance-retire-capability-" <> @conformance_hash_suffix,
             retired_by: "conformance-operator"
           )
 
@@ -2150,7 +2170,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           # from a copy.
           test "adapter: the tombstone read answers what the retired arm of fetch_chart/2 carries",
                %{store: store} do
-            hash = "sha256:conformance-tombstone-retired"
+            hash = "sha256:conformance-tombstone-retired-" <> @conformance_hash_suffix
             at = DateTime.from_naive!(~N[2026-09-23 09:00:00.000000], "Etc/UTC")
 
             assert :ok =
@@ -3234,7 +3254,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
       # reverted from a copy.
       test "facade: the tombstone check refuses a retired chart and lets a live one through",
            %{store: store} do
-        {source, machine} = Charts.chart_a()
+        {source, machine} = own_chart_a()
         content_hash = Machine.identity(machine).content_hash
 
         assert :ok = Storage.check_chart_retired(store, machine)
@@ -3302,6 +3322,24 @@ defmodule StatifierPersistence.Testing.StorageConformance do
       @doc false
       def __conformance_forward_adapter_call__(_event, _measurements, metadata, %{pid: pid}) do
         if self() == pid, do: send(pid, {:adapter_call, metadata.callback})
+      end
+
+      # Chart "a" with a comment naming this host module's hash suffix,
+      # so its content hash is this module's own: the case above
+      # retires it, and a retirement must never meet another async
+      # module's copy of the case on one lock key.
+      defp own_chart_a do
+        {source, _machine} = Charts.chart_a()
+
+        own_source =
+          String.replace(
+            source,
+            "</scxml>",
+            "    <!-- conformance host #{@conformance_hash_suffix} -->\n</scxml>"
+          )
+
+        {:ok, machine} = Statifier.compile(own_source)
+        {own_source, machine}
       end
 
       defp narrow_read_declared?(store) do

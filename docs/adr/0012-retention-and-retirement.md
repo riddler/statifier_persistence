@@ -810,3 +810,50 @@ What was re-read before the flip:
   `{:chart_retired, info}` answer.
 - **The changelog.** The 0.23.0 section of `CHANGELOG.md` names the race
   under Changed and the two conformance cases under Added.
+
+## Note (2026-09-29, sp-gbyk): a caller that reads a hash's tombstone and then retires that hash in one transaction upgrades the hash's lock, and the lock's key is database-wide
+
+This Note decides nothing; it states a hazard the sp-3v2c Amendment's
+lock carries, and what the conformance suite now does about it. The
+`lib/` cites were read on `main` at `b11af5d`, except the suite's, which
+the change that carries this Note edits.
+
+**The upgrade.** On the Ecto adapter over Postgres a tombstone read
+takes the hash's shared lock (`lib/statifier_persistence/storage/ecto.ex`,
+`fetch_retired_info/2`), and a retirement takes the exclusive one
+(`retire_chart/3`). Both locks are transaction-scoped. A caller whose
+own transaction first reads a hash's tombstone, or creates or migrates
+an execution onto that hash, and then retires the same hash asks for
+the exclusive lock while it still holds the shared one. One such
+transaction alone is granted the upgrade. Two such transactions on one
+hash each hold the shared lock and each wait for the other to release
+it, and Postgres ends one of them with `deadlock_detected` (SQLSTATE
+`40P01`).
+
+**No path the package offers does this on its own.** `retire_chart/3`
+takes the exclusive lock as the first statement of its transaction and
+holds nothing on the hash before it; `create/4`, `migrate/4`,
+`migrate_tree/4` and `StatifierPersistence.Storage.check_chart_retired/2`
+take only the shared lock; and
+`StatifierPersistence.Executions.retire_chart/4` asks for the active
+executions and the pin sources' counts before the retirement, with no
+tombstone read. The upgrade is reached only when a caller composes a
+tombstone read and a retirement of one hash inside a transaction of
+its own. A test that runs in a sandbox transaction lasting the whole
+test, and reads a hash's tombstone before it retires that hash, is such
+a caller.
+
+**The key is database-wide.** The lock's key is
+`(@chart_lock_namespace, hashtext(content_hash))` (`chart_lock/3`). No
+table, table prefix or schema is part of it, so two hosts, or two
+suites, that store charts in different tables of one database still
+share the lock of every hash they have in common.
+
+**What the conformance suite does.** Its three Ecto modules in this
+package ran the same suite asynchronously against one database, and the
+cases that read a tombstone and then retire its hash met on one key and
+deadlocked. Every chart hash a generated case retires now carries a
+suffix derived from the using module's name
+(`lib/statifier_persistence/testing/storage_conformance.ex`,
+`@conformance_hash_suffix`), so two hosts running the suite in one
+database never retire the same hash.
