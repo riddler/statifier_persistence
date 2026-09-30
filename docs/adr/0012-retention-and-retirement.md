@@ -932,3 +932,37 @@ charts table still share the hash's lock" reads a hash's tombstone
 through one host module while a retirement through another holds the
 lock on the same table, and the read waits. The existing race cases in
 that file run unchanged.
+
+## Note (2026-09-30, sp-ne8c): four of the conformance suite's retired hashes carry the module suffix, and three are computed over a source that carries it
+
+This Note decides nothing; it makes exact one sentence of the 2026-09-29
+Note on the lock-upgrade hazard. That Note's last paragraph says "Every
+chart hash a generated case retires now carries a suffix derived from
+the using module's name". Each such hash is derived from the using
+module's name, but it reaches the hash in one of two ways, and only the
+first puts the suffix in the hash itself. Every cite was read on `main`
+at `9f9eaa0`, in `lib/statifier_persistence/testing/storage_conformance.ex`,
+where `@conformance_hash_suffix` is the first sixteen hex characters of
+the SHA-256 of the using module's name.
+
+- **Suffixed.** A literal hash handed to a retirement ends with
+  `@conformance_hash_suffix`:
+  `@conformance_retire_hash`, which the adapter retirement block's cases
+  retire; the never-stored miss in "adapter: a hash this store never
+  held is a miss, not a retirement"; the capability case "facade: a
+  retirement either runs or is declined at open"; and the tombstone-read
+  case "adapter: the tombstone read answers what the retired arm of
+  fetch_chart/2 carries".
+- **Computed over a source carrying it.** A content hash is the hash of
+  a chart source whose XML comment holds `@conformance_hash_suffix`, so
+  the hash differs per module without the suffix appearing in it:
+  `@conformance_loan_source`, whose chart the facade create case
+  retires; `@conformance_renewed_source`, the to chart the facade
+  migration case retires; and the own copy of chart "a" that "facade:
+  the tombstone check refuses a retired chart and lets a live one
+  through" retires, which `conformance_own_chart_a/0` builds by adding
+  that comment to `StatifierPersistence.Testing.Charts.chart_a/0`'s
+  source.
+
+The earlier Note's conclusion holds for both kinds: two hosts running
+the suite in one database never retire the same hash.
