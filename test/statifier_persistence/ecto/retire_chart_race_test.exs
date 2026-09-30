@@ -25,8 +25,11 @@ defmodule StatifierPersistence.Ecto.RetireChartRaceTest do
   closes that interleaving with a per-hash advisory lock: a create or a
   migration reads the tombstone under the hash's shared lock inside its
   own transaction, and a retirement takes the exclusive lock as its first
-  statement. The last cases below race the two on two connections, in
-  both orders.
+  statement. The cases after the first three race the two on two
+  connections, in both orders; the last two show, per ADR-0012's
+  2026-09-29 Amendment, that the lock is keyed by the store: two stores
+  in one database never wait on each other, and two host modules on one
+  charts table do.
   """
 
   # Its own rows, outside any sandbox: nothing here may run beside
@@ -37,7 +40,7 @@ defmodule StatifierPersistence.Ecto.RetireChartRaceTest do
 
   alias Ecto.Adapters.SQL.Sandbox
   alias Statifier.Machine
-  alias StatifierPersistence.EctoHosts.Default
+  alias StatifierPersistence.EctoHosts.{Bigserial, Default, Scoped, SharedIdScoped}
   alias StatifierPersistence.{Executions, Storage}
   alias StatifierPersistence.Migration.Plan
   alias StatifierPersistence.TestRepo
@@ -285,6 +288,73 @@ defmodule StatifierPersistence.Ecto.RetireChartRaceTest do
              Storage.fetch_execution(store, execution_id)
   end
 
+  # The lock's key is the store's (ADR-0012's 2026-09-29 Amendment):
+  # `Scoped` and `SharedIdScoped` keep charts in the same table name under
+  # two prefixes of one database, so this pair proves the prefix is in the
+  # key. The first retirement holds its exclusive lock uncommitted while
+  # the second retires the same hash in the other store.
+  #
+  # sabotage: in Storage.Ecto.chart_lock/3, pass content_hash alone as the
+  # second key's text (dropping chart_store(opts)) -> red, the second
+  # store's retirement waited on the first store's lock and Task.yield
+  # answered nil. Verified red, reverted from a copy.
+  test "two stores in one database retire one hash without either waiting", %{
+    content_hash: content_hash
+  } do
+    {:ok, scoped} = Storage.new(Storage.Ecto, persistence: Scoped)
+    {:ok, shared_id} = Storage.new(Storage.Ecto, persistence: SharedIdScoped)
+    save_chart(scoped, content_hash)
+    save_chart(shared_id, content_hash)
+
+    retire = hold_retirement(scoped, content_hash)
+    assert_receive {:retired_uncommitted, retire_pid, {:ok, _info}}, 5_000
+
+    other =
+      Task.async(fn ->
+        Storage.retire_chart(shared_id, content_hash, retired_by: "branch-desk")
+      end)
+
+    # Answered while the first store's retirement still holds its lock.
+    assert {:ok, {:ok, %{retired_by: "branch-desk"}}} = Task.yield(other, 2_000)
+
+    send(retire_pid, :commit)
+    assert {:ok, %{retired_by: "circulation-desk"}} = Task.await(retire, 5_000)
+  end
+
+  # Two host modules on one physical table are one store: `Default` and
+  # `Bigserial` name the same charts table with no prefix, so a tombstone
+  # read through one waits for a retirement through the other and then
+  # reads its tombstone. The read is the shared lock's own caller: a
+  # plain `SELECT` does not wait on the uncommitted row, so only the
+  # advisory lock makes it wait.
+  #
+  # sabotage: in Storage.Ecto.chart_store/1, append the chart schema's
+  # module name to a prefix-free identity (a key per host module rather
+  # than per table) -> red, the read did not wait and Task.yield answered
+  # {:ok, {:ok, nil}} instead of nil. Verified red, reverted from a copy.
+  test "two host modules on one charts table still share the hash's lock", %{
+    store: store,
+    content_hash: content_hash
+  } do
+    {:ok, bigserial} = Storage.new(Storage.Ecto, persistence: Bigserial)
+    save_chart(store, content_hash)
+
+    retire = hold_retirement(store, content_hash)
+    assert_receive {:retired_uncommitted, retire_pid, {:ok, info}}, 5_000
+
+    read =
+      Task.async(fn ->
+        bigserial.adapter.fetch_retired_info(bigserial.opts, content_hash)
+      end)
+
+    # Still waiting on the retirement's exclusive lock.
+    assert Task.yield(read, 300) == nil
+
+    send(retire_pid, :commit)
+    assert {:ok, ^info} = Task.await(retire, 5_000)
+    assert {:ok, ^info} = Task.await(read, 5_000)
+  end
+
   # A library loan chart of its own for each call: the final state's id
   # carries a fresh integer, so its content hash is one no other case
   # shares, and the row is deleted when the case ends.
@@ -369,5 +439,9 @@ defmodule StatifierPersistence.Ecto.RetireChartRaceTest do
   defp delete_prefixed do
     TestRepo.delete_all(from(e in Default.Execution, where: like(e.execution_id, ^"#{@prefix}%")))
     TestRepo.delete_all(from(c in Default.Chart, where: like(c.content_hash, ^"#{@prefix}%")))
+
+    for chart <- [Scoped.Chart, SharedIdScoped.Chart] do
+      TestRepo.delete_all(from(c in chart, where: like(c.content_hash, ^"#{@prefix}%")))
+    end
   end
 end

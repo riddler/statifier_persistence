@@ -857,3 +857,78 @@ suffix derived from the using module's name
 (`lib/statifier_persistence/testing/storage_conformance.ex`,
 `@conformance_hash_suffix`), so two hosts running the suite in one
 database never retire the same hash.
+
+## Amendment (2026-09-29): the per-hash lock is keyed by the store, never by the tenant
+
+Status of this amendment: proposed (2026-09-29). The record above is
+accepted; this amendment does not change its status line.
+
+The 2026-09-28 Amendment keyed the per-hash advisory lock on
+`(namespace, hashtext(content_hash))`, and the 2026-09-29 Note on the
+lock-upgrade hazard records what that costs: no table, table prefix or
+schema is in the key, so two hosts, or two suites, that keep charts in
+different tables of one database wait on each other for every hash they
+have in common. This amendment scopes the key's second half by the
+store. It adds to that Note's sentence "The key is database-wide" and
+removes nothing from it: the sentence describes the key before this
+change. Ruled by the operator, 2026-09-29. The functions it names in
+`lib/` are the ones the change that carries it adds or edits; every
+other cite was read on `main` at `4ae883c`.
+
+**The key.** The lock is taken on the two-`int4` key
+`(namespace, hashtext(store <> " " <> content_hash))`
+(`lib/statifier_persistence/storage/ecto.ex`, `chart_lock/3`). The first
+key stays `@chart_lock_namespace`, so the first-key sentence of the
+2026-09-28 Amendment still holds. The store is the chart schema's
+`__schema__(:source)` under its `__schema__(:prefix)` when it has one,
+each written as a double-quoted identifier with any quote inside doubled
+and joined by a dot (`chart_store/1`); `supports_chart_retirement?/1`
+already reads the same two values to ask the store whether it can be
+tombstoned. Both modes, the shared read in `fetch_retired_info/2` and
+the exclusive retirement in `retire_chart/3`, take the one key, so
+every interleaving the 2026-09-28 Amendment closes stays closed within
+a store.
+
+**Its unit is the store.** Two stores in one database, two table names
+or one table name under two prefixes, take different keys for one hash
+and do not wait on each other, short of a collision in `hashtext`'s
+32 bits (the prefix-free edge below is the one other exception).
+Two host modules that name one physical table, the same source under the
+same prefix, are one store and keep sharing the key, because they share
+the rows the lock guards.
+
+**Why the unit is not the tenant.** Beside its primary key, the charts
+table's unique index is on `content_hash` alone
+(`lib/statifier_persistence/ecto/migrations/v01.ex`, `up/1`), and there
+is no scope column in the unique index: a host's `:leading_columns` may
+add a tenant column to the table, but not to the index. So a tombstone is one row per hash within a store,
+and two tenants that share a charts table race on that one row. A key
+per tenant would let a create for one tenant read the hash as not
+retired while a retirement for another tenant tombstones the same row,
+which is the window the 2026-09-28 Amendment closed.
+
+**The prefix-free edge.** A chart schema with no prefix is named by its
+table alone, and which schema that table resolves to is the connection's
+`search_path`. Two hosts with the same table name, no prefix, and
+different `search_path` settings therefore share a key though their rows
+are apart. They wait on each other as every store in one database did
+before this amendment; nothing that was safe becomes unsafe.
+
+**What a host sees.** No answer changes. A write or a retirement on one
+store no longer waits for a retirement or a tombstone read of the same
+hash on another store in the same database; within a store, the waits
+and the losing interleaving's answers are the 2026-09-28 Amendment's.
+The key is still a pair of `int4`s under the same first key, so a host
+whose own two-key advisory locks use a different first key meets this
+lock no more often than before, and one whose locks use the same first
+key meets it on a second key it cannot predict, as before.
+
+**Pinned by.** Two live Postgres cases in
+`test/statifier_persistence/ecto/retire_chart_race_test.exs`: "two
+stores in one database retire one hash without either waiting" retires
+one hash in the `scoped` and `scoped_shared_id` prefixes' charts tables,
+the second while the first holds its lock; "two host modules on one
+charts table still share the hash's lock" reads a hash's tombstone
+through one host module while a retirement through another holds the
+lock on the same table, and the read waits. The existing race cases in
+that file run unchanged.
