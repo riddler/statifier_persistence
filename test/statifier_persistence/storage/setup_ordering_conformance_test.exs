@@ -17,7 +17,7 @@ defmodule StatifierPersistence.Storage.SetupOrderingConformanceTest do
   one.
 
   sabotage: put the eager fixture back - a
-  `setup %{store: store} do %{logged_execution: input_log_execution(store, "execution-conformance-input-log")} end`
+  `setup %{store: store} do %{logged_execution: conformance_input_log_execution(store, "execution-conformance-input-log")} end`
   above the input-log cases in the template, with the three cases reading
   `logged_execution` from the context again -> red here, on every case this
   module generates, with the fixture execution already inserted by the time the
@@ -47,7 +47,7 @@ defmodule StatifierPersistence.Storage.SetupOrderingConformanceTest do
   end
 
   # sabotage: put the eager fixture back in the template - a
-  # `setup %{store: store} do %{logged_execution: input_log_execution(store,
+  # `setup %{store: store} do %{logged_execution: conformance_input_log_execution(store,
   # "execution-conformance-input-log")} end` above the input-log cases -> red,
   # 38 of 38 cases in this module, the host-shaped callback finding the
   # fixture execution already inserted. Verified red, reverted.
@@ -56,7 +56,7 @@ defmodule StatifierPersistence.Storage.SetupOrderingConformanceTest do
     assert order == [:template_setup, :host_setup]
   end
 
-  # sabotage: in the template's `input_log_execution/2`, drop the
+  # sabotage: in the template's `conformance_input_log_execution/2`, drop the
   # `Storage.insert_execution(store, execution_id, machine_state, :active)` -> red,
   # this case plus the four input-log cases that build the fixture, all
   # reporting `:execution_not_found` where an execution was expected. Verified red,
@@ -64,7 +64,7 @@ defmodule StatifierPersistence.Storage.SetupOrderingConformanceTest do
   test "the input-log fixture lands only when a case builds it", %{store: store} do
     assert {:error, :execution_not_found} = Storage.fetch_execution(store, @fixture_execution)
 
-    execution_id = input_log_execution(store, @fixture_execution)
+    execution_id = conformance_input_log_execution(store, @fixture_execution)
 
     assert {:ok, %{status: :active}} = Storage.fetch_execution(store, execution_id)
   end

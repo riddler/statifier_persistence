@@ -57,6 +57,30 @@ defmodule StatifierPersistence.Testing.StorageConformance do
   `context.store` is already open, and already isolated, by the time it is
   called.
 
+  Beyond that `setup`, the `use` defines names of its own in your module,
+  and every one of them carries one reserved prefix, `conformance`: the
+  module attributes and the private helper functions start with
+  `conformance_` (`@conformance_adapter`, `conformance_retirement/1`), so
+  does the one public function (`conformance_forward_adapter_call/4`, the
+  telemetry handler one case attaches), and the nested modules start with
+  `Conformance` (`ConformanceReentrantSerialization` under your module).
+  Those names are the suite's. A host module that defines an attribute, a
+  function or a nested module under the prefix collides with the suite,
+  and that collision is the host's to fix: the prefix is the contract, and
+  every other attribute, function and nested module name is yours. The
+  generated tests are named too, each starting `adapter:` or `facade:`; a
+  host test with one of those names collides as well.
+
+  The `use` also writes six aliases into your module, and an alias holds
+  from where it is written to the end of the module: `Statifier.Machine`,
+  `Statifier.Machine.Identity`, `StatifierPersistence.Execution.Linkage`,
+  `StatifierPersistence.Migration.Plan`, `StatifierPersistence.Storage`
+  and `StatifierPersistence.Testing.Charts`. Below the `use`, `Machine`,
+  `Identity`, `Linkage`, `Plan`, `Storage` and `Charts` name those
+  modules, whatever an alias above the `use` said. A host that means
+  another module by one of those names aliases it below the `use`, or
+  under a name of its own with `as:`.
+
   The optional execution `metadata` map (ADR-0006) is treated differently again:
   its cases are generated for every adapter and assert the answer this
   adapter gives - a round trip when it declares support through
@@ -149,10 +173,13 @@ defmodule StatifierPersistence.Testing.StorageConformance do
 
       # Every chart hash a generated case retires is this host module's
       # own. On Postgres a retirement takes the hash's advisory lock
-      # exclusive, the tombstone read takes it shared, and the key is
-      # database-wide: no table, prefix or schema is in it. Cases in one
-      # module run one at a time, but two async modules running this
-      # suite against one database run the same case at once, each in a
+      # exclusive, the tombstone read takes it shared, and the key is per
+      # store: it hashes the charts table under its prefix with the hash.
+      # Two host modules that name one charts table the same way - the
+      # same table under the same prefix, or the same table name with no
+      # prefix, whatever schema it resolves to - share that key. Cases in
+      # one module run one at a time, but two async modules running this
+      # suite against one such table run the same case at once, each in a
       # sandbox transaction that lasts the whole test; with one shared
       # hash, a case that reads a tombstone and then retires the hash
       # upgrades its shared lock while the other module's copy holds
@@ -862,9 +889,26 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # InMemory, "40 tests, 1 failure" over Ecto). Reverted from a
         # copy.
         test "adapter: two charts' executions never count into each other", %{store: store} do
-          insert_counted_execution(store, "counts-a-active", "sha256:counts-a", :active)
-          insert_counted_execution(store, "counts-b-active", "sha256:counts-b", :active)
-          insert_counted_execution(store, "counts-b-done", "sha256:counts-b", :completed)
+          conformance_insert_counted_execution(
+            store,
+            "counts-a-active",
+            "sha256:counts-a",
+            :active
+          )
+
+          conformance_insert_counted_execution(
+            store,
+            "counts-b-active",
+            "sha256:counts-b",
+            :active
+          )
+
+          conformance_insert_counted_execution(
+            store,
+            "counts-b-done",
+            "sha256:counts-b",
+            :completed
+          )
 
           assert {:ok, a} =
                    @conformance_adapter.count_executions_by_content_hash(
@@ -895,7 +939,12 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         test "adapter: an execution that completes moves from the active key to the completed one",
              %{store: store} do
           inserted =
-            insert_counted_execution(store, "counts-moving", "sha256:counts-moving", :active)
+            conformance_insert_counted_execution(
+              store,
+              "counts-moving",
+              "sha256:counts-moving",
+              :active
+            )
 
           assert {:ok, %{active: 1, completed: 0}} =
                    @conformance_adapter.count_executions_by_content_hash(
@@ -929,7 +978,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         test "adapter: a parked execution round-trips and counts under needs_migration, never under active",
              %{store: store} do
           inserted =
-            insert_counted_execution(
+            conformance_insert_counted_execution(
               store,
               "hold-parked",
               "sha256:counts-parked-hold",
@@ -939,7 +988,12 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           assert {:ok, ^inserted} =
                    @conformance_adapter.fetch_execution(store.opts, "hold-parked")
 
-          insert_counted_execution(store, "hold-waiting", "sha256:counts-parked-hold", :active)
+          conformance_insert_counted_execution(
+            store,
+            "hold-waiting",
+            "sha256:counts-parked-hold",
+            :active
+          )
 
           assert {:ok, counts} =
                    @conformance_adapter.count_executions_by_content_hash(
@@ -989,7 +1043,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           test "adapter: a parent's two durable children count on the child chart, and stop counting when the parent leaves the active arm",
                %{store: store} do
             parent =
-              insert_counted_execution(
+              conformance_insert_counted_execution(
                 store,
                 "counts-pin-parent",
                 "sha256:counts-pin-parent",
@@ -997,7 +1051,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
               )
 
             for index <- 0..1 do
-              insert_pinned_child(
+              conformance_insert_pinned_child(
                 store,
                 "counts-pin-parent/call/#{index}",
                 "sha256:counts-pin-child",
@@ -1049,14 +1103,14 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           # tests, 6 failures"): this case on both adapters, and four
           # more the inversion also breaks. Reverted from the copies.
           test "adapter: a terminal child of an active parent still counts", %{store: store} do
-            insert_counted_execution(
+            conformance_insert_counted_execution(
               store,
               "counts-terminal-parent",
               "sha256:counts-terminal-parent",
               :active
             )
 
-            insert_pinned_child(
+            conformance_insert_pinned_child(
               store,
               "counts-terminal-parent/call/0",
               "sha256:counts-terminal-child",
@@ -1088,14 +1142,14 @@ defmodule StatifierPersistence.Testing.StorageConformance do
             store: store
           } do
             parent =
-              insert_counted_execution(
+              conformance_insert_counted_execution(
                 store,
                 "counts-parked-parent",
                 "sha256:counts-parked-parent",
                 :needs_migration
               )
 
-            insert_pinned_child(
+            conformance_insert_pinned_child(
               store,
               "counts-parked-parent/call/0",
               "sha256:counts-parked-child",
@@ -1135,7 +1189,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           # tests, 2 failures"): this case on both adapters and nothing
           # else. Reverted from the copies.
           test "adapter: the pin decides, not the child row's own content hash", %{store: store} do
-            insert_counted_execution(
+            conformance_insert_counted_execution(
               store,
               "counts-pinned-parent",
               "sha256:counts-pinned-parent",
@@ -1185,7 +1239,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           test "adapter: a pin whose parent execution is not stored counts nothing", %{
             store: store
           } do
-            insert_pinned_child(
+            conformance_insert_pinned_child(
               store,
               "counts-orphan-parent/call/0",
               "sha256:counts-orphan-child",
@@ -1200,7 +1254,13 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                      )
           end
 
-          defp insert_pinned_child(store, execution_id, content_hash, child_index, status) do
+          defp conformance_insert_pinned_child(
+                 store,
+                 execution_id,
+                 content_hash,
+                 child_index,
+                 status
+               ) do
             [parent_execution_id, invoke_id, _index] = String.split(execution_id, "/")
 
             linkage =
@@ -1224,7 +1284,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           end
         end
 
-        defp insert_counted_execution(store, execution_id, content_hash, status) do
+        defp conformance_insert_counted_execution(store, execution_id, content_hash, status) do
           record = %{
             execution_id: execution_id,
             status: status,
@@ -1290,7 +1350,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
 
       if Code.ensure_loaded?(conformance_adapter) and
            function_exported?(conformance_adapter, :retire_chart, 3) do
-        @retire_hash "sha256:conformance-retire-" <> @conformance_hash_suffix
+        @conformance_retire_hash "sha256:conformance-retire-" <> @conformance_hash_suffix
 
         # sabotage: drop the adapter under test's guard on the :active
         # arm - the `Adapter.pinned?(counts) -> ...` cond clause in the
@@ -1300,18 +1360,30 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # refused. Verified red on both conformance suites. Reverted
         # from a copy.
         test "adapter: an :active execution on the hash refuses the retirement", %{store: store} do
-          save_retirable_chart(store, @retire_hash)
-          insert_retire_execution(store, "retire-active", @retire_hash, :active)
+          conformance_save_retirable_chart(store, @conformance_retire_hash)
+
+          conformance_insert_retire_execution(
+            store,
+            "retire-active",
+            @conformance_retire_hash,
+            :active
+          )
 
           assert {:error, {:pinned, counts}} =
-                   @conformance_adapter.retire_chart(store.opts, @retire_hash, retirement())
+                   @conformance_adapter.retire_chart(
+                     store.opts,
+                     @conformance_retire_hash,
+                     conformance_retirement()
+                   )
 
           assert counts.executions.active == 1
           assert counts.children == 0
           assert counts.positions == 0
           assert counts.sources == %{}
 
-          assert {:ok, chart} = @conformance_adapter.fetch_chart(store.opts, @retire_hash)
+          assert {:ok, chart} =
+                   @conformance_adapter.fetch_chart(store.opts, @conformance_retire_hash)
+
           assert chart.chart_blob == <<4, 5, 6>>
         end
 
@@ -1325,18 +1397,30 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # hold's chart was retired instead of refused. Verified red, reverted
         # from the copies.
         test "adapter: a parked execution on the hash refuses the retirement", %{store: store} do
-          save_retirable_chart(store, @retire_hash)
-          insert_retire_execution(store, "retire-parked", @retire_hash, :needs_migration)
+          conformance_save_retirable_chart(store, @conformance_retire_hash)
+
+          conformance_insert_retire_execution(
+            store,
+            "retire-parked",
+            @conformance_retire_hash,
+            :needs_migration
+          )
 
           assert {:error, {:pinned, counts}} =
-                   @conformance_adapter.retire_chart(store.opts, @retire_hash, retirement())
+                   @conformance_adapter.retire_chart(
+                     store.opts,
+                     @conformance_retire_hash,
+                     conformance_retirement()
+                   )
 
           assert counts.executions.needs_migration == 1
           assert counts.executions.active == 0
           assert counts.children == 0
           assert counts.positions == 0
 
-          assert {:ok, chart} = @conformance_adapter.fetch_chart(store.opts, @retire_hash)
+          assert {:ok, chart} =
+                   @conformance_adapter.fetch_chart(store.opts, @conformance_retire_hash)
+
           assert chart.chart_blob == <<4, 5, 6>>
         end
 
@@ -1349,23 +1433,29 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # the bytes. Verified red on both conformance suites. Reverted
         # from a copy.
         test "adapter: a position row on the hash refuses the retirement", %{store: store} do
-          save_retirable_chart(store, @retire_hash)
+          conformance_save_retirable_chart(store, @conformance_retire_hash)
 
           assert :ok =
                    @conformance_adapter.save_position(store.opts, %{
                      session_id: "sess_conformance_retire",
-                     content_hash: @retire_hash,
+                     content_hash: @conformance_retire_hash,
                      identity_blob: <<1, 2, 3>>,
                      position_blob: <<7, 8, 9>>
                    })
 
           assert {:error, {:pinned, counts}} =
-                   @conformance_adapter.retire_chart(store.opts, @retire_hash, retirement())
+                   @conformance_adapter.retire_chart(
+                     store.opts,
+                     @conformance_retire_hash,
+                     conformance_retirement()
+                   )
 
           assert counts.positions == 1
           assert counts.executions.active == 0
 
-          assert {:ok, chart} = @conformance_adapter.fetch_chart(store.opts, @retire_hash)
+          assert {:ok, chart} =
+                   @conformance_adapter.fetch_chart(store.opts, @conformance_retire_hash)
+
           assert chart.chart_blob == <<4, 5, 6>>
         end
 
@@ -1388,34 +1478,46 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         if function_exported?(conformance_adapter, :supports_metadata?, 1) do
           test "adapter: a terminal child's pin under an :active parent refuses the retirement",
                %{store: store} do
-            save_retirable_chart(store, @retire_hash)
-            insert_retire_execution(store, "retire-pin-parent", "sha256:retire-parent", :active)
+            conformance_save_retirable_chart(store, @conformance_retire_hash)
+
+            conformance_insert_retire_execution(
+              store,
+              "retire-pin-parent",
+              "sha256:retire-parent",
+              :active
+            )
 
             assert :ok =
                      @conformance_adapter.insert_execution(store.opts, %{
                        execution_id: "retire-pin-parent/call/0",
                        status: :completed,
-                       content_hash: @retire_hash,
+                       content_hash: @conformance_retire_hash,
                        identity_blob: <<1, 2, 3>>,
                        position_blob: <<7, 8, 9>>,
                        failure: nil,
                        metadata:
                          Linkage.to_metadata(
-                           Linkage.new("retire-pin-parent", "call", 0, @retire_hash)
+                           Linkage.new("retire-pin-parent", "call", 0, @conformance_retire_hash)
                          ),
                        outcome_blob: nil,
                        ended_at: nil
                      })
 
             assert {:error, {:pinned, counts}} =
-                     @conformance_adapter.retire_chart(store.opts, @retire_hash, retirement())
+                     @conformance_adapter.retire_chart(
+                       store.opts,
+                       @conformance_retire_hash,
+                       conformance_retirement()
+                     )
 
             assert counts.children == 1
             assert counts.executions.active == 0
             assert counts.executions.completed == 1
             assert counts.positions == 0
 
-            assert {:ok, chart} = @conformance_adapter.fetch_chart(store.opts, @retire_hash)
+            assert {:ok, chart} =
+                     @conformance_adapter.fetch_chart(store.opts, @conformance_retire_hash)
+
             assert chart.chart_blob == <<4, 5, 6>>
           end
         end
@@ -1429,9 +1531,9 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         if function_exported?(conformance_adapter, :supports_metadata?, 1) do
           test "adapter: a terminal child's pin under a parked parent refuses the retirement",
                %{store: store} do
-            save_retirable_chart(store, @retire_hash)
+            conformance_save_retirable_chart(store, @conformance_retire_hash)
 
-            insert_retire_execution(
+            conformance_insert_retire_execution(
               store,
               "retire-parked-parent",
               "sha256:retire-parent",
@@ -1442,25 +1544,36 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                      @conformance_adapter.insert_execution(store.opts, %{
                        execution_id: "retire-parked-parent/call/0",
                        status: :completed,
-                       content_hash: @retire_hash,
+                       content_hash: @conformance_retire_hash,
                        identity_blob: <<1, 2, 3>>,
                        position_blob: <<7, 8, 9>>,
                        failure: nil,
                        metadata:
                          Linkage.to_metadata(
-                           Linkage.new("retire-parked-parent", "call", 0, @retire_hash)
+                           Linkage.new(
+                             "retire-parked-parent",
+                             "call",
+                             0,
+                             @conformance_retire_hash
+                           )
                          ),
                        outcome_blob: nil,
                        ended_at: nil
                      })
 
             assert {:error, {:pinned, counts}} =
-                     @conformance_adapter.retire_chart(store.opts, @retire_hash, retirement())
+                     @conformance_adapter.retire_chart(
+                       store.opts,
+                       @conformance_retire_hash,
+                       conformance_retirement()
+                     )
 
             assert counts.children == 1
             assert counts.executions.needs_migration == 0
 
-            assert {:ok, chart} = @conformance_adapter.fetch_chart(store.opts, @retire_hash)
+            assert {:ok, chart} =
+                     @conformance_adapter.fetch_chart(store.opts, @conformance_retire_hash)
+
             assert chart.chart_blob == <<4, 5, 6>>
           end
         end
@@ -1473,21 +1586,23 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # on both conformance suites. Reverted from a copy.
         test "adapter: a source's non-zero count refuses, under that source's module name",
              %{store: store} do
-          save_retirable_chart(store, @retire_hash)
+          conformance_save_retirable_chart(store, @conformance_retire_hash)
           sources = %{__MODULE__ => %{pending_timers: 2}}
 
           assert {:error, {:pinned, counts}} =
                    @conformance_adapter.retire_chart(
                      store.opts,
-                     @retire_hash,
-                     retirement(sources)
+                     @conformance_retire_hash,
+                     conformance_retirement(sources)
                    )
 
           assert counts.sources == sources
           assert counts.executions.active == 0
           assert counts.positions == 0
 
-          assert {:ok, chart} = @conformance_adapter.fetch_chart(store.opts, @retire_hash)
+          assert {:ok, chart} =
+                   @conformance_adapter.fetch_chart(store.opts, @conformance_retire_hash)
+
           assert chart.chart_blob == <<4, 5, 6>>
         end
 
@@ -1507,12 +1622,19 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # from a copy.
         test "adapter: a drained hash is retired, keeping the row and dropping the bytes",
              %{store: store} do
-          save_retirable_chart(store, @retire_hash)
-          insert_retire_execution(store, "retire-done", @retire_hash, :completed)
+          conformance_save_retirable_chart(store, @conformance_retire_hash)
+
+          conformance_insert_retire_execution(
+            store,
+            "retire-done",
+            @conformance_retire_hash,
+            :completed
+          )
+
           at = DateTime.from_naive!(~N[2026-09-19 18:00:00.000000], "Etc/UTC")
 
           assert {:ok, info} =
-                   @conformance_adapter.retire_chart(store.opts, @retire_hash, %{
+                   @conformance_adapter.retire_chart(store.opts, @conformance_retire_hash, %{
                      retired_at: at,
                      retired_by: "conformance-operator",
                      sources: %{}
@@ -1524,7 +1646,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           # The row and its hash survive the removal: that is what makes
           # the retired arm answerable at all, rather than a miss.
           assert {:error, {:chart_retired, read_back}} =
-                   @conformance_adapter.fetch_chart(store.opts, @retire_hash)
+                   @conformance_adapter.fetch_chart(store.opts, @conformance_retire_hash)
 
           assert read_back.retired_at == at
           assert read_back.retired_by == "conformance-operator"
@@ -1532,7 +1654,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           assert {:ok, counts} =
                    @conformance_adapter.count_executions_by_content_hash(
                      store.opts,
-                     @retire_hash
+                     @conformance_retire_hash
                    )
 
           assert counts.completed == 1
@@ -1545,19 +1667,35 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # both conformance suites. Reverted from a copy.
         test "adapter: a terminal execution never pins, and a retired hash is never a miss",
              %{store: store} do
-          save_retirable_chart(store, @retire_hash)
-          insert_retire_execution(store, "retire-failed", @retire_hash, :failed)
-          insert_retire_execution(store, "retire-cancelled", @retire_hash, :cancelled)
+          conformance_save_retirable_chart(store, @conformance_retire_hash)
+
+          conformance_insert_retire_execution(
+            store,
+            "retire-failed",
+            @conformance_retire_hash,
+            :failed
+          )
+
+          conformance_insert_retire_execution(
+            store,
+            "retire-cancelled",
+            @conformance_retire_hash,
+            :cancelled
+          )
 
           assert {:ok, _info} =
-                   @conformance_adapter.retire_chart(store.opts, @retire_hash, retirement())
+                   @conformance_adapter.retire_chart(
+                     store.opts,
+                     @conformance_retire_hash,
+                     conformance_retirement()
+                   )
 
           assert {:error, {:chart_retired, _info}} =
-                   @conformance_adapter.fetch_chart(store.opts, @retire_hash)
+                   @conformance_adapter.fetch_chart(store.opts, @conformance_retire_hash)
 
           refute match?(
                    {:error, :chart_not_found},
-                   @conformance_adapter.fetch_chart(store.opts, @retire_hash)
+                   @conformance_adapter.fetch_chart(store.opts, @conformance_retire_hash)
                  )
         end
 
@@ -1571,19 +1709,19 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # from a copy.
         test "adapter: retiring twice answers the retired arm, never a second tombstone",
              %{store: store} do
-          save_retirable_chart(store, @retire_hash)
+          conformance_save_retirable_chart(store, @conformance_retire_hash)
           first = DateTime.from_naive!(~N[2026-09-19 18:00:00.000000], "Etc/UTC")
           second = DateTime.from_naive!(~N[2026-09-19 19:00:00.000000], "Etc/UTC")
 
           assert {:ok, _info} =
-                   @conformance_adapter.retire_chart(store.opts, @retire_hash, %{
+                   @conformance_adapter.retire_chart(store.opts, @conformance_retire_hash, %{
                      retired_at: first,
                      retired_by: "first-operator",
                      sources: %{}
                    })
 
           assert {:error, {:chart_retired, info}} =
-                   @conformance_adapter.retire_chart(store.opts, @retire_hash, %{
+                   @conformance_adapter.retire_chart(store.opts, @conformance_retire_hash, %{
                      retired_at: second,
                      retired_by: "second-operator",
                      sources: %{}
@@ -1598,20 +1736,24 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # after the retirement answered :ok instead of the retired arm.
         # Verified red on both conformance suites. Reverted from a copy.
         test "adapter: saving a tombstoned hash refuses and does not revive it", %{store: store} do
-          save_retirable_chart(store, @retire_hash)
+          conformance_save_retirable_chart(store, @conformance_retire_hash)
 
           assert {:ok, _info} =
-                   @conformance_adapter.retire_chart(store.opts, @retire_hash, retirement())
+                   @conformance_adapter.retire_chart(
+                     store.opts,
+                     @conformance_retire_hash,
+                     conformance_retirement()
+                   )
 
           assert {:error, {:chart_retired, _info}} =
                    @conformance_adapter.save_chart(store.opts, %{
-                     content_hash: @retire_hash,
+                     content_hash: @conformance_retire_hash,
                      identity_blob: <<1, 2, 3>>,
                      chart_blob: <<4, 5, 6>>
                    })
 
           assert {:error, {:chart_retired, _info}} =
-                   @conformance_adapter.fetch_chart(store.opts, @retire_hash)
+                   @conformance_adapter.fetch_chart(store.opts, @conformance_retire_hash)
         end
 
         # sabotage: in the adapter under test's retire_chart/3, drop the
@@ -1625,7 +1767,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                    @conformance_adapter.retire_chart(
                      store.opts,
                      "sha256:conformance-retire-never-stored-" <> @conformance_hash_suffix,
-                     retirement()
+                     conformance_retirement()
                    )
         end
 
@@ -1636,14 +1778,26 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # suites. Reverted from a copy.
         test "adapter: only the :active executions on the hash are listed for a pin source",
              %{store: store} do
-          save_retirable_chart(store, @retire_hash)
-          insert_retire_execution(store, "retire-listed", @retire_hash, :active)
-          insert_retire_execution(store, "retire-unlisted", @retire_hash, :completed)
+          conformance_save_retirable_chart(store, @conformance_retire_hash)
+
+          conformance_insert_retire_execution(
+            store,
+            "retire-listed",
+            @conformance_retire_hash,
+            :active
+          )
+
+          conformance_insert_retire_execution(
+            store,
+            "retire-unlisted",
+            @conformance_retire_hash,
+            :completed
+          )
 
           assert {:ok, ids} =
                    @conformance_adapter.list_active_execution_ids_by_content_hash(
                      store.opts,
-                     @retire_hash
+                     @conformance_retire_hash
                    )
 
           assert ids == ["retire-listed"]
@@ -1659,14 +1813,26 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # this case alone in each: the parked id was listed too. Verified red,
         # reverted from the copies.
         test "adapter: a parked execution is not listed for a pin source", %{store: store} do
-          save_retirable_chart(store, @retire_hash)
-          insert_retire_execution(store, "retire-listed-active", @retire_hash, :active)
-          insert_retire_execution(store, "retire-unlisted-parked", @retire_hash, :needs_migration)
+          conformance_save_retirable_chart(store, @conformance_retire_hash)
+
+          conformance_insert_retire_execution(
+            store,
+            "retire-listed-active",
+            @conformance_retire_hash,
+            :active
+          )
+
+          conformance_insert_retire_execution(
+            store,
+            "retire-unlisted-parked",
+            @conformance_retire_hash,
+            :needs_migration
+          )
 
           assert {:ok, ids} =
                    @conformance_adapter.list_active_execution_ids_by_content_hash(
                      store.opts,
-                     @retire_hash
+                     @conformance_retire_hash
                    )
 
           assert ids == ["retire-listed-active"]
@@ -1687,7 +1853,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # the Ecto adapter over Postgres, is a live-connection property
         # and is pinned outside this suite.
 
-        defmodule RetiringSerialization do
+        defmodule ConformanceRetiringSerialization do
           @moduledoc false
           @behaviour StatifierPersistence.Serialization
 
@@ -1705,7 +1871,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           end
         end
 
-        @loan_source """
+        @conformance_loan_source """
         <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="on_loan">
             <state id="on_loan">
                 <onentry><log label="loan-opened"/></onentry>
@@ -1716,7 +1882,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         </scxml>
         """
 
-        @renewed_source """
+        @conformance_renewed_source """
         <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="checked_out">
             <state id="checked_out">
                 <onentry><log label="loan-opened"/></onentry>
@@ -1737,8 +1903,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # from a copy.
         test "facade: a create whose hash is retired after the first check refuses and writes nothing",
              %{store: store} do
-          {:ok, machine} = Statifier.compile(@loan_source)
-          :ok = Storage.save_chart(store, machine, @loan_source)
+          {:ok, machine} = Statifier.compile(@conformance_loan_source)
+          :ok = Storage.save_chart(store, machine, @conformance_loan_source)
           content_hash = Machine.identity(machine).content_hash
           test_pid = self()
           executor = fn effect, _context -> send(test_pid, {:effect, effect}) && :ok end
@@ -1750,7 +1916,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                      machine,
                      executor: executor,
                      serialization:
-                       {RetiringSerialization,
+                       {ConformanceRetiringSerialization,
                         {@conformance_adapter, store.opts, content_hash, test_pid}}
                    )
 
@@ -1771,10 +1937,10 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # from a copy.
         test "facade: a migration whose to hash is retired after the first check refuses and writes nothing",
              %{store: store} do
-          {:ok, from_machine} = Statifier.compile(@loan_source)
-          {:ok, to_machine} = Statifier.compile(@renewed_source)
-          :ok = Storage.save_chart(store, from_machine, @loan_source)
-          :ok = Storage.save_chart(store, to_machine, @renewed_source)
+          {:ok, from_machine} = Statifier.compile(@conformance_loan_source)
+          {:ok, to_machine} = Statifier.compile(@conformance_renewed_source)
+          :ok = Storage.save_chart(store, from_machine, @conformance_loan_source)
+          :ok = Storage.save_chart(store, to_machine, @conformance_renewed_source)
           from_hash = Machine.identity(from_machine).content_hash
           to_hash = Machine.identity(to_machine).content_hash
           quiet = fn _effect, _context -> :ok end
@@ -1803,7 +1969,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                      to_machine: to_machine,
                      on_failure: :park,
                      serialization:
-                       {RetiringSerialization,
+                       {ConformanceRetiringSerialization,
                         {@conformance_adapter, store.opts, to_hash, self()}}
                    )
 
@@ -1813,7 +1979,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                    Storage.fetch_execution(store, "retire-between-migrate")
         end
 
-        defp retirement(sources \\ %{}) do
+        defp conformance_retirement(sources \\ %{}) do
           %{
             retired_at: DateTime.utc_now(),
             retired_by: "conformance-operator",
@@ -1821,7 +1987,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           }
         end
 
-        defp save_retirable_chart(store, content_hash) do
+        defp conformance_save_retirable_chart(store, content_hash) do
           assert :ok =
                    @conformance_adapter.save_chart(store.opts, %{
                      content_hash: content_hash,
@@ -1830,7 +1996,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                    })
         end
 
-        defp insert_retire_execution(store, execution_id, content_hash, status) do
+        defp conformance_insert_retire_execution(store, execution_id, content_hash, status) do
           assert :ok =
                    @conformance_adapter.insert_execution(store.opts, %{
                      execution_id: execution_id,
@@ -1855,8 +2021,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
 
       if Code.ensure_loaded?(conformance_adapter) and
            function_exported?(conformance_adapter, :list_execution_ids_by_content_hash, 3) do
-        @listing_hash "sha256:conformance-listing-by-status"
-        @listing_other_hash "sha256:conformance-listing-other"
+        @conformance_listing_hash "sha256:conformance-listing-by-status"
+        @conformance_listing_other_hash "sha256:conformance-listing-other"
 
         # sabotage: in the adapter under test's
         # list_execution_ids_by_content_hash/3, drop the status predicate
@@ -1865,25 +2031,55 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # from a copy.
         test "adapter: the listing names the executions on the hash in the asked statuses",
              %{store: store} do
-          save_listing_chart(store, @listing_hash)
-          save_listing_chart(store, @listing_other_hash)
-          insert_listing_execution(store, "listing-c-active", @listing_hash, :active)
-          insert_listing_execution(store, "listing-a-parked", @listing_hash, :needs_migration)
-          insert_listing_execution(store, "listing-b-done", @listing_hash, :completed)
-          insert_listing_execution(store, "listing-d-cancelled", @listing_hash, :cancelled)
-          insert_listing_execution(store, "listing-e-elsewhere", @listing_other_hash, :active)
+          conformance_save_listing_chart(store, @conformance_listing_hash)
+          conformance_save_listing_chart(store, @conformance_listing_other_hash)
+
+          conformance_insert_listing_execution(
+            store,
+            "listing-c-active",
+            @conformance_listing_hash,
+            :active
+          )
+
+          conformance_insert_listing_execution(
+            store,
+            "listing-a-parked",
+            @conformance_listing_hash,
+            :needs_migration
+          )
+
+          conformance_insert_listing_execution(
+            store,
+            "listing-b-done",
+            @conformance_listing_hash,
+            :completed
+          )
+
+          conformance_insert_listing_execution(
+            store,
+            "listing-d-cancelled",
+            @conformance_listing_hash,
+            :cancelled
+          )
+
+          conformance_insert_listing_execution(
+            store,
+            "listing-e-elsewhere",
+            @conformance_listing_other_hash,
+            :active
+          )
 
           assert {:ok, ["listing-a-parked", "listing-c-active"]} =
                    @conformance_adapter.list_execution_ids_by_content_hash(
                      store.opts,
-                     @listing_hash,
+                     @conformance_listing_hash,
                      [:active, :needs_migration]
                    )
 
           assert {:ok, ["listing-b-done", "listing-d-cancelled"]} =
                    @conformance_adapter.list_execution_ids_by_content_hash(
                      store.opts,
-                     @listing_hash,
+                     @conformance_listing_hash,
                      [:completed, :cancelled]
                    )
         end
@@ -1904,7 +2100,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # order. Verified red on the in-memory and the Ecto (Postgres)
         # suites, reverted from a copy.
         test "adapter: the listing is in ascending execution id", %{store: store} do
-          save_listing_chart(store, @listing_hash)
+          conformance_save_listing_chart(store, @conformance_listing_hash)
 
           ids = for n <- 1..40, do: "listing-order-#{n}"
           inserted = Enum.sort(ids, :desc)
@@ -1912,13 +2108,13 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           refute inserted == Enum.sort(ids)
 
           for id <- inserted do
-            insert_listing_execution(store, id, @listing_hash, :active)
+            conformance_insert_listing_execution(store, id, @conformance_listing_hash, :active)
           end
 
           assert {:ok, listed} =
                    @conformance_adapter.list_execution_ids_by_content_hash(
                      store.opts,
-                     @listing_hash,
+                     @conformance_listing_hash,
                      [:active]
                    )
 
@@ -1931,8 +2127,14 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # execution. Verified red on both conformance suites. Reverted
         # from a copy.
         test "adapter: a hash this store never held lists nothing", %{store: store} do
-          save_listing_chart(store, @listing_other_hash)
-          insert_listing_execution(store, "listing-f-elsewhere", @listing_other_hash, :active)
+          conformance_save_listing_chart(store, @conformance_listing_other_hash)
+
+          conformance_insert_listing_execution(
+            store,
+            "listing-f-elsewhere",
+            @conformance_listing_other_hash,
+            :active
+          )
 
           assert {:ok, []} =
                    @conformance_adapter.list_execution_ids_by_content_hash(
@@ -1942,7 +2144,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                    )
         end
 
-        defp save_listing_chart(store, content_hash) do
+        defp conformance_save_listing_chart(store, content_hash) do
           assert :ok =
                    @conformance_adapter.save_chart(store.opts, %{
                      content_hash: content_hash,
@@ -1951,7 +2153,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
                    })
         end
 
-        defp insert_listing_execution(store, execution_id, content_hash, status) do
+        defp conformance_insert_listing_execution(store, execution_id, content_hash, status) do
           assert :ok =
                    @conformance_adapter.insert_execution(store.opts, %{
                      execution_id: execution_id,
@@ -1987,7 +2189,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         test "adapter: a tree write lands every re-pin and park, the pin rewritten", %{
           store: store
         } do
-          parent = insert_tree_execution(store, "tree-parent", "sha256:tree-parent-old", %{})
+          parent =
+            conformance_insert_tree_execution(store, "tree-parent", "sha256:tree-parent-old", %{})
 
           child_metadata =
             if Storage.metadata_supported?(store) do
@@ -2000,7 +2203,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
             end
 
           child =
-            insert_tree_execution(
+            conformance_insert_tree_execution(
               store,
               "tree-parent/pickup/0",
               "sha256:tree-child-old",
@@ -2052,7 +2255,9 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # execution came back changed. Verified red, reverted from the
         # copies.
         test "adapter: a tree write that cannot land one write lands none", %{store: store} do
-          first = insert_tree_execution(store, "tree-first", "sha256:tree-first-old", %{})
+          first =
+            conformance_insert_tree_execution(store, "tree-first", "sha256:tree-first-old", %{})
+
           repinned = %{first | content_hash: "sha256:tree-first-new", position_blob: <<21>>}
 
           assert {:error, :execution_not_found} =
@@ -2064,7 +2269,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           assert {:ok, ^first} = @conformance_adapter.fetch_execution(store.opts, "tree-first")
         end
 
-        defp insert_tree_execution(store, execution_id, content_hash, metadata) do
+        defp conformance_insert_tree_execution(store, execution_id, content_hash, metadata) do
           record = %{
             execution_id: execution_id,
             status: :active,
@@ -2501,7 +2706,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # reverted.
         test "adapter: append_input/3 assigns dense ordinals from zero and lists them in order",
              %{store: store} do
-          execution_id = input_log_execution(store, "execution-conformance-input-log")
+          execution_id = conformance_input_log_execution(store, "execution-conformance-input-log")
 
           for {door, index} <- Enum.with_index(["create", "step", "done_invocation"]) do
             assert {:ok, ^index} =
@@ -2539,8 +2744,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # conformance modules and on the SQLite mirror: one execution's log came
         # back carrying the other's entries. Verified red, reverted.
         test "adapter: two executions' logs never see each other's entries", %{store: store} do
-          execution_id = input_log_execution(store, "execution-conformance-input-log")
-          other = input_log_execution(store, "execution-conformance-input-log-other")
+          execution_id = conformance_input_log_execution(store, "execution-conformance-input-log")
+          other = conformance_input_log_execution(store, "execution-conformance-input-log-other")
 
           for door <- ["step", "step"] do
             assert {:ok, _seq} =
@@ -2582,7 +2787,8 @@ defmodule StatifierPersistence.Testing.StorageConformance do
             :ok = apply(@conformance_adapter, :isolate, [capped.opts])
           end
 
-          execution_id = input_log_execution(capped, "execution-conformance-input-log-cap")
+          execution_id =
+            conformance_input_log_execution(capped, "execution-conformance-input-log-cap")
 
           append = fn ->
             @conformance_adapter.append_input(capped.opts, execution_id, %{
@@ -2616,7 +2822,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         test "facade: an event round-trips through the log equal to what was delivered", %{
           store: store
         } do
-          execution_id = input_log_execution(store, "execution-conformance-input-log")
+          execution_id = conformance_input_log_execution(store, "execution-conformance-input-log")
 
           event = %Statifier.Event{
             name: "done.invoke.call",
@@ -2643,7 +2849,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # there. Called from inside each case that needs it rather than
         # from a `setup`, so nothing this template registers writes before
         # a host's own callbacks have run (see the moduledoc).
-        defp input_log_execution(store, execution_id) do
+        defp conformance_input_log_execution(store, execution_id) do
           {_source, machine} = Charts.chart_a()
 
           machine_state =
@@ -2678,7 +2884,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
              %{store: store} do
           ended = ~U[2026-01-01 00:00:00.000000Z]
 
-          prune_execution(store, "execution-conformance-prune-kept", :failed, ended,
+          conformance_prune_execution(store, "execution-conformance-prune-kept", :failed, ended,
             failure: "boom"
           )
 
@@ -2720,22 +2926,34 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           store: store
         } do
           cutoff = ~U[2026-02-01 00:00:00.000000Z]
-          prune_execution(store, "execution-conformance-prune-at-cutoff", :completed, cutoff)
 
-          prune_execution(
+          conformance_prune_execution(
+            store,
+            "execution-conformance-prune-at-cutoff",
+            :completed,
+            cutoff
+          )
+
+          conformance_prune_execution(
             store,
             "execution-conformance-prune-later",
             :cancelled,
             ~U[2026-03-01 00:00:00.000000Z]
           )
 
-          prune_execution(store, "execution-conformance-prune-active", :active, nil)
+          conformance_prune_execution(store, "execution-conformance-prune-active", :active, nil)
 
           # A row stamped when it ended and then written back to :active
           # keeps its stamp (the execution record's rule) and is not
           # finished, so a prune must not take its position.
           reopened = "execution-conformance-prune-reopened"
-          prune_execution(store, reopened, :completed, ~U[2026-01-01 00:00:00.000000Z])
+
+          conformance_prune_execution(
+            store,
+            reopened,
+            :completed,
+            ~U[2026-01-01 00:00:00.000000Z]
+          )
 
           # A terminal row with no stamp - one that ended before its store
           # could hold the field - has no end time to compare, so it is
@@ -2781,7 +2999,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         } do
           cutoff = ~U[2026-02-01 00:00:00.000000Z]
 
-          prune_execution(
+          conformance_prune_execution(
             store,
             "execution-conformance-prune-once",
             :completed,
@@ -2803,14 +3021,14 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         } do
           cutoff = ~U[2026-02-01 00:00:00.000000Z]
 
-          prune_execution(
+          conformance_prune_execution(
             store,
             "execution-conformance-prune-second",
             :completed,
             ~U[2026-01-20 00:00:00.000000Z]
           )
 
-          prune_execution(
+          conformance_prune_execution(
             store,
             "execution-conformance-prune-first",
             :completed,
@@ -2846,8 +3064,15 @@ defmodule StatifierPersistence.Testing.StorageConformance do
             cutoff = ~U[2026-02-01 00:00:00.000000Z]
             finished = "execution-conformance-prune-logged"
             running = "execution-conformance-prune-logged-active"
-            prune_execution(store, finished, :completed, ~U[2026-01-01 00:00:00.000000Z])
-            prune_execution(store, running, :active, nil)
+
+            conformance_prune_execution(
+              store,
+              finished,
+              :completed,
+              ~U[2026-01-01 00:00:00.000000Z]
+            )
+
+            conformance_prune_execution(store, running, :active, nil)
 
             for id <- [finished, finished, running] do
               assert {:ok, _seq} =
@@ -2883,7 +3108,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
             outside = "execution-conformance-prune-scoped-outside"
 
             for {id, scope} <- [{inside, inside_scope}, {outside, outside_scope}] do
-              prune_execution(store, id, :completed, ~U[2026-01-01 00:00:00.000000Z])
+              conformance_prune_execution(store, id, :completed, ~U[2026-01-01 00:00:00.000000Z])
 
               if logs? do
                 assert {:ok, _seq} =
@@ -2924,7 +3149,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         # Inserts one execution in `status`, stamped `ended_at` when that
         # is terminal, with a stored position. Called from inside each case
         # rather than from a `setup`, for the input log helper's reason.
-        defp prune_execution(store, execution_id, status, ended_at, opts \\ []) do
+        defp conformance_prune_execution(store, execution_id, status, ended_at, opts \\ []) do
           {_source, machine} = Charts.chart_a()
 
           machine_state =
@@ -2956,7 +3181,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
       # `lock_execution/3` and carries no tag. Without the refusal the
       # nested step lands `x` and the outer write puts `b` over it.
 
-      defmodule ReentrantSerialization do
+      defmodule ConformanceReentrantSerialization do
         @moduledoc false
         @behaviour StatifierPersistence.Serialization
 
@@ -2986,7 +3211,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
 
         execution_id = "execution-conformance-reentrant"
         test_pid = self()
-        serialization = {ReentrantSerialization, nil}
+        serialization = {ConformanceReentrantSerialization, nil}
         quiet = fn _effect, _context -> :ok end
 
         assert {:ok, _execution, _machine_state} =
@@ -3254,7 +3479,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
       # reverted from a copy.
       test "facade: the tombstone check refuses a retired chart and lets a live one through",
            %{store: store} do
-        {source, machine} = own_chart_a()
+        {source, machine} = conformance_own_chart_a()
         content_hash = Machine.identity(machine).content_hash
 
         assert :ok = Storage.check_chart_retired(store, machine)
@@ -3294,7 +3519,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           :telemetry.attach(
             handler_id,
             [:statifier_persistence, :adapter, :call],
-            &__MODULE__.__conformance_forward_adapter_call__/4,
+            &__MODULE__.conformance_forward_adapter_call/4,
             %{pid: test_pid}
           )
 
@@ -3304,9 +3529,9 @@ defmodule StatifierPersistence.Testing.StorageConformance do
           :telemetry.detach(handler_id)
         end
 
-        callbacks = collect_adapter_calls([])
+        callbacks = conformance_collect_adapter_calls([])
 
-        if narrow_read_declared?(store) do
+        if conformance_narrow_read_declared?(store) do
           assert :fetch_retired_info in callbacks
           refute :fetch_chart in callbacks
         else
@@ -3320,7 +3545,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
       # the calls made on the test's own process, so an async suite
       # running beside it adds nothing to what the case reads.
       @doc false
-      def __conformance_forward_adapter_call__(_event, _measurements, metadata, %{pid: pid}) do
+      def conformance_forward_adapter_call(_event, _measurements, metadata, %{pid: pid}) do
         if self() == pid, do: send(pid, {:adapter_call, metadata.callback})
       end
 
@@ -3328,7 +3553,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
       # so its content hash is this module's own: the case above
       # retires it, and a retirement must never meet another async
       # module's copy of the case on one lock key.
-      defp own_chart_a do
+      defp conformance_own_chart_a do
         {source, _machine} = Charts.chart_a()
 
         own_source =
@@ -3342,7 +3567,7 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         {own_source, machine}
       end
 
-      defp narrow_read_declared?(store) do
+      defp conformance_narrow_read_declared?(store) do
         if function_exported?(@conformance_adapter, :supports_retired_info?, 1) and
              function_exported?(@conformance_adapter, :fetch_retired_info, 2) do
           # credo:disable-for-next-line Credo.Check.Refactor.Apply
@@ -3352,9 +3577,9 @@ defmodule StatifierPersistence.Testing.StorageConformance do
         end
       end
 
-      defp collect_adapter_calls(acc) do
+      defp conformance_collect_adapter_calls(acc) do
         receive do
-          {:adapter_call, callback} -> collect_adapter_calls([callback | acc])
+          {:adapter_call, callback} -> conformance_collect_adapter_calls([callback | acc])
         after
           0 -> Enum.reverse(acc)
         end
