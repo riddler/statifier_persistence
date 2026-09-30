@@ -6,9 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Entries for unreleased work are not written here directly. Each issue drops a
-fragment in [`changelog.d/`](https://github.com/riddler/statifier_persistence/blob/v0.23.0/changelog.d/README.md); the fragments are assembled
+fragment in [`changelog.d/`](https://github.com/riddler/statifier_persistence/blob/v0.23.1/changelog.d/README.md); the fragments are assembled
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
+
+## [0.23.1] 2026-09-29
+
+Patch release: `StatifierPersistence.Testing.StorageConformance` no
+longer deadlocks when two or more modules run it asynchronously against
+one Postgres database. The package's own adapters answer what they
+answered in 0.23.0.
+
+Upgrading: nothing to change. No schema migration, the `statifier`
+floor stays `~> 2.9`, and no answer a host matches is added or
+removed. See `docs/upgrading.md`, "0.22 to 0.23".
+
+### Fixed
+
+- `StatifierPersistence.Testing.StorageConformance` retires only chart hashes derived from the using module's name, so two or more modules running it asynchronously against one Postgres database no longer deadlock (`40P01`) in the tombstone-check case or in the cases that retire a hash after a create's or a migration's first check.
 
 ## [0.23.0] 2026-09-28
 
