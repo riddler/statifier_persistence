@@ -1235,6 +1235,13 @@ capability alters those two columns in a migration of its own.
 There is no clock here. Nothing retires on its own or on a schedule, no
 call takes a duration, and when a chart should go is the host's policy.
 
+On Postgres a retirement and the creates and migrations on its chart are
+ordered by a per-chart advisory lock.
+[What the chart lock reaches](https://github.com/riddler/statifier_persistence/blob/main/docs/chart-lock.md) says what waits on what, why the
+lock's key is scoped by the store and not by a tenant, the one way a
+transaction of your own can deadlock on it, and what it means for test
+suites running in parallel.
+
 ## Pruning finished executions
 
 A finished execution keeps its last position blob and, on an adapter that

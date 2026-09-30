@@ -147,6 +147,11 @@ example a replay tool, decide which executions it may read from their
 | The input log or position of an execution that has not finished | The execution can still take a step. With its position gone, the step fails with `:execution_position_missing`. With its log gone, the next input is written at ordinal 0 again, and the log reads as if the execution had started there. |
 | Some, but not all, of an execution's input log rows | A log with a gap looks complete and is not. A replay built from it replays a different execution. |
 
+Retiring a chart on Postgres takes a per-chart advisory lock that the
+creates and migrations on that chart also take.
+[What the chart lock reaches](https://github.com/riddler/statifier_persistence/blob/main/docs/chart-lock.md) says what it makes wait and how to
+avoid a deadlock on it inside a transaction of your own.
+
 ## What pruning does not do
 
 - **It keeps the answer and the metadata.** `outcome_blob`, `failure` and
