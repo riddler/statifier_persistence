@@ -860,7 +860,7 @@ database never retire the same hash.
 
 ## Amendment (2026-09-29): the per-hash lock is keyed by the store, never by the tenant
 
-Status of this amendment: proposed (2026-09-29). The record above is
+Status of this amendment: accepted (2026-09-29). The record above is
 accepted; this amendment does not change its status line.
 
 The 2026-09-28 Amendment keyed the per-hash advisory lock on
@@ -966,3 +966,53 @@ the SHA-256 of the using module's name.
 
 The earlier Note's conclusion holds for both kinds: two hosts running
 the suite in one database never retire the same hash.
+
+## Note (2026-10-01, sp-lbxd): the store-keyed lock Amendment is accepted, and the suite's retiring module now carries the reserved prefix
+
+The 2026-09-29 Amendment "the per-hash lock is keyed by the store, never
+by the tenant" is accepted on 2026-10-01, under the operator's standing
+grant to flip a record whose code has shipped. The code that implements
+it shipped in statifier_persistence 0.24.0 (tag `v0.24.0`, `9f9eaa0`)
+under a Changed line of its changelog. That Amendment's own status line
+flips in place from proposed to accepted, and its sentence "The record
+above is accepted" still holds; the record above stays accepted. Every
+cite below was read at `20e59b2`, which is `main`; the only commit on
+`main` since the tag adds the 2026-09-30 Note above and changes nothing
+in `lib/` or `test/`.
+
+What was re-read before the flip:
+
+- **The key.** In `lib/statifier_persistence/storage/ecto.ex`,
+  `chart_lock/3` issues `pg_advisory_xact_lock` or
+  `pg_advisory_xact_lock_shared` on `@chart_lock_namespace` and
+  `hashtext` of `chart_store/1`'s answer, a space and the content hash,
+  and only when the repo's adapter is Postgres; `chart_store/1` quotes
+  the chart schema's `__schema__(:source)`, and its
+  `__schema__(:prefix)` when it has one, joined by a dot, doubling any
+  quote inside; `supports_chart_retirement?/1` reads the same two
+  values.
+- **Both modes, one key.** `fetch_retired_info/2` takes `chart_lock/3`
+  in `:shared` mode and `retire_chart/3` in `:exclusive` mode.
+- **The unit.** `lib/statifier_persistence/ecto/migrations/v01.ex`,
+  `up/1`, creates the charts table's unique index on `content_hash`
+  alone, and no later migration in that directory changes it.
+- **The cases.** `test/statifier_persistence/ecto/retire_chart_race_test.exs`
+  carries "two stores in one database retire one hash without either
+  waiting" over the `Scoped` and `SharedIdScoped` hosts, whose prefixes
+  are `scoped` and `scoped_shared_id` (`test/support/ecto_hosts.ex`),
+  and "two host modules on one charts table still share the hash's
+  lock" over `Default` and `Bigserial`.
+- **The changelog.** The 0.24.0 section of `CHANGELOG.md` names the
+  store-scoped key under Changed.
+
+**The suite's retiring module.** Two sentences above still name the
+conformance suite's nested module `RetiringSerialization`: the 2026-09-28
+Amendment's "**Pinned by.**" paragraph and the "**The cases.**" item of
+the 2026-09-29 sp-fnay Note. The change that carries ADR-0003's
+2026-09-29 Amendment, "every name the conformance suite defines in a
+host module carries one reserved prefix" (`20fb8bb`), renamed it
+`ConformanceRetiringSerialization` in
+`lib/statifier_persistence/testing/storage_conformance.ex`, where it is
+defined on `main` today; read those two sentences with that name. The
+module's job and the cases that use it are unchanged. This Note decides
+nothing new.
