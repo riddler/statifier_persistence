@@ -157,7 +157,7 @@ as a new decision.)*
 
 ## Amendment (2026-09-29): every name the conformance suite defines in a host module carries one reserved prefix
 
-Status of this amendment: proposed (2026-09-29). The record above is
+Status of this amendment: accepted (2026-09-29). The record above is
 accepted; this amendment does not change its status line.
 
 Decision 5 ships the conformance suite as a test-case template that a
@@ -210,3 +210,44 @@ module could call them, and one in this repository did
 (`test/statifier_persistence/storage/setup_ordering_conformance_test.exs`).
 Such a call no longer compiles until it carries the prefix. Nothing a
 generated case asserts changes.
+
+## Note (2026-10-01, sp-lbxd): the reserved-prefix Amendment is accepted
+
+The 2026-09-29 Amendment "every name the conformance suite defines in a
+host module carries one reserved prefix" is accepted on 2026-10-01,
+under the operator's standing grant to flip a record whose code has
+shipped. The code that implements it shipped in statifier_persistence
+0.24.0 (tag `v0.24.0`, `9f9eaa0`) under a Changed line of its changelog.
+That Amendment's own status line flips in place from proposed to
+accepted, and its sentence "The record above is accepted" still holds;
+the record above stays accepted. Every cite below was read at
+`20e59b2`, which is `main`; the only commit on `main` since the tag adds
+a Note to ADR-0012 and changes nothing in `lib/` or `test/`.
+
+What was re-read before the flip:
+
+- **One reserved prefix.** In
+  `lib/statifier_persistence/testing/storage_conformance.ex`, every
+  module attribute and every function the `using` block defines in the
+  host module starts with `conformance_`, and its two nested modules are
+  `ConformanceRetiringSerialization` and
+  `ConformanceReentrantSerialization`; the one public function is
+  `conformance_forward_adapter_call/4`. Before the change, at `c720da0`,
+  the suite's attributes `@conformance_adapter`,
+  `@conformance_adapter_opts`, `@conformance_hash_suffix` and
+  `@conformance_prune_scope` already carried that spelling.
+- **The contract and the aliases.** The same file's moduledoc states
+  the prefix as the host's contract, names the generated tests'
+  `adapter:` and `facade:` names, and names the six aliases and the two
+  ways around them.
+- **The cases.**
+  `test/statifier_persistence/storage/reserved_prefix_conformance_test.exs`
+  keeps `@retire_hash`, `ReentrantSerialization` and `own_chart_a/0`
+  in a host module beside the suite's cases;
+  `test/statifier_persistence/storage/setup_ordering_conformance_test.exs`
+  calls `conformance_input_log_execution/2`.
+- **No assertion changes.** The generated tests' names are the same set
+  before and after the change, and its assertion lines differ only by
+  the prefix.
+- **The changelog.** The 0.24.0 section of `CHANGELOG.md` names the
+  prefix and the renamed telemetry handler under Changed.
