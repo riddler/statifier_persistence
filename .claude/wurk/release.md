@@ -84,9 +84,10 @@ the table below, in the same change that adds it.
 
 `CLAUDE.md`'s "The package is released (... on Hex)" line is **not** a
 carrier and does not move here. It states what is published, which stays true
-until the operator publishes; the 0.5.0 prep's commit body (`957c122`, cited
-here as evidence about that commit, not as the reference) said so in those
-words. It moves in its own commit after a publish, never in the prep.
+until the new version is published; the 0.5.0 prep's commit body
+(`957c122`, cited here as evidence about that commit, not as the reference)
+said so in those words. It moves in its own commit after a publish, never
+in the prep.
 
 ## Step B: promote the changelog fragments
 
@@ -237,9 +238,10 @@ table and "Release preps" paragraph say it:
   tags that merged commit with the new version and pushes the tag". The tag
   is the family norm, not a grant a campaign consent has to name.
 - *a release (`mix hex.publish`, GitHub release)* - trigger **never**, still
-  unauthorized **always**: "publishing is the operator's, in every campaign".
-  Publishing, a docs republish included, is the operator's one release step,
-  and no consent or relay delegates it.
+  unauthorized **always**: "an agent or a session never runs `mix
+  hex.publish`". The release workflow publishes on the tag push above, and a
+  failed workflow is re-run from its Actions page, never worked round by a
+  local publish.
 
 So the one thing this recipe performs - the bump plus the step B promotion, on
 the branch of a release bead the operator has named - is release *prep*.
