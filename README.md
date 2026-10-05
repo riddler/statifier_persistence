@@ -1054,6 +1054,22 @@ no DDL change. A `:blob_type` that dumps to a different underlying type
 (text, jsonb, a Postgres domain) needs you to alter those columns
 yourself; the migrations helper does not do it for you.
 
+What `position_blob` holds without such a type matters for one value in
+particular. It carries every `_ioprocessors` entry the execution's
+registered send types answered when it was created, in the clear unless
+`:blob_type` encrypts, and a location statifier_router's Basic HTTP
+processor hands out, with its bearer token, is one of them; and Ecto's
+query telemetry event carries the bound blob on every create and every
+step, which Ecto's own `:debug` log line cuts at the inspect limit, so
+the token is not readable there but is not absent: a raised inspect
+limit, or a telemetry handler that logs `params`, prints it. The
+mitigations are the host's: an encrypting `:blob_type`, never `:debug`
+query logging in production, and rotating a location that may have
+leaked. Whether the execution writes should take a statement-level log
+option is not decided. ADR-0004's 2026-10-04 Note records the trade, and
+`test/statifier_persistence/ecto/position_blob_at_rest_test.exs` pins
+the entries' presence in the blob.
+
 ### Placing a host column at a fixed position
 
 Postgres appends any column an `ALTER TABLE` adds, so a host that wants

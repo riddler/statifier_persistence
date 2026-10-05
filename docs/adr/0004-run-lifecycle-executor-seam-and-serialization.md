@@ -971,3 +971,75 @@ What was re-read before the flip:
   `f880ac17`) say what the Amendment cites them for.
 - **The changelog.** The 0.23.0 section of `CHANGELOG.md` names the
   rollback under Changed.
+
+## Note (2026-10-04): `position_blob` carries every `_ioprocessors` entry in the clear, and Ecto's query telemetry carries it
+
+Pure addition: nothing above is edited and no decision moves. Decision 1
+puts the execution's position on its own row as `position_blob`; this
+Note records what that blob carries that a host may not expect, where
+it can be read, and what a host does about it. Every cite in this
+repository was read on `main` at `5e5cc01`.
+
+**What the blob carries.** `position_blob` is the term binary
+`Statifier.Position.to_binary/1` answers for the position, and the
+position's datamodel holds `_ioprocessors`, which the engine writes once,
+when the execution is created (`Statifier.Evaluator.SystemVariables`,
+`initial/3`, in statifier 2.9.0, the version this repository's
+`mix.lock` resolves). Each send type a host registers gets the entry its
+processor answered at that create, and a processor may answer a
+capability there: statifier_router's Basic HTTP processor puts a
+location whose last path segment is a bearer token
+(`StatifierRouter.BasicHTTP`, its moduledoc's "The location", read on
+that repository's `main` at `3b56f22`). Unless the
+host passes an encrypting `:blob_type`, the column holds those bytes as
+they are, so every `_ioprocessors` entry, such a token among them, is at
+rest in the clear. The test is "the stored position_blob carries an
+_ioprocessors entry's location in the clear" in
+`test/statifier_persistence/ecto/position_blob_at_rest_test.exs`.
+
+**Where the Ecto adapter binds it.** The create inserts the row with the
+blob in it (`do_insert_execution/3`), every step overwrites it
+(`update_execution/2`), and a tree migration's re-pin writes it
+(`tree_write/2`, under `write_tree_migration/2`), each in
+`lib/statifier_persistence/storage/ecto.ex`.
+`save_position/2` binds the positions table's `position_blob` for a host
+that persists sessions without the lifecycle, and that blob carries the
+same entries.
+
+**What the query telemetry carries.** Each of those statements emits the
+repo's Ecto query telemetry event, and the event's `params` metadata is
+the bound values, the whole blob among them. Ecto's own log line for the
+statement, written at the repo's `:log` level (`:debug` unless the host
+sets another), renders the parameters with `inspect/2` under its default
+limit, which cuts a binary after its first 50 bytes; the datamodel, and
+so every `_ioprocessors` entry, sits past that cut, so the token is not
+readable in that line. It is cut, not absent: a host that raises the
+inspect limit, or logs `params` from a telemetry handler of its own,
+prints it (ecto_sql 3.14.0, `Ecto.Adapters.SQL`'s private `log/5` and
+`log_iodata/8`). The test is "the create's INSERT and a step's UPDATE
+bind the blob, cut but not absent in inspect" in the same file.
+
+**The mitigations, all the host's.**
+
+- **An encrypting `:blob_type`.** The column then holds what the type
+  dumps, and the bound parameter is the same dumped value, so neither the
+  stored bytes nor the event carries the entry in the clear (the README's
+  "Encrypting the blob columns"; the test "an encrypting :blob_type keeps
+  the location out of the stored column and the bound blob").
+- **Never `:debug` query logging in production.** Set the repo's `:log`
+  level, or the logger's level, so that Ecto's query line is not
+  written, and log no `params` from a telemetry handler.
+- **Rotate a location that may have leaked.** statifier_router's
+  `rotate_location/2` replaces the token, after which the old location is
+  refused; the entry stored in the blob keeps the old value, which no
+  longer answers (`StatifierRouter.BasicHTTP`, the same section). This
+  package does not refresh a stored entry; whether to offer an option
+  that does was held for a later round, ruled by the operator,
+  2026-10-03.
+
+**Not decided: a statement-level log option.** Passing `log: false` on
+the execution writes would take those statements out of Ecto's log line
+for every host, whatever its level, and would leave the telemetry event
+as it is. That changes every host's query log and is not taken here; it
+is left for a later ruling. The trade is recorded and no statement option
+changes, decided by the conductor under a standing consent, 2026-10-03.
