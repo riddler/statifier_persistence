@@ -175,9 +175,10 @@ module against the same database: two checkouts of one project, or
 `mix test --partitions` with every partition pointed at one database.
 The module name, and so the suffix, is the same in both, and so are the
 table and the key. Give each process its own test database: the
-database name in `config/test.exs` is where to do it (this package's
-own suite reads `PGDATABASE`). Making this package's own default test
-database name per checkout is a later item.
+database name in `config/test.exs` is where to do it. This package's
+own suite does: its default test database name carries a suffix per
+checkout and `MIX_TEST_PARTITION` when that is set, and `PGDATABASE`
+overrides it.
 
 ## The router and the Oban adapter do not choose your version
 
