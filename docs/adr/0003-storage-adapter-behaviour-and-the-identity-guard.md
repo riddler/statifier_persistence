@@ -251,3 +251,26 @@ What was re-read before the flip:
   the prefix.
 - **The changelog.** The 0.24.0 section of `CHANGELOG.md` names the
   prefix and the renamed telemetry handler under Changed.
+
+## Note (2026-10-04): the aliases paragraph is the change's own choice
+
+The 2026-09-29 Amendment "every name the conformance suite defines in a
+host module carries one reserved prefix" says "Ruled by the operator,
+2026-09-29." in its opening paragraph, and that sentence reads as
+covering the whole Amendment. It does not cover the paragraph "The
+aliases are named, not removed." The operator's ruling of 2026-09-29
+set the reserved prefix and its statement in the suite's moduledoc as
+the host's contract; it did not choose what happens to the six aliases
+the template writes. The default taken beside it, decided under the
+night rule by the conductor, 2026-09-29, left removing them or naming
+them in the moduledoc to the change. Keeping and naming them is
+therefore the choice of the change that carries the Amendment
+(`20fb8bb`), for the reason that paragraph gives: removing them would
+spell every module in the template in full for no change in what a host
+can do.
+
+This Note changes no decision and no line above. The aliases and the
+moduledoc paragraph that names them and the two ways around them are
+unchanged on `main` at `5e5cc01`
+(`lib/statifier_persistence/testing/storage_conformance.ex`, the
+moduledoc and the `using` block).
