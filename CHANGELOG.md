@@ -6,9 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Entries for unreleased work are not written here directly. Each issue drops a
-fragment in [`changelog.d/`](https://github.com/riddler/statifier_persistence/blob/v0.24.0/changelog.d/README.md); the fragments are assembled
+fragment in [`changelog.d/`](https://github.com/riddler/statifier_persistence/blob/v0.24.1/changelog.d/README.md); the fragments are assembled
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
+
+## [0.24.1] 2026-10-05
+
+Docs release: the HexDocs sidebar groups the guide pages by the kind of
+page, and the chart lock page ships with the package docs. No library
+code changes.
+
+Upgrading: nothing to change. No schema migration, the `statifier`
+floor stays `~> 2.9`, and no answer a host matches is added or
+removed.
+
+### Changed
+
+- HexDocs groups the guide pages by the kind of page in place of the one Guides group: How-to guides (`docs/non-postgres-backends.md`, whose title now starts "How to"), Reference (`docs/telemetry.md`) and Explanation (`docs/restart-demo.md`, `docs/retention.md` and `docs/chart-lock.md`); the README and this changelog stay at the top.
+- `docs/chart-lock.md`, "What the chart lock reaches", is published with the package docs and in the package files, and the README and `docs/retention.md` link it relatively, so the link resolves on GitHub, HexDocs and hex.pm.
+- The README's "Encrypting the blob columns" section says what `position_blob` holds without an encrypting `:blob_type`, what Ecto's query telemetry event and its `:debug` log line carry of it, and the mitigations that are the host's.
+- The "0.23 to 0.24" chart-lock bullet in `docs/upgrading.md` names the hosts the store-keyed lock leaves alone.
 
 ## [0.24.0] 2026-09-30
 
