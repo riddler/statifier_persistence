@@ -435,7 +435,10 @@ host matches is added or removed.
   unchanged, so a host whose own two-key advisory locks use another
   first key, as "0.22 to 0.23" asks, sees no overlap it did not see
   before. What the lock reaches is in
-  [What the chart lock reaches](chart-lock.md). **NONE**.
+  [What the chart lock reaches](chart-lock.md). A host with two stores
+  in one database changes nothing to take this. A host with one store
+  per database, or whose repo is not Postgres, sees no change at all:
+  **NONE**.
 - **If a test module of yours uses
   `StatifierPersistence.Testing.StorageConformance` and calls one of the
   helpers the suite defines in it** (`input_log_execution/2`, for one),
