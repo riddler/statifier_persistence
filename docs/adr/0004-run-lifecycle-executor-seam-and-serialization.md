@@ -1043,3 +1043,65 @@ for every host, whatever its level, and would leave the telemetry event
 as it is. That changes every host's query log and is not taken here; it
 is left for a later ruling. The trade is recorded and no statement option
 changes, decided by the conductor under a standing consent, 2026-10-03.
+
+## Note (2026-10-04): what a failed send's `error.communication` event carries
+
+Pure addition: nothing above is edited and no decision moves. Decision 4
+says when an executor's failure on a send-class effect re-enters the
+chart as `error.communication`; this Note records what that event
+carries, and where the executor's own reason goes instead. Every cite in
+this repository was read on `main` at `5f3718a`; the engine is statifier
+2.9.0, the version this repository's `mix.lock` resolves.
+
+**When, as the code runs it.** Decision 4's rule holds as written: an
+`{:error, reason}` from the executor on a `:send`, `:send_delayed` or
+`:cancel` effect re-enters the chart through
+`Interpreter.deliver_internal/5` with kind `:platform`, one event per
+failure, in the order the effects were executed (`reenter_one/3` and
+`deliver_reentry/4`, `lib/statifier_persistence/executions.ex`). A
+failure is not re-entered when the step's primary pass exhausted the
+macrostep budget, once the execution has reached a final state or an
+earlier re-entry in the same step exhausted the budget, or when the
+failing effect was itself emitted by a re-entry (`reenter_failures/4`,
+the same file). The test is "a failed :send re-enters as
+error.communication the same way" in
+`test/statifier_persistence/executions_test.exs`.
+
+**What the event carries.** The event is the one
+`Statifier.Event.platform/3` builds from the origin and options
+`reentry_origin/1` (the same file) hands `deliver_internal/5`:
+
+| Failed effect | `name` | `type` | `cause`'s origin | `sendid` | `data` |
+|---|---|---|---|---|---|
+| `:send` | `"error.communication"` | `:platform` | `{:content, c_index, owner}` of the `<send>` | the effect's `send_id` | `:undefined` |
+| `:send_delayed` | `"error.communication"` | `:platform` | `{:content, c_index, owner}` of the `<send>` | the effect's `send_id` | `:undefined` |
+| `:cancel` | `"error.communication"` | `:platform` | `{:content, c_index, owner}` of the `<cancel>` | `nil` | `:undefined` |
+
+The event's own `origin`, `origintype` and `invokeid` fields stay `nil`.
+A chart reads the failing send's id as `_event.sendid`. The `:send` and
+`:send_delayed` rows are the shape `Statifier.Session` builds on its own
+failed-send path (its private `communication_error/4` and `origin_of/1`,
+statifier 2.9.0), so a chart sees the same event whether a session or
+this package drives it. The tests are "reports each delivered re-entry
+inside the step span, with name, origin and opts", which pins the
+`{:content, _, _}` origin and the options as exactly `[sendid: id]`, and
+"a host fold over the delivered and re-entered events reaches the
+persisted position", whose chart takes `error.communication` on
+`_event.sendid == 'one'` and then on `'two'`, both in
+`test/statifier_persistence/telemetry_test.exs`. No test fails a
+`:send_delayed` or a `:cancel`; those two rows are read from
+`reentry_origin/1`.
+
+**The executor's reason is not on the event.** `reenter_one/3` matches a
+failure as `{effect, _reason}` and passes no `:data` option, so a chart
+cannot read why the send failed. The reason travels unchanged as the
+`reason` metadata of `[:statifier_persistence, :effect, :failed]`,
+beside `reentered?: true` (`report_failure/3`, the same file;
+`docs/telemetry.md`). The test is "reports an actionable failure that
+re-entered the chart" in `test/statifier_persistence/telemetry_test.exs`,
+which reads the executor's `:down` there. The
+`[:statifier_persistence, :execution, :step, :reentered]` event carries
+the `name`, `origin` and `opts` handed to `deliver_internal/5`, and no
+reason either. This Note decides nothing about carrying the reason on the
+event: that would change what a chart's `_event.data` reads, and it is
+left for a later ruling.
