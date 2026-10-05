@@ -61,7 +61,8 @@ defmodule StatifierPersistence.MixProject do
         "docs/restart-demo.md",
         "docs/non-postgres-backends.md",
         "docs/telemetry.md",
-        "docs/retention.md"
+        "docs/retention.md",
+        "docs/chart-lock.md"
       ],
       groups_for_extras: [
         Guides: ~r{docs/}
@@ -84,6 +85,7 @@ defmodule StatifierPersistence.MixProject do
         docs/non-postgres-backends.md
         docs/telemetry.md
         docs/retention.md
+        docs/chart-lock.md
       ),
       links: %{
         "GitHub" => @source_url,

@@ -149,7 +149,7 @@ example a replay tool, decide which executions it may read from their
 
 Retiring a chart on Postgres takes a per-chart advisory lock that the
 creates and migrations on that chart also take.
-[What the chart lock reaches](https://github.com/riddler/statifier_persistence/blob/main/docs/chart-lock.md) says what it makes wait and how to
+[What the chart lock reaches](chart-lock.md) says what it makes wait and how to
 avoid a deadlock on it inside a transaction of your own.
 
 ## What pruning does not do
