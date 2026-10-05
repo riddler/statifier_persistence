@@ -58,14 +58,24 @@ defmodule StatifierPersistence.MixProject do
       extras: [
         "README.md",
         "CHANGELOG.md",
-        "docs/restart-demo.md",
         "docs/non-postgres-backends.md",
         "docs/telemetry.md",
+        "docs/restart-demo.md",
         "docs/retention.md",
         "docs/chart-lock.md"
       ],
+      # Grouped by the kind of page, in the family order (How-to guides,
+      # Reference, Explanation); README and CHANGELOG stay ungrouped at the
+      # top. The decision records and plans under docs/ are a record for
+      # contributors and are not extras.
       groups_for_extras: [
-        Guides: ~r{docs/}
+        "How-to guides": ["docs/non-postgres-backends.md"],
+        Reference: ["docs/telemetry.md"],
+        Explanation: [
+          "docs/restart-demo.md",
+          "docs/retention.md",
+          "docs/chart-lock.md"
+        ]
       ],
       skip_undefined_reference_warnings_on: ["CHANGELOG.md"]
     ]

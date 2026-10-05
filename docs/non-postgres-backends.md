@@ -1,4 +1,4 @@
-# Running the Ecto adapter on a backend that is not Postgres
+# How to run the Ecto adapter on a backend that is not Postgres
 
 `StatifierPersistence.Storage.Ecto` is written against Postgres, and this
 package's own gate runs against a real Postgres server (ADR-0005 decision
