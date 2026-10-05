@@ -1016,3 +1016,49 @@ host module carries one reserved prefix" (`20fb8bb`), renamed it
 defined on `main` today; read those two sentences with that name. The
 module's job and the cases that use it are unchanged. This Note decides
 nothing new.
+
+## Note (2026-10-04): the store-keyed lock's second key is no longer derivable from the hash alone, and the index sentence is about the package's option
+
+This Note decides nothing; it makes exact two sentences of the
+2026-09-29 Amendment "the per-hash lock is keyed by the store, never by
+the tenant", and states the bound on a third claim the 0.24.0 changelog
+makes about the same key. Every cite was read on `main` at `2e9d300`.
+
+**What a host can predict.** The Amendment's "**What a host sees.**"
+paragraph ends: "one whose locks use the same first key meets it on a
+second key it cannot predict, as before." The words "as before" are
+loose. Before that Amendment the second key was `hashtext` of the
+content hash alone (the 2026-09-28 Amendment's key), which a host
+holding the hash could compute. Since it, `chart_lock/3` in
+`lib/statifier_persistence/storage/ecto.ex` takes the second key as
+`hashtext` of `chart_store/1`'s answer, a space and the content hash,
+so the hash alone no longer gives it: a host would also need the store
+exactly as `chart_store/1` writes it, the quoted table under its quoted
+prefix when it has one. Read the sentence's close as: meets it on a
+second key that now includes the store, so the content hash alone no
+longer derives it.
+
+**The index sentence.** The Amendment's "**Why the unit is not the
+tenant.**" paragraph says "a host's `:leading_columns` may add a tenant
+column to the table, but not to the index". `:leading_columns` is the
+package's option (`StatifierPersistence.Ecto.Config`): V01's `up/1`
+(`lib/statifier_persistence/ecto/migrations/v01.ex`) places those
+columns in the charts table immediately after `id` and creates the
+charts table's unique index on `content_hash` alone, and no later
+migration in that directory changes that index. A host's own migration
+can add an index of its own; that is the host's DDL, not the option's.
+Read the sentence as: the package's `:leading_columns` option adds a
+tenant column to the table, but not to the index. The paragraph's
+conclusion, one tombstone row per hash within a store, rests on that
+package index.
+
+**The changelog line.** The 0.24.0 section of `CHANGELOG.md` says that
+a host that held its own advisory locks against the old key "sees no
+overlap it did not see before". That holds short of a collision in
+`hashtext`'s 32 bits. A host lock on the same first key and some second
+key meets the package's lock on a hash when the two second keys are
+equal; under the store-scoped key that happens for a different set of
+hashes than under the old one, so a host lock that met no package lock
+before can meet one now on a collision. It is the bound the Amendment
+already states for two stores in one database. The released changelog
+section is not edited.
