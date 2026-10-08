@@ -1,7 +1,7 @@
-# Upgrading a host from 0.13 to 0.24
+# Upgrading a host from 0.13 to 0.24.1
 
 This page says what a host changes to move `statifier_persistence` from
-0.13.0 to 0.24.0, one minor at a time. A host here is the code that
+0.13.0 to 0.24.1, one minor at a time. A host here is the code that
 embeds the package: the module that calls `use StatifierPersistence.Ecto`,
 the migrations it runs, the options it passes to
 `StatifierPersistence.Executions` and `StatifierPersistence.Driver`, the
@@ -34,8 +34,8 @@ with its own migration,
 and an install still short of V06 follows the V06 ordering rule in the
 `StatifierPersistence.Ecto.Migrations` documentation first. No release before
 0.17.0 adds a migration; 0.17.0 does (V08, under "0.16 to 0.17"), and
-no release from 0.18.0 through 0.24.0 adds one, and neither does the
-0.23.1 patch.
+no release from 0.18.0 through 0.24.0 adds one, and neither do the
+0.23.1 and 0.24.1 patches.
 
 ## 0.13 to 0.14
 
@@ -422,6 +422,8 @@ answer a host matches is added or removed.
 
 ## 0.23 to 0.24
 
+### 0.24.0
+
 Schema: **NONE**. The `statifier` floor stays `~> 2.9`, and no answer a
 host matches is added or removed.
 
@@ -451,3 +453,11 @@ host matches is added or removed.
   a name with one of the suite's no longer collides with it; one named
   under the prefix does. A module that calls none of the suite's
   helpers: **NONE**.
+
+### 0.24.1
+
+Schema: **NONE**, the `statifier` floor stays `~> 2.9`, and no
+answer a host matches is added or removed.
+
+A documentation release: no library code differs from 0.24.0, and the
+`"~> 0.24.0"` pin already takes it. **NONE**.
