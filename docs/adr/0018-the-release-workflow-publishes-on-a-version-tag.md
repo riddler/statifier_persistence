@@ -1,6 +1,6 @@
 # ADR-0018: The release workflow publishes to Hex on a version tag, and only when the tagged commit is on the default branch, names the version in `mix.exs` and passes the full gate there
 
-Status: proposed (2026-10-04)
+Status: accepted (2026-10-10, statifier_persistence 0.24.1)
 
 ## Context
 
@@ -104,3 +104,38 @@ the toolchain read out of `mise.toml` and the gate command read out of
   they are in the run's log.
 - The toolchain, cache, dependency and gate steps are a copy of `ci.yml`'s.
   A change to one is made to both in the same change.
+
+## Note (2026-10-10): accepted
+
+This Note decides nothing and changes no decision; it records the flip of
+the Status line above from proposed to accepted. The record was to be
+accepted once the release workflow had published a version of this
+package; that these records flip together on that first publish, one pull
+request per repository, was ruled by the operator, 2026-10-06.
+
+- **The first publish through the workflow.** statifier_persistence
+  0.24.1: the tag `v0.24.1` on commit `019710344401bce3a7c3607978b9a0e8b39c8bb5`,
+  published by the workflow run
+  https://github.com/riddler/statifier_persistence/actions/runs/37307983702
+  (started 2026-10-05T12:12:57Z, on a tag push, first attempt), every step
+  of the job green: the ancestry check, the version check, the Hex check,
+  the full quality gate, the publish and the printed addresses. Hex shows
+  the version.
+- **Later publishes through the workflow.** None: that run is the only run
+  of the release workflow.
+- **Verified at.** Every claim of the Context, the Decision and the
+  Consequences was re-read on `main` at
+  `f14c8a642c684071cc3b679e165072f0b968cbcb` on the day of this Note, in
+  `.github/workflows/release.yml`, `.github/workflows/ci.yml`,
+  `.claude/wurk.json` `gate.full`, `.claude/wurk/release.md` ("What a
+  release here still is not"), `CLAUDE.md` (the release row and the
+  "Release preps" paragraph), `mix.exs` and `mise.toml`; each holds. No
+  commit after the tag touches any of those files.
+- **The Context's "Nothing runs on a tag push today".** That sentence
+  describes the repository when the record was written; decision 1 is the
+  change that made it no longer so, and the record is unchanged.
+
+That the Note gives the first publish, the later ones and the verified
+SHA, and that the Status line names the first version published through
+the workflow, were decided by the conductor under a standing consent,
+2026-10-10.
