@@ -274,3 +274,33 @@ moduledoc paragraph that names them and the two ways around them are
 unchanged on `main` at `5e5cc01`
 (`lib/statifier_persistence/testing/storage_conformance.ex`, the
 moduledoc and the `using` block).
+
+## Note (2026-10-11): the nested-module prefix and the Amendment shape are the change's own choices
+
+The 2026-09-29 Amendment "every name the conformance suite defines in a
+host module carries one reserved prefix" says "Ruled by the operator,
+2026-09-29." in its opening paragraph. The Note of 2026-10-04 records
+that the sentence does not cover the paragraph "The aliases are named,
+not removed."; it does not cover two further choices either. As that
+Note records, the operator's ruling of 2026-09-29 set the reserved
+prefix and its statement in the suite's moduledoc as the host's
+contract. It did not choose:
+
+- **Nested modules under the prefix.** The paragraph "One reserved
+  prefix." gives nested modules the `Conformance` spelling, so the
+  suite's two nested modules, `RetiringSerialization` and
+  `ReentrantSerialization` at `c720da0`, became
+  `ConformanceRetiringSerialization` and
+  `ConformanceReentrantSerialization`.
+- **The record's shape.** The contract is recorded as a dated
+  Amendment of this record, with its own status line.
+
+Both are the choices of the change that carries the Amendment
+(`20fb8bb`), not of the ruling. That this Note attributes them so was
+ruled by the operator, 2026-10-06.
+
+This Note changes no decision and no line above. The two nested modules
+and the moduledoc sentence that gives nested modules the `Conformance`
+spelling are unchanged on `main` at `60808e0`
+(`lib/statifier_persistence/testing/storage_conformance.ex`, the
+moduledoc and the `using` block).
