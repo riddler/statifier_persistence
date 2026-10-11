@@ -62,12 +62,13 @@ defmodule StatifierPersistence.MixProject do
         "docs/telemetry.md",
         "docs/restart-demo.md",
         "docs/retention.md",
-        "docs/chart-lock.md"
+        "docs/chart-lock.md",
+        "docs/upgrading.md"
       ],
       # Grouped by the kind of page, in the family order (How-to guides,
-      # Reference, Explanation); README and CHANGELOG stay ungrouped at the
-      # top. The decision records and plans under docs/ are a record for
-      # contributors and are not extras.
+      # Reference, Explanation, Upgrading); README and CHANGELOG stay
+      # ungrouped at the top. The decision records and plans under docs/ are
+      # a record for contributors and are not extras.
       groups_for_extras: [
         "How-to guides": ["docs/non-postgres-backends.md"],
         Reference: ["docs/telemetry.md"],
@@ -75,7 +76,8 @@ defmodule StatifierPersistence.MixProject do
           "docs/restart-demo.md",
           "docs/retention.md",
           "docs/chart-lock.md"
-        ]
+        ],
+        Upgrading: ["docs/upgrading.md"]
       ],
       skip_undefined_reference_warnings_on: ["CHANGELOG.md"]
     ]
