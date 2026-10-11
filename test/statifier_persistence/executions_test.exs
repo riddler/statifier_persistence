@@ -40,7 +40,13 @@ defmodule StatifierPersistence.ExecutionsTest do
     :ok
   end
 
-  alias Statifier.Effect.{BudgetExhausted, Log, SendDelayed}
+  @spec forward_reentered([atom()], map(), map(), %{pid: pid()}) :: :ok
+  def forward_reentered(_name, _measurements, metadata, %{pid: pid}) do
+    send(pid, {:reentered, metadata})
+    :ok
+  end
+
+  alias Statifier.Effect.{BudgetExhausted, Cancel, Log, SendDelayed}
   alias Statifier.Event
   alias Statifier.Invoke.Types, as: InvokeTypes
   alias Statifier.Machine
@@ -219,6 +225,44 @@ defmodule StatifierPersistence.ExecutionsTest do
   </scxml>
   """
 
+  # A delayed <send> with an author id the executor can fail. The re-entry
+  # reaches "errored" only when it carries that id as its sendid; one that
+  # carries no sendid, or another, falls through to "unnamed".
+  @delayed_send_error_chart_source """
+  <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="a">
+      <state id="a">
+          <transition event="go" target="b">
+              <send id="due-reminder" event="loan.due" target="#_parent" delay="1s"/>
+          </transition>
+      </state>
+      <state id="b">
+          <transition event="error.communication" cond="_event.sendid == 'due-reminder'" target="errored"/>
+          <transition event="error.communication" target="unnamed"/>
+      </state>
+      <state id="errored"/>
+      <state id="unnamed"/>
+  </scxml>
+  """
+
+  # A <cancel> the executor can fail. The re-entry carries no sendid, so it
+  # reaches "errored"; one that carried the cancelled send's id would take
+  # the first transition into "named".
+  @cancel_error_chart_source """
+  <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="a">
+      <state id="a">
+          <transition event="go" target="b">
+              <cancel sendid="due-reminder"/>
+          </transition>
+      </state>
+      <state id="b">
+          <transition event="error.communication" cond="_event.sendid == 'due-reminder'" target="named"/>
+          <transition event="error.communication" target="errored"/>
+      </state>
+      <state id="errored"/>
+      <state id="named"/>
+  </scxml>
+  """
+
   # A <log> the executor can fail - observational, so the execution must not
   # take the error.communication transition that would betray a re-entry.
   @log_error_chart_source """
@@ -344,6 +388,25 @@ defmodule StatifierPersistence.ExecutionsTest do
     |> MachineState.active_leaf_states()
     |> Enum.map(&Machine.id(machine_state.machine, &1))
     |> Enum.sort()
+  end
+
+  # A fresh execution id, with this test's process subscribed to the
+  # `:reentered` events. The handler is global and the suite is async, so
+  # the id is unique and each assertion matches on it.
+  defp attach_reentered(label) do
+    unique = System.unique_integer([:positive])
+    handler_id = "reentered-#{label}-#{unique}"
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:statifier_persistence, :execution, :step, :reentered],
+        &__MODULE__.forward_reentered/4,
+        %{pid: self()}
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+    "execution-#{label}-#{unique}"
   end
 
   # An executor failing exactly the given effect tags, recording every call
@@ -817,6 +880,70 @@ defmodule StatifierPersistence.ExecutionsTest do
 
       assert active_ids(stepped) == ["errored"]
       assert {:ok, loaded} = Storage.load_execution_position(store, "execution-1", machine)
+      assert active_ids(loaded) == ["errored"]
+    end
+
+    # sabotage: reentry_origin/1's :send_delayed clause re-enters with no opts -> red on the :reentered payload
+    test "a failed :send_delayed re-enters as error.communication carrying its sendid",
+         %{store: store} do
+      machine = compile!(@delayed_send_error_chart_source)
+      executor = failing_executor([:send_delayed])
+      execution_id = attach_reentered("delayed")
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, execution_id, machine, executor: executor)
+
+      assert {:ok, %Execution{status: :active}, stepped} =
+               Executions.step(store, execution_id, machine, Event.external("go"),
+                 executor: executor,
+                 routes: Routes.new(parent?: true)
+               )
+
+      assert [{:send_delayed, %SendDelayed{send_id: "due-reminder"} = delayed}] =
+               Enum.filter(RecordingExecutor.effects(), &match?({:send_delayed, _}, &1))
+
+      assert_received {:reentered,
+                       %{
+                         execution_id: ^execution_id,
+                         name: "error.communication",
+                         origin: origin,
+                         opts: [sendid: "due-reminder"]
+                       }}
+
+      assert origin == {:content, delayed.c_index, delayed.owner}
+      assert active_ids(stepped) == ["errored"]
+      assert {:ok, loaded} = Storage.load_execution_position(store, execution_id, machine)
+      assert active_ids(loaded) == ["errored"]
+    end
+
+    # sabotage: reentry_origin/1's :cancel clause re-enters with [sendid: send_id] -> red on the :reentered payload
+    test "a failed :cancel re-enters as error.communication with no sendid", %{store: store} do
+      machine = compile!(@cancel_error_chart_source)
+      executor = failing_executor([:cancel])
+      execution_id = attach_reentered("cancel")
+
+      {:ok, _execution, _ms} =
+        Executions.create(store, execution_id, machine, executor: executor)
+
+      assert {:ok, %Execution{status: :active}, stepped} =
+               Executions.step(store, execution_id, machine, Event.external("go"),
+                 executor: executor
+               )
+
+      assert [{:cancel, %Cancel{send_id: "due-reminder"} = cancel}] =
+               Enum.filter(RecordingExecutor.effects(), &match?({:cancel, _}, &1))
+
+      assert_received {:reentered,
+                       %{
+                         execution_id: ^execution_id,
+                         name: "error.communication",
+                         origin: origin,
+                         opts: []
+                       }}
+
+      assert origin == {:content, cancel.c_index, cancel.owner}
+      assert active_ids(stepped) == ["errored"]
+      assert {:ok, loaded} = Storage.load_execution_position(store, execution_id, machine)
       assert active_ids(loaded) == ["errored"]
     end
 
