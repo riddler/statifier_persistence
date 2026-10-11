@@ -167,6 +167,11 @@ defmodule StatifierPersistence.Ecto.PositionBlobAtRestTest do
   # custom-type clause answered `[name, :binary]` -> red on the first
   # assertion: the INSERT bound the location in the clear. Verified red,
   # reverted.
+  # sabotage (the UPDATE path alone): in Storage.Ecto.update_execution/2,
+  # dropped `position_blob` from the `set:` list and set it through a
+  # query `update` with `type(^blob, :binary)` -> the INSERT assertions
+  # pass and the refute on `updates` goes red: the step's UPDATE bound the
+  # raw position carrying the location. Verified red, reverted.
   test "an encrypting :blob_type keeps the location out of the stored column and the bound blob",
        %{machine: machine, chart_blob: chart_blob, stamps: stamps} do
     {:ok, store} = Storage.new(Storage.Ecto, persistence: BlobTyped)
