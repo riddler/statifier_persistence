@@ -191,6 +191,27 @@ their own database, created on first run by `test/test_helper.exs`, and
 can run it at the same time. Never point two checkouts at one database
 by exporting the same `PGDATABASE` in both; CI sets `PGDATABASE` itself.
 
+Nothing drops these databases: a removed worktree leaves its database on
+the local server. Its name cannot be recomputed once the checkout is gone
+(the hash covers the full path), so list the test databases by their
+prefix and drop the ones (with any `_p<n>` siblings) whose `<dir>` names
+no checkout still on disk (the host and user are the suite's defaults;
+export `PGPASSWORD=postgres` if the server asks for one):
+
+```bash
+psql -h localhost -U postgres -lqt | cut -d '|' -f1 | tr -d ' ' | grep statifier_persistence_test
+dropdb -h localhost -U postgres <name>
+```
+
+The same list shows `statifier_persistence_test` with no suffix: the one
+shared local database every checkout used before the names were per
+checkout. Drop it the same way unless you export `PGDATABASE` to that name
+yourself. The CI database with that name lives in CI's own service
+container, not on your server. With the docker compose `db` service and no
+local client, run each command inside the container instead
+(`docker compose exec db psql -U postgres -lqt`,
+`docker compose exec db dropdb -U postgres <name>`).
+
 <!-- usage-rules-start -->
 ## ExQuality (`mix quality`)
 
