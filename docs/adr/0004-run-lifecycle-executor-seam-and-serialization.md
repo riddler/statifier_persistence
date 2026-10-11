@@ -1105,3 +1105,35 @@ the `name`, `origin` and `opts` handed to `deliver_internal/5`, and no
 reason either. This Note decides nothing about carrying the reason on the
 event: that would change what a chart's `_event.data` reads, and it is
 left for a later ruling.
+
+## Note (2026-10-11): the `:send_delayed` and `:cancel` rows are pinned by tests
+
+Pure addition: nothing above is edited and no decision moves. The Note of
+2026-10-04 above says "No test fails a `:send_delayed` or a `:cancel`;
+those two rows are read from `reentry_origin/1`." That sentence no longer
+holds: two tests now fail each effect and read what the re-entry carries.
+Appending this Note was decided by the conductor under a standing consent,
+2026-10-11. The code they pin is unchanged; `reentry_origin/1`
+(`lib/statifier_persistence/executions.ex`) was read on `main` at
+`47193cd`.
+
+Both tests are in `test/statifier_persistence/executions_test.exs`, in
+the "error re-entry (ADR-0004 decision 4)" group:
+
+- "a failed :send_delayed re-enters as error.communication carrying its
+  sendid": the executor fails the delayed `<send>`, and the
+  `[:statifier_persistence, :execution, :step, :reentered]` event carries
+  the name `"error.communication"`, the origin `{:content, c_index, owner}`
+  of the failed effect, and options exactly `[sendid: id]` with the
+  author's id. The chart takes `error.communication` on
+  `_event.sendid` equal to that id, and the persisted position is the
+  state that transition enters.
+- "a failed :cancel re-enters as error.communication with no sendid": the
+  executor fails the `<cancel>`, and the same event carries the origin
+  `{:content, c_index, owner}` of the `<cancel>` and options exactly `[]`.
+  The chart's transition on `_event.sendid` equal to the cancelled send's
+  id is not taken, and the persisted position is the state its fallback
+  transition enters.
+
+The table's `data` column is not read by either test; it stays as the
+Note above reads it from the code.
