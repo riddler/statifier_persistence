@@ -56,7 +56,7 @@ defmodule StatifierPersistence.ExecutionsTest do
   alias StatifierPersistence.{Execution, Executions, Storage}
   alias StatifierPersistence.Execution.Linkage
   alias StatifierPersistence.Storage.InMemory
-  alias StatifierPersistence.Test.{FlakyAdapter, NoLockAdapter, RecordingExecutor}
+  alias StatifierPersistence.Test.{FlakyAdapter, GuardFunctions, NoLockAdapter, RecordingExecutor}
   alias StatifierPersistence.Testing.Charts
 
   # Reaches top-level final on "finish", executing two <log> blocks in
@@ -812,19 +812,23 @@ defmodule StatifierPersistence.ExecutionsTest do
     # sabotage: drop `:send_types` from both `Map.drop/2` lists in the
     # dependency's `Statifier.Position` (encode and decode) -> red: the
     # snapshot survives the round trip, and the tripwire match in
-    # step_loaded/6 stops proving anything
-    test "the loaded position carries send_types nil, which is what the tripwire asserts",
+    # step_loaded/8 stops proving anything
+    # sabotage: the same with `:functions` -> red: the stamped functions
+    # survive the round trip
+    test "the loaded position carries send_types and functions nil, which is what the tripwire asserts",
          %{store: store} do
       machine = compile!(@send_type_chart_source)
       send_types = SendTypes.from_send_types(%{"myapp:sink" => SinkProcessor})
 
-      {:ok, _execution, _ms} =
+      {:ok, _execution, created} =
         Executions.create(store, "execution-1", machine,
           executor: RecordingExecutor,
-          initialize: [send_types: send_types]
+          initialize: [send_types: send_types, function_providers: [GuardFunctions]]
         )
 
-      assert {:ok, %MachineState{routes: nil, invoke_types: nil, send_types: nil}} =
+      assert %{"Approved" => _entry} = created.functions
+
+      assert {:ok, %MachineState{routes: nil, invoke_types: nil, send_types: nil, functions: nil}} =
                Storage.load_execution_position(store, "execution-1", machine)
     end
 

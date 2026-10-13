@@ -140,8 +140,14 @@ defmodule StatifierPersistence.MixProject do
   # change that spans both repos. It is an env var rather than a mix.exs edit
   # so the override never lands in a commit by accident.
   #
-  # The floor is 2.9: the first release whose `Statifier.MachineState`
-  # carries `last_selection`, which the step stop's `selection` key is read
+  # The floor is 2.15: the first release carrying host-registered guard
+  # functions (`:function_providers`).
+  # `Statifier.MachineState.put_function_providers/2` re-stamps them onto a
+  # decoded position, which drops them, and
+  # `Statifier.Evaluator.Functions.from_providers/1` resolves a list without
+  # raising, so a list that does not resolve is refused at the entry. It
+  # subsumes the previous 2.9 floor, the first release whose
+  # `Statifier.MachineState` carries `last_selection`, which the step stop's `selection` key is read
   # from (the ADR-0009 sp-qrkx amendment). It subsumes the previous 2.6
   # floor, the first release carrying host-registered send types.
   # `Statifier.MachineState.put_send_types/2` is what stamps a `send_types:`
@@ -155,7 +161,7 @@ defmodule StatifierPersistence.MixProject do
   defp statifier_dep do
     case System.get_env("STATIFIER_PATH") do
       nil ->
-        {:statifier, "~> 2.9"}
+        {:statifier, "~> 2.15"}
 
       path ->
         {:statifier, path: path, override: true}

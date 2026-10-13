@@ -177,7 +177,7 @@ defmodule StatifierPersistence.Driver do
   """
 
   alias Statifier.Effect.{CancelInvoke, Invoke}
-  alias Statifier.Evaluator.SystemVariables
+  alias Statifier.Evaluator.{Functions, SystemVariables}
   alias Statifier.{Event, Machine, MachineState}
   alias Statifier.Invoke.Source
   alias Statifier.Machine.Identity
@@ -332,6 +332,7 @@ defmodule StatifierPersistence.Driver do
     :effects,
     :invoke_types,
     :send_types,
+    :function_providers,
     :serialization,
     :chart_resolver,
     :child_canceller,
@@ -346,6 +347,7 @@ defmodule StatifierPersistence.Driver do
           effects: Executor.t() | nil,
           invoke_types: MachineState.invoke_types(),
           send_types: MachineState.send_types(),
+          function_providers: [module()] | nil,
           serialization: {module(), term()} | nil,
           chart_resolver: chart_resolver() | nil,
           child_canceller: child_canceller() | nil,
@@ -390,6 +392,21 @@ defmodule StatifierPersistence.Driver do
     session's lifetime (st-ADR-0069). Defaults to `nil`, under which a
     `<send>` carrying a non-built-in `type` is rejected with
     `error.execution`.
+  - `function_providers:` - the host's list of
+    `Predicator.FunctionProvider` modules whose functions a chart's `cond`
+    and `expr` may call (st-ADR-0078), stamped on every step and,
+    through `initialize:`, on the create, as
+    `t:StatifierPersistence.Executions.step_opt/0` describes. A
+    driver-level default for the same reason `send_types:` is one: one
+    host, one registration. The same list answers a durable subchart's
+    parent on this driver's answer path; the child itself does not
+    inherit it, so a child this driver creates runs with no host
+    function, as a `Statifier.Session` child does (st-ADR-0078).
+    Defaults to `nil`, "no host function". A list that does not resolve
+    is refused by `create/3`, `send_event/4`, `done_invocation/5`,
+    `failed_invocation/5` and `answer_parent/3` with `{:error,
+    {:function_providers, reason}}` before any lock, load or write
+    (`t:StatifierPersistence.Executions.error/0`).
   - `serialization:` - the `{module, config}` per-execution strategy every entry
     point runs inside (ADR-0004 decision 5). Defaults to whatever
     `StatifierPersistence.Executions` defaults to, the adapter's own
@@ -439,6 +456,7 @@ defmodule StatifierPersistence.Driver do
       effects: Keyword.get(opts, :effects),
       invoke_types: Keyword.get(opts, :invoke_types),
       send_types: Keyword.get(opts, :send_types),
+      function_providers: Keyword.get(opts, :function_providers),
       serialization: Keyword.get(opts, :serialization),
       chart_resolver: Keyword.get(opts, :chart_resolver),
       child_canceller: Keyword.get(opts, :child_canceller),
@@ -454,23 +472,48 @@ defmodule StatifierPersistence.Driver do
   the answer loop. `opts` takes everything `create/4` takes except
   `executor:`, which this module supplies - `initialize:`, `metadata:`,
   `routes:`, and per-call overrides of the driver's own `invoke_types:`,
-  `send_types:` and `serialization:`.
+  `send_types:`, `function_providers:` and `serialization:`.
   """
   @spec create(driver :: t(), execution_id :: Executions.execution_id(), opts :: keyword()) ::
           result()
   def create(%__MODULE__{} = driver, execution_id, opts \\ []) do
-    ref = make_ref()
-    opts = driver |> create_opts(opts) |> Keyword.put_new(:entry, :create)
+    with :ok <- check_function_providers(driver, opts) do
+      ref = make_ref()
+      opts = driver |> create_opts(opts) |> Keyword.put_new(:entry, :create)
 
-    result =
-      driver.store
-      |> Executions.create(execution_id, driver.machine, execution_opts(driver, opts, ref))
-      |> fire_after_step(driver, execution_id, opts, ref)
+      result =
+        driver.store
+        |> Executions.create(execution_id, driver.machine, execution_opts(driver, opts, ref))
+        |> fire_after_step(driver, execution_id, opts, ref)
 
-    result = advance(driver, execution_id, opts, result, drain(ref, []), 0)
+      result = advance(driver, execution_id, opts, result, drain(ref, []), 0)
 
-    maybe_answer_parent(driver, execution_id, result)
+      maybe_answer_parent(driver, execution_id, result)
+    end
   end
+
+  # The entry refusal of a `function_providers:` list that does not
+  # resolve (`t:StatifierPersistence.Executions.error/0`), on every door
+  # that carries an event: the per-call list, or the driver's own where
+  # the call passes none, resolved once before any lock, load or write.
+  # `StatifierPersistence.Executions` refuses the same list again at its
+  # own entry; checking here as well keeps `answer_parent/3`'s write of a
+  # child's answer from landing ahead of a refused parent step.
+  @spec check_function_providers(t(), keyword()) ::
+          :ok | {:error, {:function_providers, Executions.function_providers_reason()}}
+  defp check_function_providers(driver, opts) do
+    case Functions.from_providers(function_providers(driver, opts)) do
+      {:ok, _registered} -> :ok
+      {:error, reason} -> {:error, {:function_providers, reason}}
+    end
+  end
+
+  # The caller's own `function_providers:` outranks the driver's, the
+  # "the caller's opts win" shape every other driver default has; an
+  # explicit `nil` is a choice, not an absence.
+  @spec function_providers(t(), keyword()) :: [module()] | nil
+  defp function_providers(driver, opts),
+    do: Keyword.get(opts, :function_providers, driver.function_providers)
 
   # `create/4`'s `invoke_types:` has to travel inside `initialize:`, not
   # beside it: a create has no stored position to stamp, so the snapshot
@@ -486,14 +529,22 @@ defmodule StatifierPersistence.Driver do
   # `Statifier.MachineState.put_send_types/2` does not rewrite it, so a
   # create that stamped outside `initialize:` would leave `_ioprocessors`
   # missing the host's own types for the life of the execution.
+  #
+  # `function_providers:` travels the same way, because a create has no
+  # stored position to stamp it on either; unlike the other two, the
+  # caller's own per-call list outranks the driver's here as well as on
+  # the steps, so a create that names `function_providers: nil` creates
+  # with none (`create_child/6` relies on it).
   @spec create_opts(t(), keyword()) :: keyword()
   defp create_opts(%__MODULE__{} = driver, opts) do
     opts
     |> initialize_opt(:invoke_types, driver.invoke_types)
     |> initialize_opt(:send_types, driver.send_types)
+    |> initialize_opt(:function_providers, function_providers(driver, opts))
   end
 
-  @spec initialize_opt(keyword(), :invoke_types | :send_types, term()) :: keyword()
+  @spec initialize_opt(keyword(), :invoke_types | :send_types | :function_providers, term()) ::
+          keyword()
   defp initialize_opt(opts, _key, nil), do: opts
 
   defp initialize_opt(opts, key, value) do
@@ -522,12 +573,14 @@ defmodule StatifierPersistence.Driver do
           opts :: keyword()
         ) :: result()
   def send_event(%__MODULE__{} = driver, execution_id, %Event{} = event, opts \\ []) do
-    ref = make_ref()
-    opts = Keyword.put_new(opts, :entry, :step)
-    result = step(driver, execution_id, opts, event, ref)
-    result = advance(driver, execution_id, opts, result, drain(ref, []), 0)
+    with :ok <- check_function_providers(driver, opts) do
+      ref = make_ref()
+      opts = Keyword.put_new(opts, :entry, :step)
+      result = step(driver, execution_id, opts, event, ref)
+      result = advance(driver, execution_id, opts, result, drain(ref, []), 0)
 
-    maybe_answer_parent(driver, execution_id, result)
+      maybe_answer_parent(driver, execution_id, result)
+    end
   end
 
   @doc """
@@ -679,6 +732,17 @@ defmodule StatifierPersistence.Driver do
         ) :: result() | :ok | :no_parent | {:error, Storage.error()}
   def answer_parent(%__MODULE__{} = driver, child_execution_id, donedata_or_failure)
       when is_binary(child_execution_id) do
+    with :ok <- check_function_providers(driver, []) do
+      answer_linked_parent(driver, child_execution_id, donedata_or_failure)
+    end
+  end
+
+  @spec answer_linked_parent(
+          t(),
+          Executions.execution_id(),
+          {:done, term()} | {:failed, keyword()}
+        ) :: result() | :ok | :no_parent | {:error, Storage.error()}
+  defp answer_linked_parent(driver, child_execution_id, donedata_or_failure) do
     case parent_link(driver.store, child_execution_id) do
       {:ok, %Linkage{child_count: nil} = linkage} ->
         record_single_answer(driver, child_execution_id, donedata_or_failure)
@@ -1558,21 +1622,23 @@ defmodule StatifierPersistence.Driver do
           {:done, term()} | {:failed, keyword()}
         ) :: result()
   defp reenter(driver, execution_id, opts, invoke_id, answer) do
-    ref = make_ref()
-    opts = Keyword.put_new(opts, :entry, door(answer))
-    builder = fn machine_state -> late_answer(machine_state, invoke_id, answer) end
+    with :ok <- check_function_providers(driver, opts) do
+      ref = make_ref()
+      opts = Keyword.put_new(opts, :entry, door(answer))
+      builder = fn machine_state -> late_answer(machine_state, invoke_id, answer) end
 
-    result =
-      advance(
-        driver,
-        execution_id,
-        opts,
-        step(driver, execution_id, opts, builder, ref),
-        drain(ref, []),
-        0
-      )
+      result =
+        advance(
+          driver,
+          execution_id,
+          opts,
+          step(driver, execution_id, opts, builder, ref),
+          drain(ref, []),
+          0
+        )
 
-    maybe_answer_parent(driver, execution_id, result)
+      maybe_answer_parent(driver, execution_id, result)
+    end
   end
 
   # The public door's own 6.4.3 read. `live?/2` keys on the invocation's
@@ -1745,6 +1811,7 @@ defmodule StatifierPersistence.Driver do
       |> Keyword.put(:executor, executor(driver, ref))
       |> Keyword.put_new(:invoke_types, driver.invoke_types)
       |> Keyword.put_new(:send_types, driver.send_types)
+      |> Keyword.put_new(:function_providers, driver.function_providers)
       |> step_reporter_opt(after_step, ref)
 
     case driver.serialization do
@@ -1971,6 +2038,14 @@ defmodule StatifierPersistence.Driver do
   # machine - through this module's own `create/3`, so a child whose own
   # initialization invokes gets the same treatment (decision 6's nesting,
   # with no extra code).
+  #
+  # One thing does not travel to the child: `function_providers:`. The
+  # create names `function_providers: nil`, which outranks the driver's
+  # list on the child's create and on every step of its drive, so the child
+  # runs with no host function, as a `Statifier.Session` child does
+  # (st-ADR-0078: inheritance is a later record). The driver
+  # itself keeps the list, because the same driver answers the parent
+  # once the child is terminal, and the parent's step takes it.
   @spec create_child(t(), Invoke.t(), dispatch_context(), Machine.t(), String.t(), fan_out()) ::
           :ok | {:refused, term()}
   defp create_child(driver, resolved, context, child_machine, content_hash, fan_out) do
@@ -1984,7 +2059,8 @@ defmodule StatifierPersistence.Driver do
 
     case create(child_driver, child_execution_id,
            linkage: linkage,
-           initialize: [datamodel: datamodel]
+           initialize: [datamodel: datamodel],
+           function_providers: nil
          ) do
       {:ok, _execution, machine_state} ->
         report_started(child_execution_id, linkage, child_session_id(machine_state))

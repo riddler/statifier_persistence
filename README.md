@@ -243,6 +243,15 @@ driver =
 The two registrations are given once, to `new/3`: the driver carries them
 inside `initialize:` on the create and stamps them on every step after it.
 
+A host that registers guard functions a chart's `cond` and `expr` may call
+(statifier's `:function_providers`) gives `function_providers:` to `new/3`
+the same way, and the driver stamps the list on the create and on every
+step, so a resumed execution evaluates them with no call to
+`Statifier.MachineState.put_function_providers/2` of its own. A durable
+subchart child the driver creates does not inherit the list. A list that
+does not resolve is refused with `{:error, {:function_providers, reason}}`
+before any lock, load or write.
+
 One call is one durable step, every effect through your `effects:`
 executor, every `<invoke>` through your `dispatch:` fun inside that same
 step, and then one further durable step per answer until the chart rests.

@@ -39,6 +39,7 @@ defmodule StatifierPersistence.ExecutionsOptTypesTest do
                :routes,
                :invoke_types,
                :send_types,
+               :function_providers,
                :serialization,
                :entry,
                :invoke_id,
@@ -50,7 +51,7 @@ defmodule StatifierPersistence.ExecutionsOptTypesTest do
   # sabotage: the same `:send_types` arm added to `t:create_opt/0` -> red,
   # the two sets were no longer disjoint. Verified red, reverted.
   test "the options a create ignores are absent from create/4's type" do
-    ignored = MapSet.new([:routes, :invoke_types, :send_types, :entry])
+    ignored = MapSet.new([:routes, :invoke_types, :send_types, :function_providers, :entry])
 
     assert MapSet.disjoint?(option_keys(:create_opt), ignored)
   end

@@ -16,7 +16,8 @@ then `"~> 0.16.0"`, then `"~> 0.17.0"`, then `"~> 0.18.0"`, then
 `"~> 0.19.0"`, then `"~> 0.20.0"`, then `"~> 0.21.0"`, then `"~> 0.22.0"`,
 then `"~> 0.23.0"`, then `"~> 0.24.0"`.
 The `statifier` floor stays `~> 2.6` through 0.17.0; 0.18.0 moves it to
-`~> 2.9`, and every later release keeps it there.
+`~> 2.9`, and every later release through 0.24.2 keeps it there. The
+release after 0.24.2 moves it to `~> 2.15`.
 
 ## Before you start: the database is at V07
 
