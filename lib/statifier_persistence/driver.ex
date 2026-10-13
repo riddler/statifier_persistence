@@ -406,7 +406,9 @@ defmodule StatifierPersistence.Driver do
     is refused by `create/3`, `send_event/4`, `done_invocation/5`,
     `failed_invocation/5` and `answer_parent/3` with `{:error,
     {:function_providers, reason}}` before any lock, load or write
-    (`t:StatifierPersistence.Executions.error/0`).
+    (`t:StatifierPersistence.Executions.error/0`), and by
+    `start_child_at/6` with `{:refused, {:function_providers, reason}}`,
+    that door's own shape, before any child is created.
   - `serialization:` - the `{module, config}` per-execution strategy every entry
     point runs inside (ADR-0004 decision 5). Defaults to whatever
     `StatifierPersistence.Executions` defaults to, the adapter's own
@@ -882,6 +884,18 @@ defmodule StatifierPersistence.Driver do
   status projection refuses `:execution_states_unsupported`. All three are the
   same principle: a child whose invocation could never be settled is not
   started. A `parent_execution_id` naming no stored execution refuses `:execution_not_found`.
+
+  A driver whose `function_providers:` list does not resolve refuses
+  `{:function_providers, reason}` (`reason` a
+  `t:StatifierPersistence.Executions.function_providers_reason/0`), the
+  same reason the driver's other doors answer inside `{:error, _}`. It
+  is checked first, before the parent's record is read, any child is
+  created or anything is written, so a child whose automatic answer the
+  parent's door would refuse is never started. Like
+  `:execution_not_found`, it emits no
+  `[:statifier_persistence, :child, :refused]`: that event's `reason` is
+  ADR-0008 decision 4's refusal set. The driver's list is the one read;
+  `opts` takes no `function_providers:`.
   """
   @spec start_child_at(
           driver :: t(),
@@ -890,7 +904,9 @@ defmodule StatifierPersistence.Driver do
           index :: non_neg_integer(),
           count :: pos_integer(),
           opts :: [policy: Linkage.policy()]
-        ) :: :ok | {:refused, term()}
+        ) ::
+          :ok
+          | {:refused, {:function_providers, Executions.function_providers_reason()} | term()}
   def start_child_at(
         %__MODULE__{} = driver,
         parent_execution_id,
@@ -904,9 +920,22 @@ defmodule StatifierPersistence.Driver do
     resolved = resolved_invoke(effect)
     policy = Keyword.get(opts, :policy, :all)
 
-    with {:ok, context} <- start_context(driver, parent_execution_id, resolved) do
+    with :ok <- check_start_providers(driver),
+         {:ok, context} <- start_context(driver, parent_execution_id, resolved) do
       result = settleable(driver, context, resolved, {index, count, policy})
       report_refusal(result, context)
+    end
+  end
+
+  # `check_function_providers/2` over the driver's own list, answered in
+  # this door's `{:refused, reason}` shape rather than `{:error, reason}`:
+  # the reason is the same term the other doors answer.
+  @spec check_start_providers(t()) ::
+          :ok | {:refused, {:function_providers, Executions.function_providers_reason()}}
+  defp check_start_providers(driver) do
+    case check_function_providers(driver, []) do
+      :ok -> :ok
+      {:error, reason} -> {:refused, reason}
     end
   end
 

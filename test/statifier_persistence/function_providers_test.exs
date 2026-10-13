@@ -389,6 +389,93 @@ defmodule StatifierPersistence.FunctionProvidersTest do
     end
   end
 
+  describe "Driver.start_child_at/6" do
+    # sabotage: dropped `start_child_at/6`'s `check_start_providers/1` step
+    # -> red, the door answered `:ok` and created the child
+    test "a list that does not resolve is refused before any child is created or written", %{
+      store: store
+    } do
+      good = fan_out_driver(store)
+      assert {:ok, _execution, _ms} = Driver.create(good, "execution_1")
+      assert_received {:with_execution, "execution_1"}
+      {:ok, before} = Storage.fetch_execution(store, "execution_1")
+
+      bad = %{good | function_providers: [String]}
+
+      assert {:refused, {:function_providers, {:invalid_provider, String, message}}} =
+               Driver.start_child_at(bad, "execution_1", fan_out_effect(), 0, 2)
+
+      assert is_binary(message)
+
+      # Checked ahead of the parent's read: a missing parent answers the
+      # list's refusal, not `:execution_not_found`.
+      assert {:refused, {:function_providers, {:not_a_list, :nope}}} =
+               Driver.start_child_at(
+                 %{good | function_providers: :nope},
+                 "execution_missing",
+                 fan_out_effect(),
+                 0,
+                 2
+               )
+
+      refute_received {:with_execution, _execution_id}
+      assert {:ok, ^before} = Storage.fetch_execution(store, "execution_1")
+
+      for index <- 0..1 do
+        assert {:error, :execution_not_found} =
+                 Storage.fetch_execution(
+                   store,
+                   Linkage.child_execution_id("execution_1", "call", index)
+                 )
+      end
+    end
+
+    # sabotage: `check_start_providers/1` refused every list, as if none
+    # resolved -> red, the resolvable list answered
+    # `{:refused, {:function_providers, _}}`
+    test "a list that resolves starts the child as before", %{store: store} do
+      driver = fan_out_driver(store)
+      assert {:ok, _execution, _ms} = Driver.create(driver, "execution_1")
+
+      assert :ok = Driver.start_child_at(driver, "execution_1", fan_out_effect(), 0, 2)
+
+      assert {:ok, %{status: :active}} =
+               Storage.fetch_execution(
+                 store,
+                 Linkage.child_execution_id("execution_1", "call", 0)
+               )
+    end
+  end
+
+  # A fan-out parent: the dispatch leaves the invocation pending, so the
+  # children are started only through `start_child_at/6`.
+  defp fan_out_driver(store) do
+    {:ok, machine} = Statifier.compile(@parent_source, function_providers: @providers)
+
+    Driver.new(store, machine,
+      dispatch: fn "myapp:subchart", _params, _context -> :pending end,
+      invoke_types: InvokeTypes.new(types: ["myapp:subchart"]),
+      function_providers: @providers,
+      serialization: {SpyStrategy, self()}
+    )
+  end
+
+  defp fan_out_effect do
+    %Statifier.Effect.Invoke{
+      invoke_id: "call",
+      type: "myapp:subchart",
+      src: nil,
+      params: %{},
+      content: @child_source,
+      autoforward: nil,
+      state_index: 0,
+      invoke_index: 0,
+      macrostep: 0,
+      microstep: 0,
+      round: 0
+    }
+  end
+
   defp parent_driver(store, opts \\ []) do
     {:ok, machine} = Statifier.compile(@parent_source, function_providers: @providers)
 
