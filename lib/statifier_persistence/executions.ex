@@ -5,7 +5,7 @@ defmodule StatifierPersistence.Executions do
 
   A step runs in ADR-0004 decision 3's order, and the order is the
   contract: liveness check on the execution record -> load (guarded) -> re-stamp
-  `routes`/`invoke_types`/`send_types` unconditionally (with the nil tripwire
+  `routes`/`invoke_types`/`send_types`/`functions` unconditionally (with the nil tripwire
   from st-ADR-0064: the fields are pattern-matched `nil` before stamping, so an
   upstream regression fails loudly here, not silently downstream) -> step
   via `Interpreter.handle_event/2` -> execute effects via the executor
@@ -156,6 +156,7 @@ defmodule StatifierPersistence.Executions do
     SendDelayed
   }
 
+  alias Statifier.Evaluator.Functions
   alias Statifier.Machine.Identity
 
   # Family one's emitter (ADR-0009 decision 2), aliased rather than wrapped:
@@ -241,7 +242,10 @@ defmodule StatifierPersistence.Executions do
   adapter with no `lock_execution/3`), plus `{:reentrant_step,
   execution_id}` from a door called for an execution whose executor is
   running in the calling process (the moduledoc's "A door called from
-  inside its own executor refuses").
+  inside its own executor refuses"), plus `{:function_providers, reason}`
+  from a door handed a `function_providers:` list that does not resolve
+  (`t:function_providers_reason/0`), refused before any lock, load or
+  write.
   """
   @type error ::
           Storage.error()
@@ -250,6 +254,23 @@ defmodule StatifierPersistence.Executions do
           | {:serialization, term()}
           | {:pin_source_failed, {module(), PinSource.reason()}}
           | {:reentrant_step, execution_id()}
+          | {:function_providers, function_providers_reason()}
+
+  @typedoc """
+  Why a `function_providers:` list does not resolve: the reason
+  `Statifier.Evaluator.Functions.from_providers/1` answers, unchanged.
+  `{:not_a_list, value}` for an option that is not a list,
+  `{:invalid_provider, entry, message}` for an entry that is not a module
+  exporting `functions/0` and each function it names, and
+  `{:shadowed_names, names}` for a provider naming a function the base set
+  already has. The door that refuses answers `{:error,
+  {:function_providers, reason}}`, the spelling `Statifier.Session`'s own
+  `start_link/2` uses.
+  """
+  @type function_providers_reason ::
+          {:not_a_list, term()}
+          | {:invalid_provider, term(), String.t()}
+          | {:shadowed_names, [String.t()]}
 
   @typedoc """
   Options `create/4` accepts, and only those: an option `create/4` does
@@ -264,8 +285,11 @@ defmodule StatifierPersistence.Executions do
   - `initialize:` - passed to `Statifier.Interpreter.initialize/2`
     unchanged. A create has no stored position to stamp, so the host's
     snapshots reach a new execution here and nowhere else: `routes:`,
-    `invoke_types:` and `send_types:` (`t:step_opt/0` says what each
-    one is) go inside this list, not beside it. For `send_types:` that
+    `invoke_types:`, `send_types:` and `function_providers:`
+    (`t:step_opt/0` says what each one is) go inside this list, not
+    beside it. A `function_providers:` list here that does not resolve
+    refuses the create with `{:error, {:function_providers, reason}}`
+    before any lock, load or write. For `send_types:` that
     is also the only way to get it right at all, because
     `Statifier.MachineState.new/2` is the one writer of the
     `_ioprocessors` entry each registered type gets and
@@ -314,8 +338,20 @@ defmodule StatifierPersistence.Executions do
     I/O Processor types the host registers, stamped the same way
     (st-ADR-0069). Defaults to `nil`, under which every non-built-in
     `type` on a `<send>` classifies as unsupported and the element is
-    rejected with `error.execution`. None of these three is a
-    `t:create_opt/0`: a create takes them inside `initialize:`.
+    rejected with `error.execution`.
+  - `function_providers:` - the host's list of `Predicator.FunctionProvider`
+    modules whose functions a chart's `cond` and `expr` may call
+    (st-ADR-0078), resolved and stamped onto the loaded position
+    the same way through `Statifier.MachineState.put_function_providers/2`;
+    host-supplied per call, never read back from storage, because a
+    decoded position carries none. Defaults to `nil`, "no host function".
+    A list that does not resolve through
+    `Statifier.Evaluator.Functions.from_providers/1` refuses the step
+    with `{:error, {:function_providers, reason}}` before any lock, load
+    or write.
+
+    None of these four is a `t:create_opt/0`: a create takes them inside
+    `initialize:`.
   - `serialization:` - the `{module, config}` per-execution serialization
     strategy the fetch-to-persist tail runs inside (ADR-0004 decision 5;
     `create/4` and `fail/4` accept it too). Defaults to
@@ -358,6 +394,7 @@ defmodule StatifierPersistence.Executions do
           | {:routes, MachineState.routes()}
           | {:invoke_types, MachineState.invoke_types()}
           | {:send_types, MachineState.send_types()}
+          | {:function_providers, [module()] | nil}
           | {:serialization, {module(), term()}}
           | {:entry, entry()}
           | {:invoke_id, String.t()}
@@ -409,6 +446,11 @@ defmodule StatifierPersistence.Executions do
   `{:error, {:budget_exhausted, payload}}`, so the caller sees both the
   durable state and the reason.
 
+  A `function_providers:` list inside `initialize:` that does not resolve
+  is refused at the entry with `{:error, {:function_providers, reason}}`,
+  before any lock, load or write, rather than raising out of
+  `Statifier.MachineState.new/2`.
+
   `metadata:` rides through to the inserted execution record unchanged (ADR-0006
   decision 1). Create is the only place it is set - `step/5` and `fail/4`
   carry the stored map forward and take no `metadata:` of their own - and
@@ -458,8 +500,24 @@ defmodule StatifierPersistence.Executions do
         ) ::
           {:ok, Execution.t(), MachineState.t()} | {:error, error()}
   def create(%Storage{} = store, execution_id, %Machine{} = machine, opts) do
-    with :ok <- not_in_step(execution_id) do
+    providers = opts |> Keyword.get(:initialize, []) |> Keyword.get(:function_providers)
+
+    with :ok <- not_in_step(execution_id),
+         :ok <- check_function_providers(providers) do
       create_open(store, execution_id, machine, opts)
+    end
+  end
+
+  # The entry refusal for a `function_providers:` list (`t:error/0`): the
+  # list is resolved once here, before any lock, load or write, so a list
+  # that does not resolve never reaches `Statifier.MachineState.new/2` or
+  # `Statifier.MachineState.put_function_providers/2`, which raise on it
+  # inside the execution's exclusion.
+  @spec check_function_providers(term()) :: :ok | {:error, error()}
+  defp check_function_providers(providers) do
+    case Functions.from_providers(providers) do
+      {:ok, _registered} -> :ok
+      {:error, reason} -> {:error, {:function_providers, reason}}
     end
   end
 
@@ -590,6 +648,15 @@ defmodule StatifierPersistence.Executions do
   alone and before any position decode: nothing is appended to the input
   log, no effect is executed and nothing is written (ADR-0014 decision 2).
 
+  A `function_providers:` list that does not resolve is refused at the
+  entry with `{:error, {:function_providers, reason}}`, before the
+  serialization strategy is entered: no lock is taken, no position is
+  loaded and nothing is written. A list that resolves is stamped onto the
+  loaded position beside `routes:`, `invoke_types:` and `send_types:`
+  (`t:step_opt/0`), so a `cond` or `expr` that calls a host function
+  evaluates on a resumed execution without the host touching the
+  `t:Statifier.MachineState.t/0`.
+
   `event` may also be a `t:event_builder/0` - a fun the loaded position is
   handed, for an event only the position can build or decline. A builder
   that declines discards the delivery through the same `{:discarded, execution}`
@@ -609,7 +676,8 @@ defmodule StatifierPersistence.Executions do
           {:ok, Execution.t(), MachineState.t()} | {:discarded, Execution.t()} | {:error, error()}
   def step(%Storage{} = store, execution_id, %Machine{} = machine, event, opts)
       when is_struct(event, Event) or is_function(event, 1) do
-    with :ok <- not_in_step(execution_id) do
+    with :ok <- not_in_step(execution_id),
+         :ok <- check_function_providers(opts[:function_providers]) do
       executor = Keyword.fetch!(opts, :executor)
       entry = entry(opts, :step)
 
@@ -3048,16 +3116,20 @@ defmodule StatifierPersistence.Executions do
          entry
        ) do
     # The bare match IS the st-ADR-0064 tripwire: `from_binary/2` blanks
-    # all three fields unconditionally on decode, so if upstream ever stops,
+    # all four fields unconditionally on decode, so if upstream ever stops,
     # this fails loudly here rather than silently resuming a stale
     # snapshot downstream.
-    %MachineState{routes: nil, invoke_types: nil, send_types: nil} = machine_state
+    %MachineState{routes: nil, invoke_types: nil, send_types: nil, functions: nil} =
+      machine_state
 
+    # `function_providers:` already resolved at the entry
+    # (`check_function_providers/1`), so this stamp cannot raise.
     machine_state =
       machine_state
       |> MachineState.put_routes(opts[:routes])
       |> MachineState.put_invoke_types(opts[:invoke_types])
       |> MachineState.put_send_types(opts[:send_types])
+      |> MachineState.put_function_providers(opts[:function_providers])
 
     # The stamp a terminal write here would record, and the struct would
     # carry: the stored one where the row already holds one - the adapter

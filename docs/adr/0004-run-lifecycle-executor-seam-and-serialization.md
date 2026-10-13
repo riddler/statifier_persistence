@@ -1137,3 +1137,103 @@ the "error re-entry (ADR-0004 decision 4)" group:
 
 The table's `data` column is not read by either test; it stays as the
 Note above reads it from the code.
+
+## Amendment (2026-10-13, sp-aa9z): decision 3's re-stamp gains `functions`, and a list that does not resolve is refused at the entry
+
+Status of this amendment: proposed (2026-10-13, sp-aa9z). The record
+above stays accepted; this amendment is proposed until it is accepted.
+
+Pure addition: nothing above is edited. statifier 2.15.0 added host
+function providers (st-ADR-0078): a host names `Predicator.FunctionProvider`
+modules in a `:function_providers` list, and a chart's `cond` and `expr`
+may call the functions they register. The resolved dispatch map lives in
+`Statifier.MachineState`'s `functions` field, and `Statifier.Position`
+drops that field on encode and blanks it on decode, as it does `routes`,
+`invoke_types` and `send_types` (statifier 2.15.0, st-ADR-0078 decision 4).
+A position this package loads therefore carries `functions: nil`, and a
+host resuming an execution had to re-stamp the list itself with
+`Statifier.MachineState.put_function_providers/2` before the step. This
+Amendment makes the step do it, and says what a list that does not
+resolve answers. The package's `statifier` requirement moves to
+`~> 2.15` with it, decided by the conductor under a standing consent,
+2026-10-12.
+
+**Decision 3's re-stamp gains a fourth field.** The step re-stamps
+`routes`/`invoke_types`/`send_types`/`functions` unconditionally, the
+last from the `function_providers:` option through
+`Statifier.MachineState.put_function_providers/2`, and the st-ADR-0064
+tripwire matches all four fields `nil` before it stamps
+(`step_loaded/8` in `StatifierPersistence.Executions`). The rest of
+decision 3's order is unchanged. The option is host-supplied per call
+and never read back from storage, like the other three; without it the
+step stamps `nil`, which is what the decoded position already carries,
+so a host that passes no `function_providers:` sees every answer it saw
+before.
+
+**A list that does not resolve is refused at the entry.** A
+`function_providers:` list is resolved once, through
+`Statifier.Evaluator.Functions.from_providers/1`, at the entry of every
+door that takes one, before any lock is taken, any position is loaded
+or anything is written. A list that does not resolve answers
+`{:error, {:function_providers, reason}}`, where `reason` is
+`from_providers/1`'s own: `{:not_a_list, value}`,
+`{:invalid_provider, entry, message}` or `{:shadowed_names, names}`. The
+spelling is `Statifier.Session`'s own `start_link/2` refusal. It is a
+new arm of `t:StatifierPersistence.Executions.error/0`
+(`t:StatifierPersistence.Executions.function_providers_reason/0` names
+the reasons). The step itself re-stamps through
+`put_function_providers/2`, on a list already known to resolve. Ruled
+by the operator, 2026-10-12. The alternative was to let
+`put_function_providers/2` raise `ArgumentError` inside the step, as
+`Statifier.MachineState.new/2` does on a create today; that raise would
+come from inside the execution's serialization strategy, after the
+load. The refusal sits beside sp-a2ee's re-entrancy refusal: both are
+answered before the strategy is asked for anything, and the re-entrancy
+check runs first.
+
+| Door | Where its list comes from | Refused before |
+|---|---|---|
+| `Executions.step/5` | `function_providers:` on the call | the serialization strategy, the load and every write |
+| `Executions.create/4` | `function_providers:` inside `initialize:` | the metadata and retired-chart checks, `initialize/2`, the strategy and the insert |
+| `Driver.create/3` | the call's own `function_providers:`, else the driver's | `Executions.create/4`, which checks the list carried inside `initialize:` again |
+| `Driver.send_event/4` | the call's own, else the driver's | `Executions.step/5` |
+| `Driver.done_invocation/5`, `Driver.failed_invocation/5` | the call's own, else the driver's | `Executions.step/5` |
+| `Driver.answer_parent/3` | the driver's | the read of the child's linkage, and the write of the child's answer on its own record |
+
+**Where the option reaches.** `step/5` takes it per call. `create/4`
+takes it inside `initialize:`, the only way a create reaches the core,
+as for `invoke_types:` and `send_types:`. `StatifierPersistence.Driver.new/3`
+takes it as a driver-level default: the driver carries it inside
+`initialize:` on a create and puts it on every step it takes, and a
+call's own `function_providers:` outranks it, an explicit `nil`
+included. The answer path, where a driver steps a durable subchart's
+parent, takes the same driver's list: one host, one registration.
+Decided by the conductor under a standing consent, 2026-10-12.
+`migrate/4` and the other migration doors take no step and are
+untouched: the next step re-stamps the list.
+
+**A durable subchart child does not inherit it.** A `Statifier.Session`
+child started for an `<invoke>` does not inherit the list, and
+inheritance is left to a later record (st-ADR-0078's consequences).
+This package matches: the driver creates a child with
+`function_providers: nil` on that create's own options
+(`create_child/6` in `StatifierPersistence.Driver`), which outranks the
+driver's list on the child's create and on every step of that drive.
+The driver struct the child is created with keeps the list, because
+the same struct answers the parent once the child is terminal. Decided
+by the conductor under a standing consent, 2026-10-12. A child chart
+that calls a host function does not compile on this path at all:
+`Statifier.Invoke.Source.resolve/2` compiles the child with no
+`:function_providers`, and statifier 2.15.0's compile refuses a call to
+an undeclared name.
+
+**Tests.** `test/statifier_persistence/function_providers_test.exs`
+carries each clause above: a resumed execution evaluates a guard through
+`step/5` and through the driver, the create path through `initialize:`
+and through `Driver.new/3`, the per-call override, the refusal on each
+door with no exclusion asked for and nothing written, the child's own
+steps stamped `nil` beside the parent's stamped list, and the parent's
+answer stepped with the list. The tripwire test in
+`test/statifier_persistence/executions_test.exs` ("the loaded position
+carries send_types and functions nil, which is what the tripwire
+asserts") pins the fourth field.
