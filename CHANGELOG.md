@@ -6,9 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Entries for unreleased work are not written here directly. Each issue drops a
-fragment in [`changelog.d/`](https://github.com/riddler/statifier_persistence/blob/v0.24.2/changelog.d/README.md); the fragments are assembled
+fragment in [`changelog.d/`](https://github.com/riddler/statifier_persistence/blob/v0.25.0/changelog.d/README.md); the fragments are assembled
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
+
+## [0.25.0] 2026-10-13
+
+Feature release: a host registers its guard functions once, with `function_providers:` on `step/5`, inside `initialize:` on `create/4` and on `Driver.new/3`, and a resumed execution evaluates a `cond` or `expr` that calls one. A list that does not resolve is refused at the entry, and `start_child_at/6` refuses it in its own shape.
+
+Upgrading: no schema migration, and the `statifier` requirement moves from `~> 2.9` to `~> 2.15`. `{:function_providers, reason}` joins `t:StatifierPersistence.Executions.error/0`, answered only when a host passes the option and the list does not resolve. See `docs/upgrading.md`, "0.24 to 0.25".
+
+### Added
+
+- `function_providers:` on `StatifierPersistence.Executions.step/5`, inside `initialize:` on `create/4`, and on `StatifierPersistence.Driver.new/3` as a driver-level default each call may override: the host's guard functions are stamped onto the loaded position beside `routes:`, `invoke_types:` and `send_types:`, so a resumed execution evaluates a `cond` or `expr` that calls one without the host touching `Statifier.MachineState`. A durable subchart child the driver creates does not inherit the list.
+- When `function_providers:` is passed, a list that does not resolve is refused at the entry with `{:error, {:function_providers, reason}}`, before any lock, load or write, on `step/5`, `create/4` and the driver's `create/3`, `send_event/4`, `done_invocation/5`, `failed_invocation/5` and `answer_parent/3`; `t:StatifierPersistence.Executions.error/0` gains the arm.
+- When a driver's `function_providers:` list does not resolve, `StatifierPersistence.Driver.start_child_at/6` refuses with `{:refused, {:function_providers, reason}}`, its existing refusal shape, before any child is created or anything is written; a driver with a list that resolves, or with none, starts children as before.
+
+### Changed
+
+- The `statifier` requirement moves from `~> 2.9` to `~> 2.15`, the first release carrying host function providers; a host on statifier 2.9 to 2.14 moves statifier with it.
 
 ## [0.24.2] 2026-10-11
 
