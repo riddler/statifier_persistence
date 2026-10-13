@@ -1140,7 +1140,7 @@ Note above reads it from the code.
 
 ## Amendment (2026-10-13, sp-aa9z): decision 3's re-stamp gains `functions`, and a list that does not resolve is refused at the entry
 
-Status of this amendment: proposed (2026-10-13, sp-aa9z). The record
+Status of this amendment: accepted (2026-10-13, sp-aa9z). The record
 above stays accepted; this amendment is proposed until it is accepted.
 
 Pure addition: nothing above is edited. statifier 2.15.0 added host
@@ -1252,3 +1252,68 @@ answer stepped with the list. The tripwire test in
 `test/statifier_persistence/executions_test.exs` ("the loaded position
 carries send_types and functions nil, which is what the tripwire
 asserts") pins the fourth field.
+
+## Note (2026-10-13, sp-mcfw): the sp-aa9z Amendment is accepted
+
+The 2026-10-13 sp-aa9z Amendment, with its 2026-10-13 sp-8ktk dated
+edit, is accepted on 2026-10-13, under the operator's standing grant to
+flip a record whose code has shipped. The code that implements it
+shipped in statifier_persistence 0.25.0 (tag `v0.25.0`, `473bfd3`,
+published on Hex 2026-10-13 by the release workflow) under Added and
+Changed changelog lines. That Amendment's own status line flips in place
+from proposed to accepted; its sentence that it "is proposed until it is
+accepted" is met by this Note and stays as written, and the record above
+stays accepted. Every cite below was read at `473bfd3`, the tag, which is
+also `main`: no commit has landed on `main` since the tag. Each cite is in
+`lib/statifier_persistence/executions.ex` unless another file is named,
+and statifier's were read in statifier-ex at its `v2.15.0` tag
+(`99e7427`).
+
+What was re-read before the flip:
+
+- **What statifier 2.15.0 carries.** `Statifier.MachineState` has the
+  `functions` field and `put_function_providers/2`, which raises
+  `ArgumentError` on a list that does not resolve, as `new/2` does;
+  `Statifier.Position` drops `functions` on encode and blanks it on
+  decode beside `routes`, `invoke_types` and `send_types`; and
+  `Statifier.Session.start_link/2` refuses such a list as
+  `{:error, {:function_providers, reason}}`.
+- **The fourth field.** `step_loaded/8` matches `routes`,
+  `invoke_types`, `send_types` and `functions` all `nil`, then stamps
+  the four, the last through `put_function_providers/2` from
+  `opts[:function_providers]`.
+- **The entry refusal.** `create/4` and `step/5` run `not_in_step/1`
+  first and `check_function_providers/1` second, before `create_open/4`
+  (the metadata and retired-chart checks) and before `serialized/5`;
+  `check_function_providers/1` answers `from_providers/1`'s reason
+  inside `{:error, {:function_providers, reason}}`. `t:error/0` carries
+  the arm, and `t:function_providers_reason/0` names the three reasons
+  `Statifier.Evaluator.Functions.from_providers/1` answers.
+- **The driver's doors.** In `lib/statifier_persistence/driver.ex`,
+  `create/3`, `send_event/4`, `answer_parent/3` and `reenter/5` (behind
+  `done_invocation/5` and `failed_invocation/5`) call
+  `check_function_providers/2` before anything else; the call's own
+  `function_providers:` outranks the driver's, an explicit `nil`
+  included (`function_providers/2`); `create_opts/2` carries the list
+  inside `initialize:` and `execution_opts/3` puts the driver's list on
+  every step. `start_child_at/6` calls `check_start_providers/1` before
+  `start_context/3` reads the parent's record, and answers
+  `{:refused, {:function_providers, reason}}` without passing through
+  `report_refusal/2`.
+- **The child.** `create_child/6` creates the child with
+  `function_providers: nil` on that create's own options; `create/3`
+  hands the same options to `advance/6`, which hands them to every
+  step it takes, so the `nil` holds on every step of that drive. The
+  child's driver keeps the list for the parent's answer.
+  `resolve_child/4` resolves the child through
+  `Statifier.Invoke.Source.resolve/2` with no options, and its
+  `content` clause compiles with `invoke_content_markup: true` alone.
+- **The cases.** `test/statifier_persistence/function_providers_test.exs`
+  carries the cases the Amendment's Tests paragraph names and "a list
+  that does not resolve is refused before any child is created or
+  written"; `test/statifier_persistence/executions_test.exs` carries
+  "the loaded position carries send_types and functions nil, which is
+  what the tripwire asserts".
+- **The changelog.** The 0.25.0 section of `CHANGELOG.md` names the
+  option and the entry refusal under Added and the requirement under
+  Changed.
