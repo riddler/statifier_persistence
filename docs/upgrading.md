@@ -1,7 +1,7 @@
-# Upgrading a host from 0.13 to 0.24.2
+# Upgrading a host from 0.13 to 0.25.0
 
 This page says what a host changes to move `statifier_persistence` from
-0.13.0 to 0.24.2, one minor at a time. A host here is the code that
+0.13.0 to 0.25.0, one minor at a time. A host here is the code that
 embeds the package: the module that calls `use StatifierPersistence.Ecto`,
 the migrations it runs, the options it passes to
 `StatifierPersistence.Executions` and `StatifierPersistence.Driver`, the
@@ -14,10 +14,10 @@ Take the minors in order, and move the pin with each one, as the README
 recommends: `{:statifier_persistence, "~> 0.14.0"}`, then `"~> 0.15.0"`,
 then `"~> 0.16.0"`, then `"~> 0.17.0"`, then `"~> 0.18.0"`, then
 `"~> 0.19.0"`, then `"~> 0.20.0"`, then `"~> 0.21.0"`, then `"~> 0.22.0"`,
-then `"~> 0.23.0"`, then `"~> 0.24.0"`.
+then `"~> 0.23.0"`, then `"~> 0.24.0"`, then `"~> 0.25.0"`.
 The `statifier` floor stays `~> 2.6` through 0.17.0; 0.18.0 moves it to
-`~> 2.9`, and every later release through 0.24.2 keeps it there. The
-release after 0.24.2 moves it to `~> 2.15`.
+`~> 2.9`, and every later release through 0.24.2 keeps it there; 0.25.0
+moves it to `~> 2.15`.
 
 ## Before you start: the database is at V07
 
@@ -35,7 +35,7 @@ with its own migration,
 and an install still short of V06 follows the V06 ordering rule in the
 `StatifierPersistence.Ecto.Migrations` documentation first. No release before
 0.17.0 adds a migration; 0.17.0 does (V08, under "0.16 to 0.17"), and
-no release from 0.18.0 through 0.24.0 adds one, and neither do the
+no release from 0.18.0 through 0.25.0 adds one, and neither do the
 0.23.1, 0.24.1 and 0.24.2 patches.
 
 ## 0.13 to 0.14
@@ -471,3 +471,55 @@ answer a host matches is added or removed.
 A documentation release: no library code differs from 0.24.1, and the
 `"~> 0.24.0"` pin already takes it. This page is now listed in the
 HexDocs sidebar, under Upgrading. **NONE**.
+
+## 0.24 to 0.25
+
+### 0.25.0
+
+Schema: **NONE**. The `statifier` floor moves from `~> 2.9` to `~> 2.15`,
+the first release carrying host function providers, and no answer a host
+matches is removed. One arm is added to a tuple a host may match:
+`{:function_providers, reason}`, and it is answered only when a host passes
+the new `function_providers:` option and the list does not resolve.
+
+- **If your `statifier` requirement allows 2.9 through 2.14**, move it to
+  `~> 2.15`: `{:statifier, "~> 2.15"}`, or a looser one that still excludes
+  every release before 2.15. A host that takes `statifier` only through
+  this package needs no change in its own `mix.exs`, and `mix deps.update
+  statifier` fetches 2.15. Nothing in
+  `statifier_persistence` answers differently for a chart that calls no
+  host function. What statifier itself changed between 2.9 and 2.15,
+  including a document it now refuses to compile, is in statifier's
+  CHANGELOG and upgrading page, which a host reads for the releases it
+  skips.
+- **If your charts call functions of your own in a `cond` or an `expr`**,
+  give the list of your `Predicator.FunctionProvider` modules to
+  `function_providers:` instead of stamping it by hand with
+  `Statifier.MachineState.put_function_providers/2`. It goes in three
+  places: on `StatifierPersistence.Executions.step/5`; inside `initialize:`
+  on `StatifierPersistence.Executions.create/4`; and on
+  `StatifierPersistence.Driver.new/3` as a driver-level default that each
+  call may override. The package stamps the list on the loaded position
+  beside `routes:`, `invoke_types:` and `send_types:`, so a resumed
+  execution evaluates the call with no touch of
+  `Statifier.MachineState` from you. A durable subchart child the driver
+  creates does not inherit the list. A host that registers no function
+  provider changes nothing: **NONE**.
+- **If you pass `function_providers:` and match on the errors of
+  `StatifierPersistence.Executions` or the driver**, add the
+  `{:function_providers, reason}` arm to the match. A list that does not
+  resolve is refused at the entry with `{:error, {:function_providers,
+  reason}}`, before any lock, load or write, on `step/5`, `create/4`, and
+  the driver's `create/3`, `send_event/4`, `done_invocation/5`,
+  `failed_invocation/5` and `answer_parent/3`. `reason` is one of
+  `{:not_a_list, value}`, `{:invalid_provider, entry, message}` and
+  `{:shadowed_names, names}`
+  (`t:StatifierPersistence.Executions.function_providers_reason/0`). A
+  host that passes no list never sees the arm.
+- **If you call `StatifierPersistence.Driver.start_child_at/6` on a driver
+  that carries a `function_providers:` list**, add
+  `{:refused, {:function_providers, reason}}` to the refusals you match: a
+  list that does not resolve is refused there before any child is created
+  or anything is written, in the door's own `{:refused, reason}` shape. It
+  emits no `[:statifier_persistence, :child, :refused]` event. A driver
+  with a list that resolves, or with none, starts children as before.
