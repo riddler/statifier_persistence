@@ -1199,6 +1199,21 @@ check runs first.
 | `Driver.send_event/4` | the call's own, else the driver's | `Executions.step/5` |
 | `Driver.done_invocation/5`, `Driver.failed_invocation/5` | the call's own, else the driver's | `Executions.step/5` |
 | `Driver.answer_parent/3` | the driver's | the read of the child's linkage, and the write of the child's answer on its own record |
+| `Driver.start_child_at/6` (added 2026-10-13, sp-8ktk) | the driver's | the read of the parent's record, the child's create and every write |
+
+Dated edit (2026-10-13, sp-8ktk): `Driver.start_child_at/6`, the door a
+scheduler starts a fan-out child through, joins the table above. It
+answers in its own existing shape, `{:refused, {:function_providers,
+reason}}` with the same `reason`, not `{:error, _}`; no new return arm
+is added (`start_child_at/6` in `StatifierPersistence.Driver`). Without
+it, a driver whose list does not resolve could create and drive a
+child whose automatic answer the parent's `answer_parent/3` then
+refused, and that refusal is discarded on the automatic path, so the
+invocation never settled. Ruled by the operator, 2026-10-13. The
+refusal emits no `[:statifier_persistence, :child, :refused]`, as the
+door's `:execution_not_found` emits none. Pinned in
+`test/statifier_persistence/function_providers_test.exs`, "a list that
+does not resolve is refused before any child is created or written".
 
 **Where the option reaches.** `step/5` takes it per call. `create/4`
 takes it inside `initialize:`, the only way a create reaches the core,

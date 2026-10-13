@@ -250,7 +250,9 @@ step, so a resumed execution evaluates them with no call to
 `Statifier.MachineState.put_function_providers/2` of its own. A durable
 subchart child the driver creates does not inherit the list. A list that
 does not resolve is refused with `{:error, {:function_providers, reason}}`
-before any lock, load or write.
+before any lock, load or write; `start_child_at/6`, the fan-out door,
+refuses it in its own shape, `{:refused, {:function_providers, reason}}`,
+before any child is created.
 
 One call is one durable step, every effect through your `effects:`
 executor, every `<invoke>` through your `dispatch:` fun inside that same
