@@ -13,9 +13,11 @@ repo's pipeline can interleave with pushes to the paired trackers and leave
 `mirrors:` halves pointing at states the other side has not seen.
 
 So: inside a campaign, record the request URL on the bead with `bd note` /
-`bd update` locally and leave the dolt push to the conductor. Outside a
-campaign, `bd dolt push` is the operator's call, as the table says - ask,
-do not assume.
+`bd update` locally and leave the dolt push to the conductor, which pushes
+the campaign's trackers together. Outside a campaign, the table's row is
+the whole rule: `bd dolt push` follows a bead state change made here only
+once the git side of that same change has already reached `origin`, and it
+is never a way to publish beads for work that is not on `origin/main` yet.
 
 ## Push and request authority: consent-scoped
 
