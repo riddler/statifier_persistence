@@ -386,6 +386,20 @@ Schema: **NONE**. The `statifier` floor stays `~> 2.9`.
   effects. On another backend, or under a `serialization:` strategy of
   your own, the window is narrowed and not closed. A host that never
   retires a chart while writing to it: **NONE**.
+- **If a tombstone read can meet a retirement of the same chart, or you
+  call `Executions.create/4`, `migrate/4` or `migrate_tree/4` inside a
+  transaction of your own**, expect waiting. On
+  `StatifierPersistence.Storage.Ecto` over Postgres,
+  `Storage.check_chart_retired/2` (so every create, migration and tree
+  migration) takes the chart's shared advisory lock: a read waits for a
+  retirement of the same chart that has not yet committed, and a write
+  inside your own transaction holds the lock until you commit, so a
+  retirement of that chart waits that long. A test under the Ecto SQL
+  sandbox is one such transaction. No answer changes. The in-memory
+  adapter and an Ecto repo on another backend take no such lock, and
+  under a `serialization:` strategy of your own, outside a transaction of
+  yours, the lock is held only for the read's own statement. What waits
+  on what is in [What the chart lock reaches](chart-lock.md).
 - **If your own two-key Postgres advisory locks use `1397769032` as their
   first key**, they now share a key space with the Ecto adapter's
   per-chart lock; pick another first key.
