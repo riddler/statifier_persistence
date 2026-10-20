@@ -126,9 +126,9 @@ Turning the log on is a data-retention decision, not a debugging switch. Chart,
 position and identity blobs are engine-shaped; an event's `data` is your own
 values, and this is the first thing this package stores that can hold personal
 data, such as a patron's contact details or a card number. So `input_blob` is a
-blob in the `:blob_type` sense (see the README's "Encrypting the blob columns"
-section), and it is *not* the `metadata` map, which stays in the clear by
-design.
+blob in the `:blob_type` sense (see [How to encrypt the blob columns and place
+host columns](encrypt-and-place-columns.md#encrypt-the-blob-columns)), and
+it is *not* the `metadata` map, which stays in the clear by design.
 
 ### Cap how much accumulates
 

@@ -116,7 +116,7 @@ catalog-only change, so this part is fast whatever the table's size. It takes th
 configured `:blob_type` with the three blob columns V01 created
 (`identity_blob`, `chart_blob` and `position_blob`), so a `:blob_type` whose
 underlying database type is not binary needs the same hand-written `ALTER`
-the README's "Encrypting the blob columns" section describes for those
+[How to encrypt the blob columns and place host columns](guides/encrypt-and-place-columns.md#check-the-columns-database-type) describes for those
 three - now for `outcome_blob` as well.
 
 **The `metadata` GIN index** is the part to plan for. V03's `up/1`
@@ -295,8 +295,7 @@ new string in the existing status column, which has no constraint.
 - `leading_columns:` on `use StatifierPersistence.Ecto` is **NONE** for an
   existing install: it places host columns only in tables V01 and V05
   create. A host that wants a column of its own at a fixed position sets it
-  before its tables exist; see "Placing a host column at a fixed position"
-  in the README.
+  before its tables exist; see [How to encrypt the blob columns and place host columns](guides/encrypt-and-place-columns.md#place-a-host-column-at-a-fixed-position).
 
 ## 0.14 to 0.15
 
