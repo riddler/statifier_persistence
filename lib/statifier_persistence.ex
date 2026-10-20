@@ -3,7 +3,8 @@ defmodule StatifierPersistence do
   Durable stepper and storage adapters for Statifier.
 
   This module itself carries only `version/0`. The package's surface is four
-  modules, and the README's worked example drives all of them in order:
+  modules, and the worked example in `docs/guides/persist-and-resume.md`
+  drives all of them in order:
 
   - `StatifierPersistence.Storage` - the identity-guarded facade over charts,
     positions, and execution records. Every load is guarded against the chart

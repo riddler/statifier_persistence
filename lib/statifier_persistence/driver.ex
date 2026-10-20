@@ -166,7 +166,7 @@ defmodule StatifierPersistence.Driver do
         StatifierPersistence.Driver.new(store, machine,
           dispatch: fn type, params, _context -> MyApp.perform(type, params) end,
           effects: fn effect, _context -> MyApp.Timers.consume(effect) end,
-          invoke_types: Statifier.Invoke.Types.new(types: ["myapp:authorize"]),
+          invoke_types: Statifier.Invoke.Types.new(types: ["myapp:check_holds"]),
           serialization: {MyApp.ExecutionLock, MyApp.ExecutionLock}
         )
 

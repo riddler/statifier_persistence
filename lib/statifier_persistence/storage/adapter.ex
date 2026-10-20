@@ -26,7 +26,7 @@ defmodule StatifierPersistence.Storage.Adapter do
   pruned (ADR-0010; `StatifierPersistence.Retention.prune/3` deletes the
   whole log of a finished execution, ADR-0016). Chart blobs, position
   blobs and identity blobs are engine-shaped; an event's `data` is the
-  host's own values - a signup's email address, a capture's card number -
+  host's own values - a patron's email address, a library card number -
   and turning the log on puts them at rest. `:blob_type` reaches `input_blob` for exactly that reason
   (ADR-0010 decision 4), and `input_log_cap:` bounds how much of it
   accumulates (decision 6), but a host that cannot encrypt at rest and
