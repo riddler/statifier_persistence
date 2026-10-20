@@ -60,8 +60,6 @@ columns.
         {:ask_again_later, module, reason}
     end
 
-The third argument is the list of pin sources; pass `[]` when you have none.
-
 ### Read what pins a chart
 
 Four things pin a chart and each refuses:
