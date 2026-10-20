@@ -22,11 +22,12 @@ defmodule StatifierPersistence.Storage.Adapter do
   ## The input log is a data-retention decision, not a debugging switch
 
   An adapter that exports `supports_input_log?/1` and answers `true`
-  stores every input the interpreter saw, verbatim, for the life of the
-  execution (ADR-0010). Chart blobs, position blobs and identity blobs are
-  engine-shaped; an event's `data` is the host's own values - a signup's
-  email address, a capture's card number - and turning the log on puts
-  them at rest. `:blob_type` reaches `input_blob` for exactly that reason
+  stores every input the interpreter saw, verbatim, until the execution is
+  pruned (ADR-0010; `StatifierPersistence.Retention.prune/3` deletes the
+  whole log of a finished execution, ADR-0016). Chart blobs, position
+  blobs and identity blobs are engine-shaped; an event's `data` is the
+  host's own values - a signup's email address, a capture's card number -
+  and turning the log on puts them at rest. `:blob_type` reaches `input_blob` for exactly that reason
   (ADR-0010 decision 4), and `input_log_cap:` bounds how much of it
   accumulates (decision 6), but a host that cannot encrypt at rest and
   cannot accept plaintext payloads declines the whole facility by not
@@ -1027,7 +1028,11 @@ defmodule StatifierPersistence.Storage.Adapter do
   transaction on a database and one atomic state transition on an adapter
   without one. The third condition is what makes a repeat call answer
   zeros, and a batch that answers fewer than `limit` executions means
-  nothing more was due at `cutoff` when it ran.
+  nothing more was due at `cutoff` when it ran - for an adapter that
+  locks the rows it selects, nothing more that it could take. A row
+  another transaction holds locked (`StatifierPersistence.Storage.Ecto`
+  on Postgres skips it, `FOR UPDATE SKIP LOCKED`) is left for a later
+  call, so a repeat call can then answer more than zeros.
 
   An adapter that keeps no input log clears the position blobs alone and
   answers `inputs: 0`. `cutoff` is the host's; this layer takes no

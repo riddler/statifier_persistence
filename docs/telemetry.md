@@ -325,6 +325,7 @@ process.
 `:list_active_execution_ids_by_content_hash`,
 `:list_execution_ids_by_content_hash`, `:supports_chart_retirement?`,
 `:retire_chart`, `:supports_retired_info?`, `:fetch_retired_info`,
+`:supports_tree_migration?`, `:write_tree_migration`,
 `:supports_input_log?`, `:append_input`, `:list_inputs`,
 `:supports_execution_pruning?`, `:prune_executions` - a closed vocabulary
 fixed by the behaviour. The behaviour's other two callbacks never appear:

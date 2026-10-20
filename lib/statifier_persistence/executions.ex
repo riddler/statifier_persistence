@@ -2592,7 +2592,10 @@ defmodule StatifierPersistence.Executions do
   `:not_supported` for a store whose adapter keeps no log - which is not
   a failure, since nothing in this package refuses an execution over it
   (decision 1). `{:error, :execution_not_found}` for an execution that does not exist,
-  and `{:ok, []}` for one that has taken no input yet.
+  and `{:ok, []}` for one that has taken no input yet - and also for one
+  whose input log `StatifierPersistence.Retention.prune/3` has cleared,
+  since the row stays and the two cannot be told apart by this read
+  (ADR-0016).
 
   Read-only and outside the execution's exclusion by design: this is a
   diagnostic read, and nothing in this package consumes it. The replay
