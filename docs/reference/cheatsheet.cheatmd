@@ -1,0 +1,195 @@
+# StatifierPersistence cheatsheet
+
+## Start
+{: .col-2}
+
+### Create an execution
+
+```elixir
+{:ok, execution, state} =
+  Executions.create(store, "loan_01H8", machine,
+    executor: executor,
+    initialize: [invoke_types: invoke_types, send_types: send_types]
+  )
+```
+
+The execution id is yours. Creating an id that exists answers `{:error, :execution_exists}`. See [How to persist an execution and resume it in another process](../guides/persist-and-resume.md).
+
+### Create options
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `executor:` | required | Receives each effect, in order |
+| `initialize:` | `[]` | Passed to the interpreter; `routes:`, `invoke_types:`, `send_types:` and `function_providers:` go here |
+| `metadata:` | `%{}` | Host identities stored on the record |
+| `serialization:` | the adapter's lock | `{module, config}` ordering strategy |
+
+## Step
+{: .col-2}
+
+### Deliver one event
+
+```elixir
+{:ok, execution, state} =
+  Executions.step(store, "loan_01H8", machine,
+    Event.external("loan.due"), executor: executor)
+```
+
+### Answers
+
+```elixir
+{:ok, execution, state}
+{:discarded, execution}
+{:error, {:needs_migration, execution}}
+{:error, {:identity_mismatch, stored, supplied}}
+```
+
+### Step options
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `executor:` | required | Receives each effect |
+| `routes:` | `nil` | Live `<send>` targets for this step |
+| `invoke_types:` | `nil` | Built-in set only |
+| `send_types:` | `nil` | Unregistered `<send>` types are rejected |
+| `function_providers:` | `nil` | Host functions for `cond` and `expr` |
+| `serialization:` | the adapter's lock | `{module, config}` |
+
+### End from the host
+
+```elixir
+Executions.fail(store, "loan_01H8", "copy lost")
+Executions.cancel(store, "loan_01H8")
+```
+
+## Resume
+{: .col-2}
+
+### Another process, one id
+
+```elixir
+{:ok, record} = Storage.fetch_execution(store, "loan_01H8")
+{:ok, %{chart_blob: blob}} = Storage.fetch_chart(store, record.content_hash)
+{:ok, machine} = Chart.from_binary(blob)
+```
+
+Then `Executions.step/5` with that machine. See [How to persist an execution and resume it in another process](../guides/persist-and-resume.md).
+
+### Store the chart first
+
+```elixir
+{:ok, machine} = Statifier.compile(source)
+{:ok, chart_blob} = Chart.to_binary(machine)
+:ok = Storage.save_chart(store, machine, chart_blob)
+```
+
+## Ecto adapter
+{: .col-2}
+
+### Persistence module
+
+```elixir
+defmodule MyApp.Persistence do
+  use StatifierPersistence.Ecto, repo: MyApp.Repo
+end
+```
+
+### Migration
+
+```elixir
+def up, do: StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence)
+def down, do: StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence)
+```
+
+`from:` and `version:` bound the span, in both directions.
+
+### Guarded store
+
+```elixir
+{:ok, store} =
+  Storage.new(StatifierPersistence.Storage.Ecto,
+    persistence: MyApp.Persistence)
+```
+
+### Store options
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `persistence:` | required | Module that called `use StatifierPersistence.Ecto` |
+| `input_log_cap:` | `:infinity` | Per-execution cap on the input log |
+| `sandbox:` | `false` | Check out an Ecto sandbox connection per test |
+
+### `use` options
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `repo:` | required | Your `Ecto.Repo` |
+| `key:` | `:uxid` | `:uuid`, `:bigserial` or `{module, opts}` |
+| `table_prefix:` | `"statifier_"` | Prefix of the table names |
+| `tables:` | `%{}` | Per-table name override |
+| `prefix:` | `nil` | Postgres schema |
+| `blob_type:` | `:binary` | Ecto type of the payload columns |
+| `leading_columns:` | `[]` | Host columns placed after `id` |
+| `timestamps_position:` | `:trailing` | Or `:leading` |
+| `column_collations:` | `[]` | Collation per text column |
+
+See [How to set up the Ecto adapter](../guides/ecto-adapter.md).
+
+## Retire
+{: .col-2}
+
+### Retire a chart
+
+```elixir
+Executions.retire_chart(store, content_hash, [MyApp.TimerPins],
+  retired_by: "ops@example.test")
+```
+
+### Answers
+
+```elixir
+{:ok, %{content_hash: _, retired_at: _, retired_by: _}}
+{:error, {:pinned, counts}}
+{:error, {:pin_source_failed, {module, reason}}}
+{:error, :chart_retirement_unsupported}
+```
+
+### Options
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `retired_by:` | required | Opaque string recorded on the row |
+| `now:` | `DateTime.utc_now/0` | Written as `retired_at` |
+
+### Pin source
+
+```elixir
+@behaviour StatifierPersistence.PinSource
+
+def pins(content_hash, %{execution_ids: ids}),
+  do: %{pending_timers: MyApp.Timers.count_scheduled_for(ids)}
+```
+
+See [How to retire a chart and prune finished executions](../guides/retire-and-prune.md).
+
+## Prune
+{: .col-2}
+
+### Prune finished executions
+
+```elixir
+{:ok, %{executions: _, position_blobs: _, inputs: _}} =
+  StatifierPersistence.Retention.prune(store, cutoff)
+```
+
+`cutoff` is a `DateTime`; a duration raises `ArgumentError`.
+
+### Options
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `batch_size:` | `500` | Executions per batch |
+| `scope:` | whole store | Column equalities, such as `[tenant_id: "a"]` |
+| `single_batch:` | `false` | One batch, answers `more?` |
+
+See [What a finished execution leaves behind](../retention.md).

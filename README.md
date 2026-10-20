@@ -119,6 +119,7 @@ walks the whole loop with a chart that calls your host.
   - [How to run the test suite](docs/guides/running-the-tests.md) - start the Postgres server the suite needs, or point it at one you already run
   - [Upgrading a host](docs/upgrading.md) - what a host changes for each minor from 0.13 on
 - Look up
+  - [Cheatsheet](docs/reference/cheatsheet.cheatmd) - the calls to create, step and resume an execution, the Ecto adapter options, and retire and prune, on one page
   - [API reference](https://hexdocs.pm/statifier_persistence/api-reference.html) - every module, callback and option, from the moduledocs
   - [Telemetry and the OpenTelemetry bridge half](docs/telemetry.md) - what this package emits as a driver, the storage-phase contract, and what the bridge builds on them
   - [The changelog](CHANGELOG.md) - what changed in each version, with a **Breaking** heading for what a host must do
