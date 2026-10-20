@@ -294,8 +294,9 @@ if Code.ensure_loaded?(Ecto.Migration) do
     version against a repo means reading a marker out of that repo's schema,
     and this package records none: it writes no versions table, no marker row
     and no version column, and Ecto's own `schema_migrations` holds the
-    *host's* migration timestamps, which say nothing about which of V01..V06
-    a hand-written schema matches. The only way to grow such an assertion is
+    *host's* migration timestamps, which say nothing about which of the versions
+    this module defines a hand-written schema matches. The only way to grow
+    such an assertion is
     to start writing a marker - a new table, in a new migration, carried by
     every host including the ones that delegate and already know - which is
     new stored surface bought for a comparison the host can make itself.
