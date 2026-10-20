@@ -53,7 +53,9 @@ defmodule StatifierPersistence.Retention do
   Answers `{:ok, counts}` summed over every batch: `executions` pruned,
   `position_blobs` nulled among them, and input log rows deleted. It is
   idempotent: a second call with the same cutoff answers zeros, because
-  an execution with nothing left to clear is not selected again.
+  an execution with nothing left to clear is not selected again - unless
+  a row another transaction held locked was skipped (on Postgres), which
+  a later call then takes (see `:single_batch` below).
 
   Each batch is one atomic unit in the adapter and commits on its own,
   unless a caller's transaction encloses the call (see below).
