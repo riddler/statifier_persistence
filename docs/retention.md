@@ -136,7 +136,7 @@ example a replay tool, decide which executions it may read from their
 |---|---|
 | Its input log rows (the inputs table, by `execution_id`) | Nothing in this package reads the log; `Executions.inputs/2` is a diagnostic read for you. Delete all of an execution's rows or none of them. `prune/3` does this for you. |
 | Its `position_blob`, set to `NULL` on the executions row (not the row itself) | Nothing in this package loads a finished execution's position. `step/5`, `fail/4` and `cancel/3` discard a finished execution before loading anything, and `migrate/4` refuses one. `prune/3` does this for you. |
-| A positions row, keyed by session, for a session you will never resume | This package cannot tell when a session is done. The positions table has no end stamp and no link to an execution, so `prune/3` never touches it. Deleting the row also releases the chart pin it holds, which can make that chart retirable (see "Retiring a chart" in the README). |
+| A positions row, keyed by session, for a session you will never resume | This package cannot tell when a session is done. The positions table has no end stamp and no link to an execution, so `prune/3` never touches it. Deleting the row also releases the chart pin it holds, which can make that chart retirable (see [How to retire a chart and prune finished executions](guides/retire-and-prune.md)). |
 
 ## Rows you must not delete
 
