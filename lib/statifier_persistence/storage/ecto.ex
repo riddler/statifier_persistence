@@ -148,8 +148,9 @@ if Code.ensure_loaded?(Ecto) do
     `:ok` - which is the answer the save would have had in the order it
     was read in, a save followed by a retirement, and the row stays
     tombstoned. The transaction joins a caller's own when there is one,
-    which is what keeps the README's "Writing inside a caller's
-    transaction" contract intact.
+    which is what keeps the contract in the "Write your own rows in the same
+    transaction as a step" section of `docs/guides/caller-transaction.md`
+    intact.
     """
     @impl Adapter
     @spec save_chart(Adapter.opts(), Adapter.chart_record()) :: :ok | {:error, Adapter.error()}
@@ -901,9 +902,10 @@ if Code.ensure_loaded?(Ecto) do
     other backend no lock is taken and that interleaving stays open.
 
     This transaction joins a caller's own when there is one, and it
-    takes no per-execution lock: the two contracts the README's
-    "Writing inside a caller's transaction" and "Delivering while a
-    step is in flight" sections state are untouched by it.
+    takes no per-execution lock: the two contracts
+    `docs/guides/caller-transaction.md` states, in its "Write your own rows in
+    the same transaction as a step" and "Deliver an event while a step is in
+    flight" sections, are untouched by it.
 
     No row: `:chart_not_found`. Already retired: the retired arm,
     never a second tombstone.

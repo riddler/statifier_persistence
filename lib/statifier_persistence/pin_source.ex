@@ -56,8 +56,8 @@ defmodule StatifierPersistence.PinSource do
 
   ## Two hosts
 
-  A durable timer queue, over an advertising chart that waits for a click
-  after an impression:
+  A durable timer queue, over a loan chart that waits for a copy to come back
+  and holds a reminder for every loan that is due:
 
       defmodule MyApp.TimerPins do
         @behaviour StatifierPersistence.PinSource
@@ -68,8 +68,8 @@ defmodule StatifierPersistence.PinSource do
         end
       end
 
-  An address table, over the same chart, where an impression id is the address
-  an incoming click is routed to:
+  A returns table, over the same chart, where a copy's barcode is the address
+  an incoming return scan is routed to:
 
       defmodule MyApp.AddressPins do
         @behaviour StatifierPersistence.PinSource

@@ -3358,8 +3358,9 @@ defmodule StatifierPersistence.Executions do
   # rolled back with it, so a redelivery re-drives the whole step rather
   # than one half of it. Only the step's `:update` asks. A create's refused
   # insert answers as it did: on Postgres the failed `INSERT` has already
-  # aborted the transaction it ran in (the README's "Writing inside a
-  # caller's transaction"), so nothing it wrote commits either way.
+  # aborted the transaction it ran in (see "Write your own rows in the
+  # same transaction as a step" in docs/guides/caller-transaction.md), so
+  # nothing it wrote commits either way.
   @spec failed_write({:insert, Adapter.metadata()} | :update, {:error, error()}) ::
           {:error, error()} | roll_back()
   defp failed_write(:update, error), do: roll_back(error)

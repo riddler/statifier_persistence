@@ -21,8 +21,9 @@ disagree, the tests win.
 
 ## The chart and the kill point
 
-The chart (`test/support/demo/scenario.ex`) is the family's credit-card
-example domain: a transaction is authorized, captured before its capture
+The chart (`test/support/demo/scenario.ex`) is a test fixture, kept as it is
+in a fixture-only domain; the family's teaching domains are elsewhere. It
+models a credit-card transaction: authorized, captured before its capture
 window closes, then settled. It walks
 `intake -> authorizing -> awaiting_capture -> settling -> settled`, with
 a `voided` state as the negative target - reaching it means the host lost
