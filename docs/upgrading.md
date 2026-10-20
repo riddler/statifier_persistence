@@ -192,6 +192,18 @@ migration V08, which adds the column and an index on it.
   carries. `StatifierPersistence.Testing.StorageConformance` checks both.
 - `leading_columns:` and `timestamps_position:` do not move `ended_at`:
   V08 alters an existing table, so the column lands at the end.
+- `StatifierPersistence.Retention.prune/3` is new in 0.17.0: it clears
+  the position blob and the input log of every execution that ended before
+  a cutoff you pass, and keeps the execution row. Nothing calls it for
+  you, so **NONE** is required; `docs/retention.md` says which rows you may
+  delete for a finished execution.
+- The two storage adapter callbacks that back it, `supports_execution_pruning?/1`
+  and `prune_executions/3`, are optional, and **NONE** is required of an
+  adapter of your own: one that exports neither stays conformant, and
+  `StatifierPersistence.Retention.prune/3` answers
+  `{:error, :execution_pruning_unsupported}` on it. The in-memory and Ecto
+  adapters implement both. `prune_executions` takes a fourth argument from
+  0.19.0; see "0.18 to 0.19" below.
 
 ## 0.17 to 0.18
 
