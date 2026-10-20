@@ -61,6 +61,7 @@ defmodule StatifierPersistence.MixProject do
         "docs/guides/persist-and-resume.md",
         "docs/guides/drive-a-chart.md",
         "docs/guides/ecto-adapter.md",
+        "docs/guides/host-scope-and-inputs.md",
         "docs/non-postgres-backends.md",
         "docs/telemetry.md",
         "docs/explanation/documents-revisions-charts-executions.md",
@@ -78,6 +79,7 @@ defmodule StatifierPersistence.MixProject do
           "docs/guides/persist-and-resume.md",
           "docs/guides/drive-a-chart.md",
           "docs/guides/ecto-adapter.md",
+          "docs/guides/host-scope-and-inputs.md",
           "docs/non-postgres-backends.md"
         ],
         Reference: ["docs/telemetry.md"],
@@ -106,6 +108,7 @@ defmodule StatifierPersistence.MixProject do
         docs/guides/persist-and-resume.md
         docs/guides/drive-a-chart.md
         docs/guides/ecto-adapter.md
+        docs/guides/host-scope-and-inputs.md
         docs/explanation/documents-revisions-charts-executions.md
         docs/restart-demo.md
         docs/non-postgres-backends.md
