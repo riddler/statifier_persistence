@@ -58,6 +58,7 @@ defmodule StatifierPersistence.MixProject do
       extras: [
         "README.md",
         "CHANGELOG.md",
+        "docs/guides/persist-and-resume.md",
         "docs/non-postgres-backends.md",
         "docs/telemetry.md",
         "docs/restart-demo.md",
@@ -70,7 +71,10 @@ defmodule StatifierPersistence.MixProject do
       # ungrouped at the top. The decision records and plans under docs/ are
       # a record for contributors and are not extras.
       groups_for_extras: [
-        "How-to guides": ["docs/non-postgres-backends.md"],
+        "How-to guides": [
+          "docs/guides/persist-and-resume.md",
+          "docs/non-postgres-backends.md"
+        ],
         Reference: ["docs/telemetry.md"],
         Explanation: [
           "docs/restart-demo.md",
@@ -93,6 +97,7 @@ defmodule StatifierPersistence.MixProject do
         README.md
         LICENSE
         CHANGELOG.md
+        docs/guides/persist-and-resume.md
         docs/restart-demo.md
         docs/non-postgres-backends.md
         docs/telemetry.md
