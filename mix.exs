@@ -68,6 +68,7 @@ defmodule StatifierPersistence.MixProject do
         "docs/guides/move-executions.md",
         "docs/guides/running-the-tests.md",
         "docs/non-postgres-backends.md",
+        "docs/reference/cheatsheet.cheatmd",
         "docs/telemetry.md",
         "docs/explanation/documents-revisions-charts-executions.md",
         "docs/restart-demo.md",
@@ -92,7 +93,7 @@ defmodule StatifierPersistence.MixProject do
           "docs/non-postgres-backends.md",
           "docs/guides/running-the-tests.md"
         ],
-        Reference: ["docs/telemetry.md"],
+        Reference: ["docs/reference/cheatsheet.cheatmd", "docs/telemetry.md"],
         Explanation: [
           "docs/explanation/documents-revisions-charts-executions.md",
           "docs/restart-demo.md",
@@ -127,6 +128,7 @@ defmodule StatifierPersistence.MixProject do
         docs/explanation/documents-revisions-charts-executions.md
         docs/restart-demo.md
         docs/non-postgres-backends.md
+        docs/reference/cheatsheet.cheatmd
         docs/telemetry.md
         docs/retention.md
         docs/chart-lock.md
