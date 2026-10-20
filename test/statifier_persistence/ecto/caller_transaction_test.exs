@@ -2,7 +2,8 @@ defmodule StatifierPersistence.Ecto.CallerTransactionTest do
   @moduledoc """
   `Executions.create/4` and `Executions.step/5` inside a transaction the
   caller opened on the same repo, in the same process: the contract the
-  README's "Writing inside a caller's transaction" section states.
+  guide `docs/guides/caller-transaction.md` states under "Write your
+  own rows in the same transaction as a step".
 
   Live, outside the SQL sandbox, for `EctoLiveLockTest`'s reason: the
   sandbox funnels every caller through one owned connection, so a second
