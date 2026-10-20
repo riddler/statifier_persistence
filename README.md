@@ -46,6 +46,8 @@ end
 - Do
   - [How to persist an execution and resume it in another process](docs/guides/persist-and-resume.md) - store an execution after every step and carry it on from another process with only its id
   - [How to drive a chart that calls out](docs/guides/drive-a-chart.md) - run an execution whose chart invokes your host, and fan one invocation out over N children
+- Understand
+  - [Documents, revisions, charts and executions, and why an execution is a durable row](docs/explanation/documents-revisions-charts-executions.md) - what the host keeps, what this package stores, and why an execution is a row that outlives every process
 
 ## Status
 
@@ -55,50 +57,6 @@ reference adapter, the execution lifecycle and executor seam, per-execution
 serialization, and the Ecto layer (configurable keys/tables, versioned
 migrations, and the Postgres adapter below) all exist and are
 conformance-tested.
-
-## Documents, revisions, charts and executions
-
-This package stores charts and executions. Documents and revisions are the
-host's, and it has no table for either. The four words are written down here
-so that the two sides line up, because nothing on these pages otherwise says
-how a host gets from "the workflow an author edits" to "the chart an
-execution runs".
-
-Each word has exactly one job:
-
-- A **document** is the stable thing a host names - the workflow an author
-  opens and edits - under an id the host owns.
-- A **revision** is one saved state of a document.
-- A **chart** is what a revision compiles to, identified by its content
-  hash. Documents and revisions never reach this package; the chart and
-  the execution are what it stores.
-- An **execution** runs exactly one chart for its whole life.
-
-The join between the host's side and this package's side is a publish row
-the **host** keeps:
-
-    (document_id, revision, content_hash, published_at, status)
-
-Three rules govern it:
-
-- There is exactly one active publish per document.
-- A new execution always starts on the document's active publish, and
-  nothing that starts an execution names a content hash directly: the host
-  reads the hash off the active publish.
-- A republish mints a new chart and never touches a live execution. An
-  execution drains on the chart it started on.
-
-So a card-processing host starts each new transaction through its
-own publish row rather than through a hash it carries around:
-
-```elixir
-# MyApp.Catalog is the host's publish table, not this package's
-%{content_hash: hash} = MyApp.Catalog.active_publish!("card-authorization")
-
-{:ok, %{chart_blob: blob}} = Storage.fetch_chart(store, hash)
-{:ok, machine} = Chart.from_binary(blob)
-{:ok, execution, _state} = Executions.create(store, "txn_01J2", machine, opts)
-```
 
 ## The Ecto adapter
 
@@ -994,7 +952,7 @@ rename:
 alias StatifierPersistence.Migration.Plan
 
 # old_machine is the compiled machine the hold was created on; new_machine
-# is the compiled next revision.
+# is the chart compiled from the document's next revision.
 {:ok, new_blob} = Chart.to_binary(new_machine)
 :ok = Storage.save_chart(store, new_machine, new_blob)
 
@@ -1199,31 +1157,13 @@ reproduces the path. The executable version lives in
 `test/statifier_persistence/demo/restart_demo_test.exs` (and its
 Postgres variant beside it).
 
-## The contract this package builds on
-
-The persisted-position story is already specified upstream, and this package
-is one consumer of it rather than the definition of it:
-
-- `docs/persistence.md` in statifier-ex covers what MachineState contains, the
-  interned-index hazard, chart identity, and the resume recipe.
-- ADR-0052 there records the rules: a persisted position is only meaningful
-  against the exact chart revision that produced it, so every load is guarded
-  by the Machine identity / content-hash. Loading a position against the wrong
-  revision does not error - it silently resumes the wrong configuration.
-- ADR-0060 records the resume API: the `:resume` option on
-  `Session.start_link/2`, the pure-core rehydration path, and what a resume
-  deliberately does not restore (in-flight delayed-send timers and live
-  invoked children).
-
-Read all three before adding code here.
-
 ## Scope
 
 In scope:
 
 - A storage-adapter behaviour: save/load of MachineState snapshots (or
   Recordings), guarded by the Machine identity so a position can never be
-  loaded against the wrong chart revision.
+  loaded against the wrong chart.
 - Execution lifecycle as a library: create/step/complete/fail, with a
   serialization guarantee per execution so concurrent event deliveries to one
   execution are ordered.

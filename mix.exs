@@ -62,6 +62,7 @@ defmodule StatifierPersistence.MixProject do
         "docs/guides/drive-a-chart.md",
         "docs/non-postgres-backends.md",
         "docs/telemetry.md",
+        "docs/explanation/documents-revisions-charts-executions.md",
         "docs/restart-demo.md",
         "docs/retention.md",
         "docs/chart-lock.md",
@@ -79,6 +80,7 @@ defmodule StatifierPersistence.MixProject do
         ],
         Reference: ["docs/telemetry.md"],
         Explanation: [
+          "docs/explanation/documents-revisions-charts-executions.md",
           "docs/restart-demo.md",
           "docs/retention.md",
           "docs/chart-lock.md"
@@ -101,6 +103,7 @@ defmodule StatifierPersistence.MixProject do
         CHANGELOG.md
         docs/guides/persist-and-resume.md
         docs/guides/drive-a-chart.md
+        docs/explanation/documents-revisions-charts-executions.md
         docs/restart-demo.md
         docs/non-postgres-backends.md
         docs/telemetry.md
