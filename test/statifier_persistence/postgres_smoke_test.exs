@@ -22,8 +22,8 @@ defmodule StatifierPersistence.PostgresSmokeTest do
         Could not check out a connection to the Postgres test database \
         (#{inspect(reason)}).
 
-        Start it with `docker compose up -d db` (see README.md, "Running \
-        the tests"), or point PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE \
+        Start it with `docker compose up -d db` (see \
+        docs/guides/running-the-tests.md), or point PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE \
         at an existing server.
         """)
     end
