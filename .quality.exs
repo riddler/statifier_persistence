@@ -50,6 +50,16 @@
   doc_links: [
     enabled: :auto
   ],
+
+  # The README keeps the shape of an introduction and a map: what the
+  # package is, why it exists, how to install it, one basic-usage snippet,
+  # and the documentation links grouped by the reader's question. The line
+  # ceiling is `readme_max_lines` in `.claude/diataxis.md`. Any finding
+  # fails the gate.
+  readme: [
+    enabled: :auto,
+    severity: :error
+  ],
   profiles: [
     loop: [
       stages: [:format, :compile, :credo, :test],

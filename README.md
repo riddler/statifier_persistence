@@ -6,6 +6,12 @@
 [![Hex Docs](https://img.shields.io/badge/hex-docs-lightgreen.svg)](https://hexdocs.pm/statifier_persistence/)
 [![License](https://img.shields.io/hexpm/l/statifier_persistence.svg)](https://github.com/riddler/statifier_persistence/blob/main/LICENSE)
 
+Durable stepper and storage adapters for
+[Statifier](https://github.com/riddler/statifier-ex). An execution of a chart
+is a stored row rather than a live process: each event loads its position,
+steps it, hands the effects to your host and persists the result, so a loan
+that runs for weeks survives every restart and deploy in between.
+
 > **Pre-1.0.** Until `statifier_persistence` reaches v1.0, its public surface may change
 > between minor releases, sometimes drastically: a release may rename modules,
 > callbacks, table columns, telemetry events or error vocabulary with no
@@ -16,18 +22,22 @@
 > on is on one page:
 > [`docs/upgrading.md`](docs/upgrading.md).
 
-Durable stepper and storage adapters for
-[Statifier](https://github.com/riddler/statifier-ex).
-
-Documentation lives on [hexdocs](https://hexdocs.pm/statifier_persistence/),
-including the [Surviving a restart](docs/restart-demo.md) guide.
+## Why a durable stepper
 
 Statifier's pure interpreter contract (machine_state, event -> machine_state,
 effects) makes a persistence-first execution model possible: load a persisted
 position, step it, execute the effects, persist. Hosts running charts that
 span days or survive deploys should not need long-lived Session processes at
-all - but every host currently hand-rolls the loop, the storage guard, and the
-crash semantics. This package is that loop, packaged.
+all - but every host otherwise hand-rolls the loop, the storage guard, and the
+crash semantics. This package is that loop, packaged: a storage-adapter
+behaviour whose every load is guarded by the chart's identity, so a position
+is never resumed against the wrong chart; an execution lifecycle that orders
+concurrent deliveries to one execution; effects handed to your host through
+one seam; and an Ecto adapter with versioned migrations, where your host
+supplies the Repo and any tenancy columns. Domain actions, authoring UI and
+job scheduling stay out of it:
+[statifier_oban](https://github.com/riddler/statifier_oban) owns timers and
+async work.
 
 ## Installation
 
@@ -41,8 +51,61 @@ def deps do
 end
 ```
 
+## Basic usage
+
+A copy of a book lent to a patron is one execution, keyed by the loan. Store
+the compiled chart, create the execution, and close the loan later from any
+process with nothing but its id:
+
+```elixir
+alias Statifier.{Chart, Event}
+alias StatifierPersistence.{Executions, Storage}
+
+source = """
+<scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="on_loan">
+  <state id="on_loan">
+    <transition event="loan.due" target="due"/>
+    <transition event="loan.returned" target="returned"/>
+  </state>
+  <state id="due">
+    <transition event="loan.returned" target="returned"/>
+  </state>
+  <final id="returned"/>
+</scxml>
+"""
+
+# Store the compiled chart once; every later load is checked against it.
+{:ok, machine} = Statifier.compile(source)
+{:ok, chart_blob} = Chart.to_binary(machine)
+{:ok, store} = Storage.new(StatifierPersistence.Storage.InMemory, [])
+:ok = Storage.save_chart(store, machine, chart_blob)
+
+# Effects reach your host through one function; this chart emits none.
+opts = [executor: fn _effect, _ctx -> :ok end]
+
+{:ok, _execution, _state} = Executions.create(store, "loan_01H8", machine, opts)
+
+# Later, in any process, with only the execution id:
+{:ok, record} = Storage.fetch_execution(store, "loan_01H8")
+{:ok, %{chart_blob: blob}} = Storage.fetch_chart(store, record.content_hash)
+{:ok, machine} = Chart.from_binary(blob)
+
+{:ok, execution, _state} =
+  Executions.step(store, "loan_01H8", machine, Event.external("loan.returned"), opts)
+
+execution.status
+#=> :completed
+```
+
+The in-memory store keeps the example short; the Ecto adapter stores the same
+rows in your database, and
+[How to persist an execution and resume it in another process](docs/guides/persist-and-resume.md)
+walks the whole loop with a chart that calls your host.
+
 ## Documentation
 
+- Learn
+  - [Basic usage](#basic-usage) - a loan stored as an execution and closed from another process with only its id
 - Do
   - [How to set up the Ecto adapter](docs/guides/ecto-adapter.md) - configure a persistence module, migrate, build the guarded store, and run on a backend that is not Postgres
   - [How to persist an execution and resume it in another process](docs/guides/persist-and-resume.md) - store an execution after every step and carry it on from another process with only its id
@@ -52,58 +115,26 @@ end
   - [How to encrypt the blob columns and place host columns](docs/guides/encrypt-and-place-columns.md) - put an encrypting Ecto type on the payload columns, and put a column of your own at a fixed position in every table the migrations helper creates
   - [How to retire a chart and prune finished executions](docs/guides/retire-and-prune.md) - teach a retirement about state outside this package, retire a chart nothing can resume, and prune the position blobs and input logs of executions that have ended
   - [How to move executions onto a newer chart](docs/guides/move-executions.md) - move one execution, a parent with its durable children, or every execution on a chart onto the chart from a document's next revision, and park one the plan refuses
+  - [How to run the Ecto adapter on a backend that is not Postgres](docs/non-postgres-backends.md) - decline the Postgres-only parts deliberately, and what declining costs
+  - [How to run the test suite](docs/guides/running-the-tests.md) - start the Postgres server the suite needs, or point it at one you already run
+  - [Upgrading a host](docs/upgrading.md) - what a host changes for each minor from 0.13 on
+- Look up
+  - [API reference](https://hexdocs.pm/statifier_persistence/api-reference.html) - every module, callback and option, from the moduledocs
+  - [Telemetry and the OpenTelemetry bridge half](docs/telemetry.md) - what this package emits as a driver, the storage-phase contract, and what the bridge builds on them
+  - [The changelog](CHANGELOG.md) - what changed in each version, with a **Breaking** heading for what a host must do
 - Understand
   - [Documents, revisions, charts and executions, and why an execution is a durable row](docs/explanation/documents-revisions-charts-executions.md) - what the host keeps, what this package stores, and why an execution is a row that outlives every process
+  - [Surviving a restart](docs/restart-demo.md) - a demo host persists mid-execution, drops everything volatile, cold-boots from the execution id alone and finishes with no duplicate side effects
+  - [What a finished execution leaves behind](docs/retention.md) - what pruning clears, and which rows of an ended execution you may delete and which you must not
+  - [What the chart lock reaches](docs/chart-lock.md) - what the per-chart lock between retiring a chart and putting an execution on it makes wait, and what its key is
 
-## Status
+## Compatibility
 
-Early, under active development, and the API is not frozen before 1.0.
-The storage-adapter behaviour with its identity guard, the in-memory
-reference adapter, the execution lifecycle and executor seam, per-execution
-serialization, and the Ecto layer (configurable keys/tables, versioned
-migrations, and the Postgres adapter) all exist and are
-conformance-tested.
-
-## Running the tests
-
-The suite includes database-backed tests against a real Postgres server -
-ADR-0005 rejects a skip tag for when one is absent, so `mix quality` and
-`mix test` both need one reachable. Start it once with:
-
-    docker compose up -d db
-
-which brings up `postgres:17` on `localhost:5432` with user/password
-`postgres`. Override host, port, user, password, or database name with the
-`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, and `PGDATABASE` env vars (see
-`config/test.exs` for the defaults) if a server is already running
-elsewhere.
-
-## Surviving a restart
-
-`docs/restart-demo.md` walks through the demo embedder that drives this
-package's whole surface across a simulated restart with no Session
-process: persist mid-execution with a pending durable timer and an in-flight
-async invocation, drop everything volatile, cold-boot from the execution id
-alone, and finish with zero duplicate side effects and a replay that
-reproduces the path. The executable version lives in
-`test/statifier_persistence/demo/restart_demo_test.exs` (and its
-Postgres variant beside it).
-
-## Scope
-
-In scope:
-
-- A storage-adapter behaviour: save/load of MachineState snapshots (or
-  Recordings), guarded by the Machine identity so a position can never be
-  loaded against the wrong chart.
-- Execution lifecycle as a library: create/step/complete/fail, with a
-  serialization guarantee per execution so concurrent event deliveries to one
-  execution are ordered.
-- The load -> handle_event -> execute effects -> persist loop, with effect
-  execution delegated to the host.
-- An Ecto adapter shipping schemas and migrations for chart definitions,
-  versions, and executions; the host supplies the Repo and any tenancy columns.
-
-Out of scope: domain actions, authoring UI, and job scheduling -
-[statifier_oban](https://github.com/riddler/statifier_oban) owns timers and
-async work.
+- Elixir `~> 1.18`.
+- Statifier `~> 2.15`, `telemetry ~> 1.3` and `uxid ~> 2.0`.
+- `ecto_sql ~> 3.10` is optional; with it the Ecto adapter is compiled. The
+  adapter is written against Postgres, and runs on another Ecto backend with
+  the Postgres-only parts declined
+  ([How to run the Ecto adapter on a backend that is not Postgres](docs/non-postgres-backends.md)).
+- Pre-1.0: pin an exact minor (`~> 0.25.0`) until 1.0, and read the
+  [CHANGELOG](CHANGELOG.md)'s **Breaking** headings when you move it.

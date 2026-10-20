@@ -66,6 +66,7 @@ defmodule StatifierPersistence.MixProject do
         "docs/guides/encrypt-and-place-columns.md",
         "docs/guides/retire-and-prune.md",
         "docs/guides/move-executions.md",
+        "docs/guides/running-the-tests.md",
         "docs/non-postgres-backends.md",
         "docs/telemetry.md",
         "docs/explanation/documents-revisions-charts-executions.md",
@@ -88,7 +89,8 @@ defmodule StatifierPersistence.MixProject do
           "docs/guides/encrypt-and-place-columns.md",
           "docs/guides/retire-and-prune.md",
           "docs/guides/move-executions.md",
-          "docs/non-postgres-backends.md"
+          "docs/non-postgres-backends.md",
+          "docs/guides/running-the-tests.md"
         ],
         Reference: ["docs/telemetry.md"],
         Explanation: [
@@ -121,6 +123,7 @@ defmodule StatifierPersistence.MixProject do
         docs/guides/encrypt-and-place-columns.md
         docs/guides/retire-and-prune.md
         docs/guides/move-executions.md
+        docs/guides/running-the-tests.md
         docs/explanation/documents-revisions-charts-executions.md
         docs/restart-demo.md
         docs/non-postgres-backends.md
@@ -148,7 +151,7 @@ defmodule StatifierPersistence.MixProject do
       {:ecto_sql, "~> 3.10", optional: true},
 
       # Dev / test
-      {:ex_quality, "~> 0.15", only: :dev, runtime: false},
+      {:ex_quality, "~> 0.16", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:excoveralls, "~> 0.18", only: :test},
