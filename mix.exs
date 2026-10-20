@@ -98,6 +98,7 @@ defmodule StatifierPersistence.MixProject do
         docs/telemetry.md
         docs/retention.md
         docs/chart-lock.md
+        docs/upgrading.md
       ),
       links: %{
         "GitHub" => @source_url,
