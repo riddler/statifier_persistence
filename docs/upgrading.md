@@ -33,10 +33,207 @@ with its own migration,
     end
 
 and an install still short of V06 follows the V06 ordering rule in the
-`StatifierPersistence.Ecto.Migrations` documentation first. No release before
-0.17.0 adds a migration; 0.17.0 does (V08, under "0.16 to 0.17"), and
-no release from 0.18.0 through 0.25.0 adds one, and neither do the
+`StatifierPersistence.Ecto.Migrations` documentation first (a host older
+than 0.13 that has not reached V03 or V04 reads the section on them below).
+No release before 0.17.0 adds a migration; 0.17.0 does (V08, under
+"0.16 to 0.17"), and no release from 0.18.0 through 0.25.0 adds one, and neither do the
 0.23.1, 0.24.1 and 0.24.2 patches.
+
+## If the database is older than V07: V03 and V04
+
+A host that last migrated before 0.13 may not have reached V03 or V04, the
+versions that add the `outcome_blob` column and the `metadata` index. Read
+this section before the V07 step above if yours is one of them; a host that
+is already at V05 or later skips it.
+
+### Upgrading to V03 before deploying 0.7.0
+
+0.7.0 needs V03 of the package DDL, and the order matters: **run the
+migration first, then deploy the new code.** `outcome_blob` is an
+unconditional field on the generated execution schema, so 0.7.0 against a
+V02 database fails on every query that touches the executions table, not
+only on the fan-out write that introduced the column. The reverse order is
+safe:
+V03 on a database still served by 0.6.x adds a column nobody writes and
+an index nobody's query needs yet.
+
+From 0.12.0 an install that still owes V02, V03 or V04 - one capped below
+version 4 - runs **V06 first, on its own**, and the versions it skipped
+afterwards. For a host capped at V01:
+
+    def up do
+      StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, from: 6, version: 6)
+      StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, from: 2, version: 5)
+    end
+
+    def down do
+      StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence, from: 5, version: 2)
+      StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence, from: 6, version: 6)
+    end
+
+Substitute your own cap in both spans - a host capped at V02 writes
+`from: 3` on the second `up` and `version: 3` on the first `down`. V02, V03
+and V04 alter the executions table, which on a database built before 0.12.0
+carries that name only once V06 has renamed it (ADR-0011 decision 3). The
+ordering rule is an *upgrade* rule only: V06's `down/1` is a no-op, so the
+V06 call in the `down` above does nothing. V02-V05's arms name the
+executions table under the name V06 gave it, and V01 - below the cap, in
+your own earlier migration - is what drops it. An install already at V05
+needs none of this: `from: 6` is the whole upgrade.
+
+A host already on V02 picks V03 up with an ordinary migration of its own:
+
+    defmodule MyApp.Repo.Migrations.AddStatifierPersistenceOutcomeBlob do
+      use Ecto.Migration
+      def up, do: StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, from: 3)
+      def down, do: StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence, version: 3)
+    end
+
+A host whose *first* migration is capped - `up(for: MyApp.Persistence,
+version: 2)`, which is what keeps a fresh clone and an already-migrated
+database on the same sequence of steps - caps its rollback the same way,
+with `from: 2`:
+
+    defmodule MyApp.Repo.Migrations.AddStatifierPersistence do
+      use Ecto.Migration
+
+      def up, do: StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, version: 2)
+      def down, do: StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence, from: 2)
+    end
+
+Leaving that `down` uncapped is the failure this ceiling exists to
+prevent: Ecto rolls migrations back newest first, so `mix ecto.rollback
+--all` runs the V03 migration's `down` and then this one's, which without
+`from:` starts at V03 again and fails on a column that is already gone
+(`no such column: outcome_blob`). Rolling back a single step is
+unaffected either way.
+
+V03 does two things, and only one of them is cheap.
+
+**The `outcome_blob` column** is a nullable `:binary` added to the
+executions table. Postgres adds a nullable column with no default as a
+catalog-only change, so this part is fast whatever the table's size. It takes the
+configured `:blob_type` with the three blob columns V01 created
+(`identity_blob`, `chart_blob` and `position_blob`), so a `:blob_type` whose
+underlying database type is not binary needs the same hand-written `ALTER`
+the README's "Encrypting the blob columns" section describes for those
+three - now for `outcome_blob` as well.
+
+**The `metadata` GIN index** is the part to plan for. V03's `up/1`
+issues a plain `CREATE INDEX`, **not** `CREATE INDEX CONCURRENTLY`: it
+takes a `SHARE` lock on the executions table for the whole build, which
+blocks every `INSERT`, `UPDATE` and `DELETE` against that table until the
+index is finished. Reads are unaffected. On a small or idle executions table
+this is imperceptible. On a large one it is an outage of every write that
+table takes - which, for a host stepping executions durably, means every
+step of every execution.
+
+How long that is depends on the row count, the width of the `metadata`
+maps, and the server, so measure rather than guess. (`sp-461` is a
+separate measurement issue and not a number for this build: it measures
+the settlement read cost against a GIN-indexed `metadata` column at
+increasing fan-out widths.)
+The concurrent build is what a host with a large executions table wants, and
+0.8.0 ships it as V04 - see below.
+
+The index is not optional in effect: without it, every fan-out child
+completion asks whether its N siblings are terminal with a `jsonb`
+containment query, and each one is a sequential scan of the whole executions
+table.
+
+**On an Ecto adapter that is not Postgres, the index is skipped.** `GIN`
+and `jsonb_path_ops` are Postgres spellings, so `up/1` creates the index
+only when the migration's repo runs on `Ecto.Adapters.Postgres`, and
+`down/1` drops it under the same condition. Everything else in V03 - the
+`outcome_blob` column included - is created on every adapter, which is
+what lets a SQLite host run this package's DDL at all. (In 0.7.0 it could
+not: the index raised, the whole migration rolled back, and the column
+went with it. Fixed in 0.7.1.)
+
+What is skipped with the index is what the index served. Both metadata
+queries this package issues -
+`StatifierPersistence.Storage.Ecto.list_executions_by_metadata/2` and the
+status projection `list_execution_states_by_metadata/2` - are `jsonb`
+containment SQL, which a non-Postgres backend does not parse. So on such
+an adapter the Ecto adapter declares no metadata support: a `metadata:`
+map at create is refused with `{:error, :metadata_unsupported}`, the two
+listings refuse with `{:error, :child_listing_unsupported}` and
+`{:error, :execution_states_unsupported}` - and the two raw adapter callbacks
+behind them answer `{:error, :metadata_unsupported}` rather than issuing
+SQL the backend cannot parse, for a host that reaches them directly - and
+a durable subchart or a fan-out
+over that store is **refused at open** rather than started and left with
+children nothing can settle. Storing, loading, stepping and resuming
+executions are unaffected. Per-execution locking is a separate Postgres-only
+surface - `lock_execution/3` is `pg_advisory_xact_lock` plus
+`SELECT ... FOR UPDATE` -
+and is tracked in `sp-5lm`.
+
+### Building the metadata index concurrently: V04
+
+0.8.0 adds V04, whose whole job is to rebuild V03's `metadata` GIN index
+with `CREATE INDEX CONCURRENTLY` - same name, same expression, same
+`jsonb_path_ops` opclass, built without the `SHARE` lock. It ships in the
+same versioned helper as everything else, so a fresh database picks it up
+with the one-call recipe and needs nothing else.
+
+The one thing V04 cannot do for you is turn off the transaction it runs
+in. `CREATE INDEX CONCURRENTLY` cannot run inside a transaction block,
+and Ecto reads `@disable_ddl_transaction` and `@disable_migration_lock`
+from the module `Ecto.Migrator` runs - **your** migration, not a module
+it delegates to. So V04 wants a migration of its own:
+
+    defmodule MyApp.Repo.Migrations.RebuildStatifierPersistenceMetadataIndex do
+      use Ecto.Migration
+
+      @disable_ddl_transaction true
+      @disable_migration_lock true
+
+      def up, do: StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, from: 4)
+      def down, do: StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence, version: 4)
+    end
+
+Called from an ordinary transactional migration instead, V04 leaves V03's
+index in place and does nothing else. That is deliberate rather than a
+failure mode: the index it would have built is the one already there,
+under the same name, and raising would break the one-call recipe every
+fresh database and test harness uses, where a plain build on an empty
+executions table costs nothing. It logs a warning when the executions table
+already holds rows, which is the case where the plain build did block writes and
+the two attributes are what you were missing.
+
+`down/1` for V04 does nothing at all: what it leaves behind is V03's
+index, and V03's `down/1` is what drops it. A non-transactional migration
+has no rollback, so if the rebuild is interrupted, re-run the migration -
+the drop is `drop_if_exists`, so it clears a missing or an invalid
+leftover either way.
+
+**A host with a large executions table that has not yet reached V03** is the
+one case V04 does not solve by itself, because V03 still builds the index
+plainly on the way past. Such a host adds the `outcome_blob` column by
+hand, skipping V03's helper call entirely - after V06 has given the table
+its current name:
+
+    defmodule MyApp.Repo.Migrations.AddStatifierPersistenceOutcomeBlob do
+      use Ecto.Migration
+
+      def up do
+        alter table("executions") do
+          add(:outcome_blob, :binary, null: true)
+        end
+      end
+    end
+
+substituting your configured table name and prefix, and then runs the V04
+migration above for the index. That is a smaller hand-written migration
+than 0.7.x asked for - the index half is V04's now - and the warning
+about never calling `up(from: 3)` afterwards still applies: V03's
+`create/1` is a plain `create`, not `create_if_not_exists`, so a second
+run fails on the index that is already there.
+
+**On an Ecto adapter that is not Postgres, V04 is a no-op**, both
+directions, under the same adapter check V03 uses: there is no index to
+rebuild, because V03 created none. Such a host needs neither attribute.
 
 ## 0.13 to 0.14
 
