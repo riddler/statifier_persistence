@@ -6,9 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Entries for unreleased work are not written here directly. Each issue drops a
-fragment in [`changelog.d/`](https://github.com/riddler/statifier_persistence/blob/v0.25.0/changelog.d/README.md); the fragments are assembled
+fragment in [`changelog.d/`](https://github.com/riddler/statifier_persistence/blob/v0.25.1/changelog.d/README.md); the fragments are assembled
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
+
+## [0.25.1] 2026-10-20
+
+Docs release: the README is cut to a short introduction and a Documentation map, and HexDocs shows new how-to guides, an explanation page and a cheatsheet, with the examples re-cut to a library loan. No library code changes.
+
+Upgrading: nothing to change. No schema migration, the `statifier` floor stays `~> 2.15`, and no answer a host matches is added or removed.
+
+### Changed
+
+- The README is cut to a short introduction and a Documentation map. Its sections move to nine how-to guides under `docs/guides/` (persist and resume an execution, drive a chart that calls out, set up the Ecto adapter, list by host scope and record inputs, write inside a caller's transaction, encrypt the blob columns and place a host column, retire and prune, move executions onto a newer chart, and run the tests) and one explanation page, `docs/explanation/documents-revisions-charts-executions.md`; the text moves without changing what it says.
+- `docs/reference/cheatsheet.cheatmd` is a cheatsheet for the calls a host makes most. The new pages are published in the package and grouped in the HexDocs sidebar under How-to guides, Reference and Explanation.
+- The doc and moduledoc examples are re-cut from an advertising chart to a library loan.
+- `docs/upgrading.md` gains the V03 and V04 upgrade steps for a host older than 0.13, names the pruning callbacks in the 0.16 to 0.17 upgrade, and notes the chart lock's waiting in the 0.23.0 upgrade.
+- Doc text in the library is aligned with what the code does: the pruning statements (an input log that `StatifierPersistence.Retention.prune/3` clears, and rows another transaction holds locked that a later call takes), the `expected_version` doc no longer names a fixed version range, and the cross-references that named README sections point at the guides.
 
 ## [0.25.0] 2026-10-13
 
