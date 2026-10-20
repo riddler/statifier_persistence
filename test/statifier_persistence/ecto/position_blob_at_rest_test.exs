@@ -2,8 +2,8 @@ defmodule StatifierPersistence.Ecto.PositionBlobAtRestTest do
   @moduledoc """
   What the Ecto adapter stores in `position_blob`, and what Ecto's query
   telemetry carries on the writes that bind it: the facts ADR-0004's
-  2026-10-04 Note and the README's "Encrypting the blob columns" section
-  record.
+  2026-10-04 Note and the "Know what `position_blob` holds" section of
+  docs/guides/encrypt-and-place-columns.md record.
 
   Every `_ioprocessors` entry a registered send type answered at the
   create is part of the position, so a location a processor hands out -

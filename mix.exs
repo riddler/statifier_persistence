@@ -63,6 +63,7 @@ defmodule StatifierPersistence.MixProject do
         "docs/guides/ecto-adapter.md",
         "docs/guides/host-scope-and-inputs.md",
         "docs/guides/caller-transaction.md",
+        "docs/guides/encrypt-and-place-columns.md",
         "docs/non-postgres-backends.md",
         "docs/telemetry.md",
         "docs/explanation/documents-revisions-charts-executions.md",
@@ -82,6 +83,7 @@ defmodule StatifierPersistence.MixProject do
           "docs/guides/ecto-adapter.md",
           "docs/guides/host-scope-and-inputs.md",
           "docs/guides/caller-transaction.md",
+          "docs/guides/encrypt-and-place-columns.md",
           "docs/non-postgres-backends.md"
         ],
         Reference: ["docs/telemetry.md"],
@@ -112,6 +114,7 @@ defmodule StatifierPersistence.MixProject do
         docs/guides/ecto-adapter.md
         docs/guides/host-scope-and-inputs.md
         docs/guides/caller-transaction.md
+        docs/guides/encrypt-and-place-columns.md
         docs/explanation/documents-revisions-charts-executions.md
         docs/restart-demo.md
         docs/non-postgres-backends.md
