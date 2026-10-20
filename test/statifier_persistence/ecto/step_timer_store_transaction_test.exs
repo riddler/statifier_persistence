@@ -2,8 +2,9 @@ defmodule StatifierPersistence.Ecto.StepTimerStoreTransactionTest do
   @moduledoc """
   A host executor that keeps its delayed-send rows in its own table on the
   same repo, written from the stepping process, commits those rows in the
-  transaction that saves the step's position: the join the README's
-  "Committing timer rows with the step's position" section states.
+  transaction that saves the step's position: the join the guide
+  `docs/guides/caller-transaction.md` states under "Commit timer rows
+  with the step's position".
 
   The timer table is created here and stands in for a host's timer store.
   A crash after the executor has handled a step's cancel (or a create's

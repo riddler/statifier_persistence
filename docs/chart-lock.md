@@ -137,7 +137,8 @@ for the other to let it go, and Postgres ends one of them with
 
 - an `Ecto.Multi`, or any function of yours that runs inside one;
 - this package's calls made inside a transaction you opened, because
-  they join it (README, "Writing inside a caller's transaction");
+  they join it ([How to step inside a caller's
+  transaction](guides/caller-transaction.md));
 - **a test under the Ecto SQL sandbox**, where the whole test is one
   transaction, so a test that creates an execution on a chart and later
   retires that chart is such a caller.

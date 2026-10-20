@@ -1,8 +1,9 @@
 defmodule StatifierPersistence.HeldLeaseTest do
   @moduledoc """
   A second `Executions.step/5` for one execution arriving while a first
-  one holds the execution's lock: the contract the README's "Delivering
-  while a step is in flight" section states.
+  one holds the execution's lock: the contract the guide
+  `docs/guides/caller-transaction.md` states under "Deliver an event
+  while a step is in flight".
 
   The first step is held open from inside its own serialized tail by an
   event builder, which `step/5` resolves under the exclusion it already
