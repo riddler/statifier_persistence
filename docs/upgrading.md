@@ -1,7 +1,7 @@
-# Upgrading a host from 0.13 to 0.25.0
+# Upgrading a host from 0.13 to 0.26.0
 
 This page says what a host changes to move `statifier_persistence` from
-0.13.0 to 0.25.0, one minor at a time. A host here is the code that
+0.13.0 to 0.26.0, one minor at a time. A host here is the code that
 embeds the package: the module that calls `use StatifierPersistence.Ecto`,
 the migrations it runs, the options it passes to
 `StatifierPersistence.Executions` and `StatifierPersistence.Driver`, the
@@ -14,10 +14,10 @@ Take the minors in order, and move the pin with each one, as the README
 recommends: `{:statifier_persistence, "~> 0.14.0"}`, then `"~> 0.15.0"`,
 then `"~> 0.16.0"`, then `"~> 0.17.0"`, then `"~> 0.18.0"`, then
 `"~> 0.19.0"`, then `"~> 0.20.0"`, then `"~> 0.21.0"`, then `"~> 0.22.0"`,
-then `"~> 0.23.0"`, then `"~> 0.24.0"`, then `"~> 0.25.0"`.
+then `"~> 0.23.0"`, then `"~> 0.24.0"`, then `"~> 0.25.0"`, then `"~> 0.26.0"`.
 The `statifier` floor stays `~> 2.6` through 0.17.0; 0.18.0 moves it to
 `~> 2.9`, and every later release through 0.24.2 keeps it there; 0.25.0
-moves it to `~> 2.15`.
+moves it to `~> 2.15`, and 0.26.0 keeps it there.
 
 ## Before you start: the database is at V07
 
@@ -37,7 +37,7 @@ and an install still short of V06 follows the V06 ordering rule in the
 than 0.13 that has not reached V03 or V04 reads the section on them below).
 No release before 0.17.0 adds a migration; 0.17.0 does (V08, under
 "0.16 to 0.17"), and no release from 0.18.0 through 0.25.0 adds one, and neither do the
-0.23.1, 0.24.1 and 0.24.2 patches. The release after 0.25.1 adds V09, six
+0.23.1, 0.24.1 and 0.24.2 patches. 0.26.0 adds V09, six
 nullable `linkage_*` columns on the executions table and two indexes. Only
 a host that sets the new `linkage_columns: true` option on
 `use StatifierPersistence.Ecto` needs it, and it runs V09 before deploying
@@ -751,9 +751,9 @@ the new `function_providers:` option and the list does not resolve.
   emits no `[:statifier_persistence, :child, :refused]` event. A driver
   with a list that resolves, or with none, starts children as before.
 
-## After 0.25.1: durable subchart children on another backend
+## 0.25 to 0.26: durable subchart children on another backend
 
-The release after 0.25.1 lets a host on an Ecto backend that is not
+0.26.0 lets a host on an Ecto backend that is not
 Postgres run durable subchart children, by opting in. A host that changes
 nothing, on any backend, sees every answer 0.25.1 gives: **NONE**. Off
 Postgres such a host's `[:statifier_persistence, :adapter, :call]`
