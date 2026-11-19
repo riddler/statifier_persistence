@@ -64,6 +64,7 @@ defmodule StatifierPersistence.Storage do
 
   alias Statifier.{Event, Machine, MachineState, Position}
   alias Statifier.Machine.Identity
+  alias StatifierPersistence.Execution.Linkage
   alias StatifierPersistence.Storage.Adapter
   alias StatifierPersistence.Telemetry
 
@@ -408,7 +409,9 @@ defmodule StatifierPersistence.Storage do
   for an adapter that does not export
   `c:StatifierPersistence.Storage.Adapter.supports_metadata?/1` (or whose
   answer is `false`) returns `{:error, :metadata_unsupported}` before any
-  write, and an empty or absent map is never refused. A map that is not a
+  write, and an empty or absent map is never refused. A map holding the
+  reserved linkage key and nothing else is also admitted when
+  `linkage_supported?/1` holds (ADR-0008's 2026-11-19 Amendment). A map that is not a
   map of string keys raises `ArgumentError`: the shape is the one thing
   ADR-0006 decision 1 does validate, and a malformed option is a caller
   bug, not a storage event.
@@ -674,12 +677,19 @@ defmodule StatifierPersistence.Storage do
   otherwise reported as able to list purely because the function is
   compiled into it. Exported and able are different questions and this is
   the one callers ask (sp-11w).
+
+  `linkage_supported?/1` stands in for `metadata_supported?/1` here
+  (ADR-0008's 2026-11-19 Amendment): a store that declares linkage
+  answers a match on the reserved key alone, which is every match a
+  durable child's start, settlement and cascade make. A match naming a
+  host key still needs `metadata_supported?/1`, and
+  `list_executions_by_metadata/2` refuses it on such a store.
   """
   @spec child_listing_supported?(store :: t()) :: boolean()
   def child_listing_supported?(%__MODULE__{} = store) do
     Code.ensure_loaded?(store.adapter) and
       function_exported?(store.adapter, :list_executions_by_metadata, 2) and
-      metadata_supported?(store)
+      linkage_storable?(store)
   end
 
   @doc """
@@ -711,13 +721,15 @@ defmodule StatifierPersistence.Storage do
   and `metadata_supported?/1` holds - the same pair
   `child_listing_supported?/1` checks, and for the same reason: the
   projection is the same metadata match, narrowed to three columns. The
-  other half of `start_child_at/6`'s refusal at open.
+  other half of `start_child_at/6`'s refusal at open. As there,
+  `linkage_supported?/1` stands in for `metadata_supported?/1`
+  (ADR-0008's 2026-11-19 Amendment).
   """
   @spec execution_states_supported?(store :: t()) :: boolean()
   def execution_states_supported?(%__MODULE__{} = store) do
     Code.ensure_loaded?(store.adapter) and
       function_exported?(store.adapter, :list_execution_states_by_metadata, 2) and
-      metadata_supported?(store)
+      linkage_storable?(store)
   end
 
   @doc """
@@ -734,11 +746,15 @@ defmodule StatifierPersistence.Storage do
   of an invocation has reached a terminal status. It exists so that
   question does not cost N whole records - blobs included - once per
   child.
+
+  On a store that declares linkage and not `metadata`, a match naming
+  anything but the reserved key is refused the same way, without calling
+  the adapter (ADR-0008's 2026-11-19 Amendment).
   """
   @spec list_execution_states_by_metadata(store :: t(), metadata :: Adapter.metadata()) ::
           {:ok, [Adapter.execution_state()]} | {:error, error()}
   def list_execution_states_by_metadata(%__MODULE__{} = store, metadata) do
-    if execution_states_supported?(store) do
+    if listing_open?(store, :list_execution_states_by_metadata, metadata) do
       adapter_call(store.adapter, :list_execution_states_by_metadata, [], fn ->
         store.adapter.list_execution_states_by_metadata(store.opts, metadata)
       end)
@@ -756,11 +772,15 @@ defmodule StatifierPersistence.Storage do
   `child_listing_supported?/1` is true; returns
   `{:error, :child_listing_unsupported}` for an adapter that does not
   export it, without calling the adapter at all.
+
+  On a store that declares linkage and not `metadata`, a match naming
+  anything but the reserved key is refused the same way, without calling
+  the adapter (ADR-0008's 2026-11-19 Amendment).
   """
   @spec list_executions_by_metadata(store :: t(), metadata :: Adapter.metadata()) ::
           {:ok, [Adapter.execution_record()]} | {:error, error()}
   def list_executions_by_metadata(%__MODULE__{} = store, metadata) do
-    if child_listing_supported?(store) do
+    if listing_open?(store, :list_executions_by_metadata, metadata) do
       adapter_call(store.adapter, :list_executions_by_metadata, [], fn ->
         store.adapter.list_executions_by_metadata(store.opts, metadata)
       end)
@@ -1391,13 +1411,41 @@ defmodule StatifierPersistence.Storage do
   # ADR-0006 decision 3's refusal at open. An empty map is never refused -
   # that is what keeps every pre-ADR-0006 adapter conformant unchanged -
   # and a non-empty one reaches the adapter only when it has declared
-  # support by exporting supports_metadata?/1 and answering true.
+  # support by exporting supports_metadata?/1 and answering true, or, for
+  # a map holding the reserved linkage key and nothing else, by declaring
+  # supports_linkage?/1 (ADR-0008's 2026-11-19 Amendment).
   @spec check_metadata_supported(t(), Adapter.metadata()) :: :ok | {:error, error()}
   defp check_metadata_supported(_store, metadata) when map_size(metadata) == 0, do: :ok
 
-  defp check_metadata_supported(store, _metadata) do
-    if metadata_supported?(store), do: :ok, else: {:error, :metadata_unsupported}
+  defp check_metadata_supported(store, metadata) do
+    cond do
+      metadata_supported?(store) -> :ok
+      linkage_only?(metadata) and linkage_supported?(store) -> :ok
+      true -> {:error, :metadata_unsupported}
+    end
   end
+
+  # ADR-0008's 2026-11-19 Amendment: a store holds a durable child's
+  # linkage when it declares `metadata`, or declares linkage alone.
+  @spec linkage_storable?(t()) :: boolean()
+  defp linkage_storable?(store), do: metadata_supported?(store) or linkage_supported?(store)
+
+  # Whether a facade listing reaches the adapter for `match`: the callback
+  # is exported, and the store declares `metadata`, or declares linkage
+  # and `match` names the reserved key and nothing else (the same
+  # Amendment's last table row; any other match is refused as 0.25.1
+  # refused it). Each capability is asked at most once, and
+  # `metadata_supported?/1` first, so a store that declares `metadata`
+  # is asked exactly what 0.25.1 asked it.
+  @spec listing_open?(t(), atom(), Adapter.metadata()) :: boolean()
+  defp listing_open?(store, callback, match) do
+    Code.ensure_loaded?(store.adapter) and
+      function_exported?(store.adapter, callback, 2) and
+      (metadata_supported?(store) or (linkage_only?(match) and linkage_supported?(store)))
+  end
+
+  @spec linkage_only?(Adapter.metadata()) :: boolean()
+  defp linkage_only?(metadata), do: Map.keys(metadata) == [Linkage.reserved_key()]
 
   @spec position_opt([execution_write_opt()]) :: :persist | :skip
   defp position_opt(opts), do: Keyword.get(opts, :position, :persist)

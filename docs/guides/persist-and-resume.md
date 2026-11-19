@@ -185,7 +185,7 @@ timers and in-flight invocations from your own durable rows.
 | Module | Role |
 |---|---|
 | `StatifierPersistence.Storage` | The identity-guarded facade: charts, positions, execution records. Every load is guarded; there is no unguarded path |
-| `StatifierPersistence.Storage.Adapter` | The behaviour a backing store implements. `Storage.InMemory` is the reference one, `Storage.Ecto` the Postgres one (on [another backend](../non-postgres-backends.md), minus the lock and the listings) |
+| `StatifierPersistence.Storage.Adapter` | The behaviour a backing store implements. `Storage.InMemory` is the reference one, `Storage.Ecto` the Postgres one (on [another backend](../non-postgres-backends.md), minus the lock, and minus the listings unless the host opts into the linkage columns) |
 | `StatifierPersistence.Executions` | The lifecycle: `create/4`, `step/5`, `fail/4`, in ADR-0004's fixed order |
 | `StatifierPersistence.Driver` | Drive-to-quiescence over `Executions`: performs the chart's `<invoke>` calls and steps each answer back in |
 | `StatifierPersistence.Executor` | The seam every effect crosses on its way to your host |

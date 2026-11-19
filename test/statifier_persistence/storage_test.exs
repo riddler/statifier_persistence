@@ -323,6 +323,47 @@ defmodule StatifierPersistence.StorageTest do
       assert {:ok, [record]} = Storage.list_executions_by_metadata(store, metadata)
       assert record.execution_id == "execution-child-delegate"
     end
+
+    # ADR-0008's 2026-11-19 Amendment leaves a store that declares
+    # `metadata` asked what 0.25.1 asked it: one `supports_metadata?/1`
+    # probe, then the listing, whatever the match names.
+    #
+    # sabotage: in Storage's listing_open?/3, put back the first draft's
+    # two conjuncts (the store check, then a match check that asks
+    # metadata_supported?/1 again) -> red, a host-key match probed
+    # supports_metadata? twice. Verified red, reverted from a copy.
+    test "a store that declares metadata is probed once per listing, as before" do
+      {:ok, store} = Storage.new(InMemory, [])
+      ref = make_ref()
+      test_pid = self()
+      handler_id = {__MODULE__, ref}
+
+      :ok =
+        :telemetry.attach(
+          handler_id,
+          [:statifier_persistence, :adapter, :call],
+          fn _event, _measurements, metadata, _config ->
+            if self() == test_pid, do: send(test_pid, {ref, metadata.callback})
+          end,
+          nil
+        )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      reserved = %{"statifier_persistence" => %{"parent_execution_id" => "execution-parent"}}
+
+      for match <- [reserved, %{"tenant_id" => "acct_probe"}] do
+        assert {:ok, []} = Storage.list_executions_by_metadata(store, match)
+        assert_received {^ref, :supports_metadata?}
+        assert_received {^ref, :list_executions_by_metadata}
+        refute_received {^ref, _callback}
+
+        assert {:ok, []} = Storage.list_execution_states_by_metadata(store, match)
+        assert_received {^ref, :supports_metadata?}
+        assert_received {^ref, :list_execution_states_by_metadata}
+        refute_received {^ref, _callback}
+      end
+    end
   end
 
   # -- The fan-out facade arms (sp-t57, rulings C3 and C5) ---------------
