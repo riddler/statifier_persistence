@@ -37,7 +37,12 @@ and an install still short of V06 follows the V06 ordering rule in the
 than 0.13 that has not reached V03 or V04 reads the section on them below).
 No release before 0.17.0 adds a migration; 0.17.0 does (V08, under
 "0.16 to 0.17"), and no release from 0.18.0 through 0.25.0 adds one, and neither do the
-0.23.1, 0.24.1 and 0.24.2 patches.
+0.23.1, 0.24.1 and 0.24.2 patches. The release after 0.25.1 adds V09, six
+nullable `linkage_*` columns on the executions table and two indexes. Only
+a host that sets the new `linkage_columns: true` option on
+`use StatifierPersistence.Ecto` needs it, and it runs V09 before deploying
+the code that sets the option; a host that leaves the option off may run
+V09 or leave it, because its schema names none of the columns.
 
 ## If the database is older than V07: V03 and V04
 

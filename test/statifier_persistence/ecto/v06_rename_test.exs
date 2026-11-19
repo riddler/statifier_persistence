@@ -200,7 +200,7 @@ defmodule StatifierPersistence.Ecto.V06RenameTest do
       refute relation_exists?(@fresh_prefix <> "runs")
       refute relation_exists?(@fresh_prefix <> "runs_run_id_index")
 
-      assert Migrations.expected_version() == 8
+      assert Migrations.expected_version() == 9
     end
 
     # The rollback this package advertises - `down(for: Host)`, and

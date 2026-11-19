@@ -319,7 +319,7 @@ process.
 `callback` is the name of the `Storage.Adapter` callback the facade called -
 `:init`, `:save_chart`, `:fetch_chart`, `:save_position`, `:fetch_position`,
 `:insert_execution`, `:fetch_execution`, `:update_execution`,
-`:supports_metadata?`, `:list_executions_by_metadata`,
+`:supports_metadata?`, `:supports_linkage?`, `:list_executions_by_metadata`,
 `:supports_execution_outcome?`, `:list_execution_states_by_metadata`,
 `:supports_content_hash_query?`, `:count_executions_by_content_hash`,
 `:list_active_execution_ids_by_content_hash`,

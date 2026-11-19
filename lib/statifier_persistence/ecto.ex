@@ -61,6 +61,15 @@ if Code.ensure_loaded?(Ecto) do
     regardless for the same reason: it is the column a host queries
     (ADR-0006 decision 3).
 
+    With `linkage_columns: true` the execution schema also carries the
+    six columns V09 adds - `linkage_parent_execution_id`,
+    `linkage_invoke_id`, `linkage_child_index`, `linkage_content_hash`,
+    `linkage_child_count` and `linkage_policy` - the home a durable
+    subchart child's linkage takes on a backend that cannot store
+    `metadata` (ADR-0008's 2026-11-19 Amendment). Without the option the
+    schema names none of them, so it reads and writes what it did before
+    V09 existed, whether or not V09 has run.
+
     The inputs table is ADR-0010's per-execution input log: one row per input
     the interpreter saw, carrying the execution it belongs to, its dense
     zero-based `seq`, the public `door` it entered by, and the opaque
@@ -131,6 +140,19 @@ if Code.ensure_loaded?(Ecto) do
       ]
     }
 
+    # V09's six columns, one per value under the reserved linkage key, in
+    # the order `StatifierPersistence.Execution.Linkage` documents them.
+    # The executions schema names them only for a host that sets
+    # `linkage_columns: true` (`table_fields/2`).
+    @linkage_fields [
+      linkage_parent_execution_id: :string,
+      linkage_invoke_id: :string,
+      linkage_child_index: :integer,
+      linkage_content_hash: :string,
+      linkage_child_count: :integer,
+      linkage_policy: :string
+    ]
+
     defmacro __using__(opts) do
       quote bind_quoted: [opts: opts] do
         @statifier_persistence_config StatifierPersistence.Ecto.Config.new(opts)
@@ -161,7 +183,7 @@ if Code.ensure_loaded?(Ecto) do
 
     defp schema_ast(host, table, %Config{} = config) do
       fields =
-        for {field, type} <- Map.fetch!(@fields, table) do
+        for {field, type} <- table_fields(table, config) do
           args =
             if field in @blob_columns do
               Config.blob_field_args(config, field)
@@ -189,6 +211,11 @@ if Code.ensure_loaded?(Ecto) do
         end
       end
     end
+
+    defp table_fields(:executions, %Config{linkage_columns: true}),
+      do: Map.fetch!(@fields, :executions) ++ @linkage_fields
+
+    defp table_fields(table, %Config{}), do: Map.fetch!(@fields, table)
 
     defp primary_key(table, %Config{key: {key_mod, key_opts}}) do
       type = key_mod.ecto_type(key_opts)

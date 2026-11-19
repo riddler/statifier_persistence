@@ -70,6 +70,18 @@ defmodule StatifierPersistence.Ecto.Config do
       host column takes its collation in its own `:leading_columns`
       opts instead. The collation is passed to `Ecto.Migration.add/3`
       as its `:collation` option, so it must be one the database knows.
+    * `:linkage_columns` - whether a durable subchart child's linkage is
+      stored in the six `linkage_*` columns migration V09 adds to the
+      executions table, on a backend that cannot store `metadata`,
+      default `false`. When `true`, the generated execution schema names
+      the six columns, and `StatifierPersistence.Storage.Ecto` stores a
+      child's linkage in them on any backend but Postgres and declares
+      `supports_linkage?/1` there (ADR-0008's 2026-11-19 Amendment). On
+      Postgres the linkage stays in the `jsonb` `metadata` column either
+      way. A host that sets it runs V09 first; a host that leaves it at
+      `false` has a schema that names none of the columns, whether or not
+      V09 has run. A host whose own adapter delegates to the shipped one
+      and reads the linkage out of `metadata` itself leaves it at `false`.
 
   Unknown options and unknown table keys raise `ArgumentError` - at the
   host's compile time when reached through `use`.
@@ -86,7 +98,8 @@ defmodule StatifierPersistence.Ecto.Config do
     :blob_type,
     :leading_columns,
     :timestamps_position,
-    :column_collations
+    :column_collations,
+    :linkage_columns
   ]
   @table_keys [:charts, :positions, :executions, :inputs]
   @timestamps_positions [:trailing, :leading]
@@ -105,7 +118,8 @@ defmodule StatifierPersistence.Ecto.Config do
           blob_type: :binary | {module(), keyword()},
           leading_columns: [{atom(), {term(), keyword()}}],
           timestamps_position: :trailing | :leading,
-          column_collations: [{atom(), String.t()}]
+          column_collations: [{atom(), String.t()}],
+          linkage_columns: boolean()
         }
 
   @doc """
@@ -126,7 +140,8 @@ defmodule StatifierPersistence.Ecto.Config do
       leading_columns: validate_leading_columns!(Keyword.get(opts, :leading_columns, [])),
       timestamps_position:
         validate_timestamps_position!(Keyword.get(opts, :timestamps_position, :trailing)),
-      column_collations: validate_column_collations!(Keyword.get(opts, :column_collations, []))
+      column_collations: validate_column_collations!(Keyword.get(opts, :column_collations, [])),
+      linkage_columns: validate_linkage_columns!(Keyword.get(opts, :linkage_columns, false))
     }
   end
 
@@ -340,6 +355,13 @@ defmodule StatifierPersistence.Ecto.Config do
     raise ArgumentError,
           "unknown column #{inspect(name)} in :column_collations; " <>
             "known columns are #{inspect(@collatable_columns)}"
+  end
+
+  defp validate_linkage_columns!(value) when is_boolean(value), do: value
+
+  defp validate_linkage_columns!(other) do
+    raise ArgumentError,
+          "the :linkage_columns option must be a boolean, got: #{inspect(other)}"
   end
 
   defp ecto_type?(module), do: function_exported?(module, :type, 0)

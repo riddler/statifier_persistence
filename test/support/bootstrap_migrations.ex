@@ -47,6 +47,12 @@ defmodule StatifierPersistence.BootstrapMigrations do
   inside its sandbox transaction on `Scoped`'s table would hold an
   exclusive lock the async scoped conformance module waits on.
 
+  Migration 112 applies V09, the six executions `linkage_*` columns and
+  their two indexes, to the `Default` host's tables on their own, for the
+  reason migration 104 applies V02 alone. `Linked`, the host that sets
+  `linkage_columns: true`, shares those tables, and its generated schema
+  reads the six columns on every fetch.
+
   The `Kx*` hosts are not bootstrapped here: the live migration tests
   own their DDL end to end, up and down, and prove the helper itself.
   Test-only support code.
@@ -63,7 +69,8 @@ defmodule StatifierPersistence.BootstrapMigrations do
     {20_260_919_000_108, __MODULE__.ChartTombstoneColumns},
     {20_260_924_000_109, __MODULE__.ExecutionEndedAtColumns},
     {20_260_925_000_110, __MODULE__.ScopedTables},
-    {20_260_927_000_111, __MODULE__.SharedIdScopedTables}
+    {20_260_927_000_111, __MODULE__.SharedIdScopedTables},
+    {20_261_119_000_112, __MODULE__.LinkageColumns}
   ]
 
   defmodule DefaultTables do
@@ -303,6 +310,18 @@ defmodule StatifierPersistence.BootstrapMigrations do
       Migrations.down(for: EctoHosts.SharedIdScoped, from: 8, version: 5)
       Migrations.down(for: EctoHosts.SharedIdScoped, from: 3)
     end
+  end
+
+  defmodule LinkageColumns do
+    @moduledoc false
+    use Ecto.Migration
+
+    alias StatifierPersistence.Ecto.Migrations
+    alias StatifierPersistence.EctoHosts
+
+    # V09 alone, on the tables `Default` and `Linked` share.
+    def up, do: Migrations.up(for: EctoHosts.Default, from: 9, version: 9)
+    def down, do: Migrations.down(for: EctoHosts.Default, from: 9, version: 9)
   end
 
   @doc "Applies every bootstrap migration, tolerating `:already_up`."

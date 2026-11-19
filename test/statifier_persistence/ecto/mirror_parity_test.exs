@@ -215,7 +215,9 @@ defmodule StatifierPersistence.Ecto.MirrorParityTest do
 
       assert names("mp_def_", "executions") ==
                ~w(id execution_id status content_hash identity_blob position_blob failure
-                  session_id inserted_at updated_at metadata outcome_blob ended_at)
+                  session_id inserted_at updated_at metadata outcome_blob ended_at
+                  linkage_parent_execution_id linkage_invoke_id linkage_child_index
+                  linkage_content_hash linkage_child_count linkage_policy)
 
       assert names("mp_def_", "inputs") ==
                ~w(id execution_id seq door input_blob inserted_at updated_at)

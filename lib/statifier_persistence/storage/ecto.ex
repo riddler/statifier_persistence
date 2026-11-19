@@ -34,6 +34,22 @@ if Code.ensure_loaded?(Ecto) do
         test in its own transaction. Default `false`, and `isolate/1`
         is then a no-op.
 
+    A host that sets `linkage_columns: true` on its
+    `use StatifierPersistence.Ecto` (`StatifierPersistence.Ecto.Config`)
+    gives a durable subchart child's linkage a second home on a backend
+    other than Postgres: the six columns migration V09 adds (ADR-0008's
+    2026-11-19 Amendment). At this adapter's seam the linkage still
+    travels inside `metadata`, under
+    `StatifierPersistence.Execution.Linkage.reserved_key/0`: an insert
+    splits the reserved key into the columns, and a fetch or a listing
+    hands it back rebuilt from them. Which home a row uses:
+
+    | Backend and option | `supports_metadata?/1` | `supports_linkage?/1` | Where a child's linkage is stored |
+    |---|---|---|---|
+    | Postgres, either value | `true` | `false` | Under the reserved key in the `jsonb` `metadata` column |
+    | Any other backend, `linkage_columns: false` (the default) | `false` | `false` | In the `metadata` column, as the record this adapter is handed carries it |
+    | Any other backend, `linkage_columns: true` | `false` | `true` | In the V09 columns; no reserved key is written into `metadata` |
+
     Engine identities (`content_hash`, `session_id`, `execution_id`) are
     stored verbatim in `text` columns and blobs in `bytea` columns, so
     both round-trip byte-identically (ADR-0002 decision 1, ADR-0003
@@ -94,6 +110,20 @@ if Code.ensure_loaded?(Ecto) do
     # integer.
     @chart_lock_namespace 0x53504348
 
+    # The V09 columns, one per key under the reserved linkage key
+    # (`StatifierPersistence.Execution.Linkage`), with the kind of value
+    # each holds. A host that sets `linkage_columns: true` keeps a
+    # child's linkage here off Postgres (ADR-0008's 2026-11-19
+    # Amendment).
+    @linkage_columns [
+      {"parent_execution_id", :linkage_parent_execution_id, :string},
+      {"invoke_id", :linkage_invoke_id, :string},
+      {"child_index", :linkage_child_index, :integer},
+      {"content_hash", :linkage_content_hash, :string},
+      {"child_count", :linkage_child_count, :integer},
+      {"policy", :linkage_policy, :string}
+    ]
+
     @doc """
     Resolves the `:persistence` host module into the handle every other
     callback takes: the host's repo, its three generated schema modules,
@@ -123,7 +153,8 @@ if Code.ensure_loaded?(Ecto) do
            executions_table: Config.table(config, :executions),
            inputs_table: Config.table(config, :inputs),
            input_log_cap: cap,
-           scope_columns: Keyword.keys(config.leading_columns)
+           scope_columns: Keyword.keys(config.leading_columns),
+           linkage_columns: config.linkage_columns
          )}
       else
         {:error, {:adapter, {:not_a_persistence_host, host}}}
@@ -374,6 +405,16 @@ if Code.ensure_loaded?(Ecto) do
     that is not what the caller handed over. Refusing at open is the
     principle the decision already sets for an adapter that cannot store a
     map; a value it cannot store is the same answer at a finer grain.
+
+    For a host that sets `linkage_columns: true`, on a backend other than
+    Postgres, the reserved linkage key is taken out of `metadata` and
+    written into the V09 columns, one value per column, and what is left
+    of `metadata` is stored as before. A reserved value the columns cannot
+    hold - one with no `parent_execution_id` string, a key
+    `StatifierPersistence.Execution.Linkage` does not define, or a value
+    of a type its column does not hold - is refused at open with
+    `{:error, :metadata_unsupported}`, because storing it would hand back
+    something other than what was given.
     """
     @impl Adapter
     @spec insert_execution(Adapter.opts(), Adapter.execution_record()) ::
@@ -381,23 +422,35 @@ if Code.ensure_loaded?(Ecto) do
     def insert_execution(opts, execution_record) do
       metadata = Map.get(execution_record, :metadata, %{})
 
-      if json_representable?(metadata) do
-        do_insert_execution(opts, execution_record, metadata)
-      else
-        {:error, :metadata_unsupported}
+      cond do
+        not json_representable?(metadata) ->
+          {:error, :metadata_unsupported}
+
+        linkage_columns?(opts) ->
+          with {:ok, rest, columns} <- split_linkage(metadata),
+               do: do_insert_execution(opts, execution_record, rest, columns)
+
+        true ->
+          do_insert_execution(opts, execution_record, metadata, %{})
       end
     end
 
-    @spec do_insert_execution(Adapter.opts(), Adapter.execution_record(), Adapter.metadata()) ::
-            :ok | {:error, Adapter.error()}
-    defp do_insert_execution(opts, execution_record, metadata) do
+    @spec do_insert_execution(
+            Adapter.opts(),
+            Adapter.execution_record(),
+            Adapter.metadata(),
+            %{optional(atom()) => term()}
+          ) :: :ok | {:error, Adapter.error()}
+    defp do_insert_execution(opts, execution_record, metadata, columns) do
       row =
         struct(
           execution_schema(opts),
-          Map.merge(execution_record, %{
+          execution_record
+          |> Map.merge(%{
             status: encode_status(execution_record.status),
             metadata: encode_metadata(metadata)
           })
+          |> Map.merge(columns)
         )
 
       changeset =
@@ -417,6 +470,12 @@ if Code.ensure_loaded?(Ecto) do
 
     @doc """
     Fetches the execution stored under `execution_id`, or `:execution_not_found`.
+
+    For a host that sets `linkage_columns: true`, on a backend other than
+    Postgres, a row whose `linkage_parent_execution_id` is set comes back
+    with the reserved linkage key rebuilt from the V09 columns into its
+    `metadata`, exactly as a Postgres store's record carries it; any other
+    row comes back with `metadata` as stored.
     """
     @impl Adapter
     @spec fetch_execution(Adapter.opts(), Adapter.execution_id()) ::
@@ -427,7 +486,7 @@ if Code.ensure_loaded?(Ecto) do
           {:error, :execution_not_found}
 
         row ->
-          {:ok, to_execution_record(row)}
+          {:ok, to_execution_record(opts, row)}
       end
     end
 
@@ -528,6 +587,12 @@ if Code.ensure_loaded?(Ecto) do
     rather than issuing SQL the backend cannot parse - the same answer
     `supports_metadata?/1` already gives the facade, given directly to a
     caller who reached the callback itself.
+
+    For a host that sets `linkage_columns: true`, on a backend other than
+    Postgres, a match that names the reserved linkage key and nothing else
+    is answered by equality predicates on the V09 columns, and
+    `child_index` is read from `linkage_child_index`. A match naming any
+    other key still refuses with `{:error, :metadata_unsupported}`.
     """
     @impl Adapter
     @spec list_execution_states_by_metadata(Adapter.opts(), Adapter.metadata()) ::
@@ -535,24 +600,42 @@ if Code.ensure_loaded?(Ecto) do
     def list_execution_states_by_metadata(opts, metadata) do
       validate_match!(metadata)
 
-      if supports_metadata?(opts) and json_representable?(metadata) do
-        reserved = Linkage.reserved_key()
+      cond do
+        supports_metadata?(opts) and json_representable?(metadata) ->
+          reserved = Linkage.reserved_key()
 
-        rows =
-          repo(opts).all(
-            from(r in execution_schema(opts),
-              where: fragment("? @> ?", r.metadata, type(^metadata, :map)),
-              select: %{
-                execution_id: r.execution_id,
-                status: r.status,
-                child_index: fragment("? -> ? ->> 'child_index'", r.metadata, ^reserved)
-              }
+          rows =
+            repo(opts).all(
+              from(r in execution_schema(opts),
+                where: fragment("? @> ?", r.metadata, type(^metadata, :map)),
+                select: %{
+                  execution_id: r.execution_id,
+                  status: r.status,
+                  child_index: fragment("? -> ? ->> 'child_index'", r.metadata, ^reserved)
+                }
+              )
             )
-          )
 
-        {:ok, Enum.map(rows, &to_execution_state/1)}
-      else
-        {:error, :metadata_unsupported}
+          {:ok, Enum.map(rows, &to_execution_state/1)}
+
+        linkage_columns?(opts) ->
+          with {:ok, query} <- linkage_match(opts, metadata) do
+            rows =
+              repo(opts).all(
+                from(r in query,
+                  select: %{
+                    execution_id: r.execution_id,
+                    status: r.status,
+                    child_index: r.linkage_child_index
+                  }
+                )
+              )
+
+            {:ok, Enum.map(rows, &%{&1 | status: decode_status(&1.status)})}
+          end
+
+        true ->
+          {:error, :metadata_unsupported}
       end
     end
 
@@ -634,6 +717,15 @@ if Code.ensure_loaded?(Ecto) do
     rather than issuing SQL the backend cannot parse - the same answer
     `supports_metadata?/1` already gives the facade, given directly to a
     caller who reached the callback itself.
+
+    For a host that sets `linkage_columns: true`, on a backend other than
+    Postgres, a match that names the reserved linkage key and nothing else
+    is answered by equality predicates on the V09 columns, with the same
+    containment reading: every pair the match names must equal the stored
+    value, and a pair no stored linkage can hold matches nothing. Each
+    record comes back in `fetch_execution/2`'s shape, its linkage rebuilt.
+    A match naming any other key still refuses with
+    `{:error, :metadata_unsupported}`.
     """
     @impl Adapter
     @spec list_executions_by_metadata(Adapter.opts(), Adapter.metadata()) ::
@@ -641,19 +733,43 @@ if Code.ensure_loaded?(Ecto) do
     def list_executions_by_metadata(opts, metadata) do
       validate_match!(metadata)
 
-      if supports_metadata?(opts) and json_representable?(metadata) do
-        rows =
-          repo(opts).all(
-            from(r in execution_schema(opts),
-              where: fragment("? @> ?", r.metadata, type(^metadata, :map))
+      cond do
+        supports_metadata?(opts) and json_representable?(metadata) ->
+          rows =
+            repo(opts).all(
+              from(r in execution_schema(opts),
+                where: fragment("? @> ?", r.metadata, type(^metadata, :map))
+              )
             )
-          )
 
-        {:ok, Enum.map(rows, &to_execution_record/1)}
-      else
-        {:error, :metadata_unsupported}
+          {:ok, Enum.map(rows, &to_execution_record(opts, &1))}
+
+        linkage_columns?(opts) ->
+          with {:ok, query} <- linkage_match(opts, metadata) do
+            {:ok, Enum.map(repo(opts).all(query), &to_execution_record(opts, &1))}
+          end
+
+        true ->
+          {:error, :metadata_unsupported}
       end
     end
+
+    @doc """
+    Declares linkage support without metadata support (the optional
+    `c:StatifierPersistence.Storage.Adapter.supports_linkage?/1`,
+    ADR-0008's 2026-11-19 Amendment).
+
+    `true` only for a host that sets `linkage_columns: true` on its
+    `use StatifierPersistence.Ecto`, on a backend other than Postgres:
+    there this adapter stores a child's linkage in the V09 columns and
+    answers both listings for a match on the reserved key alone. On
+    Postgres it answers `false` with the option on or off, because
+    `supports_metadata?/1` already covers the linkage there and the
+    linkage stays in the `jsonb` column.
+    """
+    @impl Adapter
+    @spec supports_linkage?(Adapter.opts()) :: boolean()
+    def supports_linkage?(opts), do: linkage_columns?(opts)
 
     @doc """
     Declares the drained query (the optional
@@ -697,7 +813,11 @@ if Code.ensure_loaded?(Ecto) do
     `supports_metadata?/1` is false there, so
     `StatifierPersistence.Storage.insert_execution/5` refuses a
     `metadata:` option at open and no linkage reaches the table through
-    a supported door.
+    a supported door. That holds with `linkage_columns:` at `false`, its
+    default. For a host that sets `linkage_columns: true` off Postgres the
+    linkage is in the V09 columns, and `children` counts the child rows
+    whose `linkage_content_hash` names this hash, joined to the parent by
+    `linkage_parent_execution_id`.
     """
     @impl Adapter
     @spec count_executions_by_content_hash(Adapter.opts(), Adapter.content_hash()) ::
@@ -729,7 +849,7 @@ if Code.ensure_loaded?(Ecto) do
     # the decision names and the two are written by separate calls.
     @spec children_pin_count(Adapter.opts(), Adapter.content_hash()) :: non_neg_integer()
     defp children_pin_count(opts, content_hash) do
-      if supports_metadata?(opts) do
+      if supports_metadata?(opts) or linkage_columns?(opts) do
         repo(opts).one(
           from([child] in exclude(child_pins(opts, content_hash), :select),
             select: count(child.execution_id)
@@ -1061,13 +1181,13 @@ if Code.ensure_loaded?(Ecto) do
       without_child_pins(unpinned, opts, content_hash)
     end
 
-    # An adapter holding no metadata holds no linkage pin, so there is
-    # no clause to add - the same reading `children_pin_count/2` takes
-    # of the same fact.
+    # An adapter holding neither metadata nor the linkage columns holds no
+    # linkage pin, so there is no clause to add - the same reading
+    # `children_pin_count/2` takes of the same fact.
     @spec without_child_pins(Ecto.Query.t(), Adapter.opts(), Adapter.content_hash()) ::
             Ecto.Query.t()
     defp without_child_pins(query, opts, content_hash) do
-      if supports_metadata?(opts) do
+      if supports_metadata?(opts) or linkage_columns?(opts) do
         pins = child_pins(opts, content_hash)
 
         from(_c in query, where: not exists(subquery(pins)))
@@ -1081,8 +1201,33 @@ if Code.ensure_loaded?(Ecto) do
     # `without_child_pins/3` asks that it is empty, so the pin a refusal
     # reports and the pin the tombstone's statement guards are one pin
     # by construction.
+    #
+    # The V09 columns are the same pin, read off its own columns for a
+    # host that keeps the linkage there: the child's
+    # `linkage_content_hash` names the hash and its
+    # `linkage_parent_execution_id` names the parent.
     @spec child_pins(Adapter.opts(), Adapter.content_hash()) :: Ecto.Query.t()
     defp child_pins(opts, content_hash) do
+      if linkage_columns?(opts),
+        do: column_child_pins(opts, content_hash),
+        else: metadata_child_pins(opts, content_hash)
+    end
+
+    @spec column_child_pins(Adapter.opts(), Adapter.content_hash()) :: Ecto.Query.t()
+    defp column_child_pins(opts, content_hash) do
+      executions = execution_schema(opts)
+
+      from(child in executions,
+        join: parent in ^executions,
+        on: parent.execution_id == child.linkage_parent_execution_id,
+        where: child.linkage_content_hash == ^content_hash,
+        where: parent.status in ^pinning_statuses(),
+        select: 1
+      )
+    end
+
+    @spec metadata_child_pins(Adapter.opts(), Adapter.content_hash()) :: Ecto.Query.t()
+    defp metadata_child_pins(opts, content_hash) do
       reserved = Linkage.reserved_key()
       pin_match = %{reserved => %{"content_hash" => content_hash}}
       executions = execution_schema(opts)
@@ -1492,6 +1637,37 @@ if Code.ensure_loaded?(Ecto) do
     defp linkage_update(_opts, _execution_id, nil), do: []
 
     defp linkage_update(opts, execution_id, linkage_hash) do
+      if linkage_columns?(opts),
+        do: column_linkage_update(opts, execution_id, linkage_hash),
+        else: metadata_linkage_update(opts, execution_id, linkage_hash)
+    end
+
+    # A host keeping the linkage in the V09 columns rewrites the one
+    # column the pin is. A row whose columns hold no linkage is read as
+    # 0.25.1 reads it: a linkage its host stored in `metadata` before
+    # opting in stays there, and its pin is rewritten there.
+    @spec column_linkage_update(Adapter.opts(), Adapter.execution_id(), Adapter.content_hash()) ::
+            keyword()
+    defp column_linkage_update(opts, execution_id, linkage_hash) do
+      parent =
+        repo(opts).one(
+          from(r in execution_schema(opts),
+            where: r.execution_id == ^execution_id,
+            select: r.linkage_parent_execution_id
+          )
+        )
+
+      if is_nil(parent),
+        do: metadata_linkage_update(opts, execution_id, linkage_hash),
+        else: [linkage_content_hash: linkage_hash]
+    end
+
+    @spec metadata_linkage_update(
+            Adapter.opts(),
+            Adapter.execution_id(),
+            Adapter.content_hash()
+          ) :: keyword()
+    defp metadata_linkage_update(opts, execution_id, linkage_hash) do
       stored =
         repo(opts).one(
           from(r in execution_schema(opts),
@@ -1600,6 +1776,132 @@ if Code.ensure_loaded?(Ecto) do
         ended_at: row.ended_at
       }
     end
+
+    # A row read back for a host that keeps the linkage in the V09 columns
+    # carries it under the reserved key again, so every reader above the
+    # seam sees what a Postgres store's record carries. A row whose
+    # columns hold no linkage is handed back with `metadata` as stored.
+    @spec to_execution_record(Adapter.opts(), struct()) :: Adapter.execution_record()
+    defp to_execution_record(opts, row) do
+      record = to_execution_record(row)
+
+      if linkage_columns?(opts),
+        do: %{record | metadata: with_linkage(record.metadata, row)},
+        else: record
+    end
+
+    @spec with_linkage(Adapter.metadata(), struct()) :: Adapter.metadata()
+    defp with_linkage(metadata, %{linkage_parent_execution_id: nil}), do: metadata
+
+    defp with_linkage(metadata, row) do
+      reserved =
+        for {key, column, _kind} <- @linkage_columns,
+            value = Map.fetch!(row, column),
+            not is_nil(value),
+            into: %{},
+            do: {key, value}
+
+      Map.put(metadata, Linkage.reserved_key(), reserved)
+    end
+
+    # The second home is this adapter's only off Postgres: there
+    # `supports_metadata?/1` already covers the linkage, in `jsonb`, and
+    # no Postgres statement changes with the option.
+    @spec linkage_columns?(Adapter.opts()) :: boolean()
+    defp linkage_columns?(opts),
+      do: Keyword.get(opts, :linkage_columns, false) == true and not supports_metadata?(opts)
+
+    # Takes the reserved key out of `metadata` and into the columns, or
+    # refuses a reserved value the columns cannot hold without changing
+    # what a fetch would hand back.
+    @spec split_linkage(Adapter.metadata()) ::
+            {:ok, Adapter.metadata(), %{optional(atom()) => term()}}
+            | {:error, :metadata_unsupported}
+    defp split_linkage(metadata) do
+      case Map.fetch(metadata, Linkage.reserved_key()) do
+        :error ->
+          {:ok, metadata, %{}}
+
+        {:ok, reserved} ->
+          case linkage_column_values(reserved) do
+            {:ok, columns} -> {:ok, Map.delete(metadata, Linkage.reserved_key()), columns}
+            :error -> {:error, :metadata_unsupported}
+          end
+      end
+    end
+
+    @spec linkage_column_values(term()) :: {:ok, %{optional(atom()) => term()}} | :error
+    defp linkage_column_values(%{"parent_execution_id" => parent} = reserved)
+         when is_binary(parent) do
+      Enum.reduce_while(reserved, {:ok, %{}}, fn pair, {:ok, columns} ->
+        case linkage_column(pair) do
+          {:ok, column, value} -> {:cont, {:ok, Map.put(columns, column, value)}}
+          :error -> {:halt, :error}
+        end
+      end)
+    end
+
+    defp linkage_column_values(_reserved), do: :error
+
+    # The column one key under the reserved map lives in, when the key is
+    # one `Linkage` defines and its value is the kind that column holds.
+    @spec linkage_column({term(), term()}) :: {:ok, atom(), term()} | :error
+    defp linkage_column({key, value}) do
+      case List.keyfind(@linkage_columns, key, 0) do
+        {^key, column, kind} ->
+          if column_value?(kind, value), do: {:ok, column, value}, else: :error
+
+        nil ->
+          :error
+      end
+    end
+
+    @spec column_value?(:string | :integer, term()) :: boolean()
+    defp column_value?(:string, value), do: is_binary(value)
+    defp column_value?(:integer, value), do: is_integer(value)
+
+    # A linkage match over the V09 columns, read as the `jsonb`
+    # containment it stands in for: a match naming the reserved key and
+    # nothing else, each pair under it an equality on its column, and a
+    # pair no stored linkage can hold - an unknown key, a value of another
+    # type, a reserved value that is not a map - matching no row. Any
+    # other key is a host key, which this home does not store.
+    @spec linkage_match(Adapter.opts(), Adapter.metadata()) ::
+            {:ok, Ecto.Query.t()} | {:error, :metadata_unsupported}
+    defp linkage_match(opts, match) do
+      reserved = Linkage.reserved_key()
+
+      case match do
+        %{^reserved => inner} when map_size(match) == 1 ->
+          if json_representable?(match),
+            do: {:ok, linkage_query(opts, inner)},
+            else: {:error, :metadata_unsupported}
+
+        _host_keys ->
+          {:error, :metadata_unsupported}
+      end
+    end
+
+    @spec linkage_query(Adapter.opts(), term()) :: Ecto.Query.t()
+    defp linkage_query(opts, inner) do
+      linked =
+        from(r in execution_schema(opts), where: not is_nil(r.linkage_parent_execution_id))
+
+      if is_map(inner),
+        do: Enum.reduce(inner, linked, &linkage_condition/2),
+        else: matches_nothing(linked)
+    end
+
+    @spec linkage_condition({String.t(), term()}, Ecto.Query.t()) :: Ecto.Query.t()
+    defp linkage_condition(pair, query) do
+      case linkage_column(pair) do
+        {:ok, column, value} -> where(query, [r], field(r, ^column) == ^value)
+        :error -> matches_nothing(query)
+      end
+    end
+
+    @spec matches_nothing(Ecto.Query.t()) :: Ecto.Query.t()
+    defp matches_nothing(query), do: where(query, [_r], fragment("1 = 0"))
 
     # The empty map is stored as NULL: the column is nullable precisely so
     # "no metadata" needs no invented value (V02's moduledoc).

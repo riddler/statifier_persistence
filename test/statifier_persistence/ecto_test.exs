@@ -265,6 +265,17 @@ defmodule StatifierPersistence.EctoTest do
   end
 
   describe "Config.new/1 validation not reachable through a compiling use" do
+    # sabotage: validate_linkage_columns!/1 accepts any term -> red (nothing
+    # raised). Verified red, reverted from a copy.
+    test "linkage_columns defaults to false and refuses anything but a boolean" do
+      assert %Config{linkage_columns: false} = Config.new(repo: TestRepo)
+      assert %Config{linkage_columns: true} = Config.new(repo: TestRepo, linkage_columns: true)
+
+      assert_raise ArgumentError, ~r/:linkage_columns option must be a boolean/, fn ->
+        Config.new(repo: TestRepo, linkage_columns: "true")
+      end
+    end
+
     # sabotage: validate_table_prefix! accepts any term -> red (nothing raised)
     test "rejects a non-string table_prefix" do
       assert_raise ArgumentError, ~r/:table_prefix option must be a string/, fn ->

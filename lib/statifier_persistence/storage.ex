@@ -636,6 +636,25 @@ defmodule StatifierPersistence.Storage do
   end
 
   @doc """
+  Whether `store`'s adapter can store a durable subchart child's linkage
+  without storing a host's `metadata` (ADR-0008's 2026-11-19 Amendment).
+
+  True when the adapter exports the optional
+  `c:StatifierPersistence.Storage.Adapter.supports_linkage?/1` and it
+  answers `true` for this handle - the same shape `metadata_supported?/1`
+  checks. The shipped Ecto adapter answers `true` only for a host that
+  sets `linkage_columns: true`, on a backend other than Postgres.
+  """
+  @spec linkage_supported?(store :: t()) :: boolean()
+  def linkage_supported?(%__MODULE__{} = store) do
+    Code.ensure_loaded?(store.adapter) and
+      function_exported?(store.adapter, :supports_linkage?, 1) and
+      adapter_call(store.adapter, :supports_linkage?, [], fn ->
+        store.adapter.supports_linkage?(store.opts)
+      end) == true
+  end
+
+  @doc """
   Whether `store`'s adapter can list executions by a metadata match (ADR-0008
   decision 5).
 
