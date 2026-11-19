@@ -6,9 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Entries for unreleased work are not written here directly. Each issue drops a
-fragment in [`changelog.d/`](https://github.com/riddler/statifier_persistence/blob/v0.25.1/changelog.d/README.md); the fragments are assembled
+fragment in [`changelog.d/`](https://github.com/riddler/statifier_persistence/blob/v0.26.0/changelog.d/README.md); the fragments are assembled
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
+
+## [0.26.0] 2026-11-19
+
+Feature release: a durable subchart child now runs on a backend other than Postgres when the host opts in with `linkage_columns: true`, and `StatifierPersistence.Executions.active_children/2` reads an execution's active children. A host that changes nothing sees every answer 0.25.1 gives, apart from a `:supports_linkage?` call in the adapter telemetry on a backend other than Postgres.
+
+Upgrading: nothing to change unless you opt in. Migration V09 adds six nullable `linkage_*` columns and two indexes, and only a host that sets `linkage_columns: true` needs it; see "0.25 to 0.26" in the upgrading page.
+
+### Added
+
+- `use StatifierPersistence.Ecto` takes `linkage_columns: true` (default `false`), which gives the generated execution schema six `linkage_*` columns and, on a backend other than Postgres, makes the Ecto adapter store a durable subchart child's linkage in them rather than in `metadata`; on Postgres the linkage stays in the `jsonb` column with the option on or off, and a host that leaves the option off reads and writes what it did before.
+- Migration V09 adds the six nullable `linkage_*` columns to the executions table with an index on the parent and invocation columns and one on the pin's content hash; only a host that sets `linkage_columns: true` needs it, and `Migrations.expected_version/0` now answers `9`.
+- The optional adapter callback `supports_linkage?/1` and the facade predicate `StatifierPersistence.Storage.linkage_supported?/1` say whether a store keeps a child's linkage without keeping a host's `metadata`; the Ecto adapter answers `true` only for a host that sets `linkage_columns: true` on a backend other than Postgres.
+- For such a host, the Ecto adapter's `list_executions_by_metadata/2` and `list_execution_states_by_metadata/2` answer a match on the reserved linkage key alone where they refused `:metadata_unsupported`, and `count_executions_by_content_hash/2` counts a child's pin in `children` where it answered `0`.
+- `StatifierPersistence.Executions.active_children/2` answers an execution's direct durable subchart children whose status is `:active` or `:needs_migration`, ordered by invocation id and then by the child's index, on any store whose `Storage.child_listing_supported?/1` is true (Postgres, for example, or a host that sets `linkage_columns: true` elsewhere); any other store answers `{:error, :child_listing_unsupported}`, and an id with no children answers `{:ok, []}`.
+
+### Changed
+
+- For a store that declares linkage without `metadata` (the Ecto adapter with `linkage_columns: true` on a backend other than Postgres), `Storage.insert_execution/5` and `Storage.check_metadata/2` accept a `metadata` map holding the reserved linkage key alone where they answered `{:error, :metadata_unsupported}`; a host key is still refused.
+- For such a store, `Storage.child_listing_supported?/1` and `Storage.execution_states_supported?/1` answer `true`, and `Storage.list_executions_by_metadata/2` and `Storage.list_execution_states_by_metadata/2` answer a match on the reserved key alone where they refused; any other match is refused `:child_listing_unsupported` or `:execution_states_unsupported` as before.
+- For such a store, a durable subchart child's start and `Driver.start_child_at/6` create the child where they refused `:child_listing_unsupported` or `:execution_states_unsupported`, and the child's answer, a fail through `Executions.fail/4` with `driver:` included, reaches its parent.
+- For such a store, leaving a state that holds a live `<invoke>` lists that invocation's children and cancels them through `Executions.cascade_cancel/3`, emitting one `[:statifier_persistence, :child, :cascade_cancelled]` event with a count of `0` when there were none; `Executions.cascade_cancel/3` and `Executions.migrate_tree/4` read the children where they answered `{:error, :child_listing_unsupported}`, and `migrate_tree/4` then takes each named node's exclusion through the `serialization:` strategy the host passes.
+- On a store whose adapter exports `supports_linkage?/1` and does not declare `metadata` (the Ecto adapter on a backend other than Postgres, with `linkage_columns:` on or off), `Storage.child_listing_supported?/1`, `Storage.execution_states_supported?/1`, the two facade listings for a match on the reserved key alone, and the metadata check for a map holding that key alone now ask it, so `[:statifier_persistence, :adapter, :call]` reports a `:supports_linkage?` call there; with the option off every answer is unchanged.
 
 ## [0.25.1] 2026-10-20
 
