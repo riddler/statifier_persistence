@@ -1278,7 +1278,7 @@ What was re-read before the flip:
   `test/statifier_persistence/driver_single_child_answer_test.exs` carries
   the recorded answer and its delivery again.
 
-## Amendment (2026-11-19, sp-lp5): a durable child's linkage gets a home outside `metadata` on a backend that cannot store `metadata`, and a host can read an execution's active children
+## Amendment (2026-11-19, sp-lp5): a durable child's linkage can have a home outside `metadata` on a backend that cannot store `metadata`, for a host that opts in, and a host can read an execution's active children
 
 Status of this amendment: proposed (2026-11-19, sp-lp5). The record above
 stays accepted; this amendment is proposed until the code that implements
@@ -1355,9 +1355,11 @@ declares linkage, a durable child is created, listed, settled, cancelled
 and answered through the same doors and the same code it takes on
 Postgres. No refusal reason is added and none is removed.
 
-**3. The shipped Ecto adapter keeps two homes, one per backend kind.**
-Migration version V09 adds six nullable columns to the `executions`
-table, on every backend: `linkage_parent_execution_id`,
+**3. The shipped Ecto adapter gets a second home, and a host opts into
+it.** The host module's `use StatifierPersistence.Ecto` options
+(`StatifierPersistence.Ecto.Config`) gain one boolean, `linkage_columns:`,
+which defaults to `false`. Migration version V09 adds six nullable columns
+to the `executions` table: `linkage_parent_execution_id`,
 `linkage_invoke_id`, `linkage_child_index`, `linkage_content_hash`,
 `linkage_child_count` and `linkage_policy`, one per value under the
 reserved key (the stored shape in `Linkage`'s moduledoc). It also adds two
@@ -1366,28 +1368,37 @@ serves the parent and invocation matches, and one on
 `linkage_content_hash`, which serves the pin count. The `@migrations` map
 holds versions 1 to 8 today (`lib/statifier_persistence/ecto/migrations.ex`),
 so this is the next one. V09 reads and writes no row, and its `down/1`
-drops the indexes and the columns. Which home a row uses depends on the
-backend:
+drops the indexes and the columns. The execution schema the host module
+generates names the six columns only when `linkage_columns: true`. A host
+that leaves the option alone has a schema that names none of them, so
+its adapter reads and writes exactly what 0.25.1 reads and writes, whether
+or not V09 has run. Which home a row uses:
 
-| Backend | `supports_metadata?/1` | `supports_linkage?/1` | Where a child's linkage is stored | How a linkage match is answered |
+| Backend and option | `supports_metadata?/1` | `supports_linkage?/1` | Where a child's linkage is stored | How a linkage match is answered |
 |---|---|---|---|---|
-| Postgres | `true` (unchanged) | `true` | Under the reserved key in the `jsonb` `metadata` column, byte for byte as 0.25.1 writes it. The V09 columns stay `NULL` | The `jsonb` containment SQL 0.25.1 issues, unchanged |
-| Any other Ecto backend | `false` (unchanged) | `true` | In the V09 columns. The `metadata` column holds no reserved key | Equality predicates on the V09 columns |
+| Postgres, either value | `true` (unchanged) | `false` | Under the reserved key in the `jsonb` `metadata` column, byte for byte as 0.25.1 writes it | The `jsonb` containment SQL 0.25.1 issues, unchanged |
+| Any other Ecto backend, `linkage_columns: false` (the default) | `false` (unchanged) | `false` | Where 0.25.1 stores it: in the `metadata` column, as the record the adapter is handed carries it | As 0.25.1 answers it: the facade refuses the listings for this adapter, and the adapter's own two listings answer `{:error, :metadata_unsupported}` |
+| Any other Ecto backend, `linkage_columns: true` | `false` (unchanged) | `true` | In the V09 columns. The adapter writes no reserved key into the `metadata` column | Equality predicates on the V09 columns |
 
-Off Postgres, the adapter splits the reserved key into the columns on
-insert. On read it rebuilds the key from the columns, so the record it
-hands back carries the reserved key exactly as a Postgres store's record
-carries it.
-Every write that carries the stored `metadata` forward carries the
-columns forward. The one rewrite the sp-3l2a Amendment sanctions, the
-pin's `content_hash` on a re-pin by `Executions.migrate_tree/4`, rewrites
-`linkage_content_hash` there (`linkage_update/3` in
-`lib/statifier_persistence/storage/ecto.ex` is its Postgres form). The
-retirement's pin count reads the same columns (`child_pins/2`, same file,
-is its Postgres form). Its "Off Postgres it is `0`" sentence in
-`count_executions_by_content_hash/2`'s doc stays true of every store that
-holds no linked row, which is every such store before this change, and
-from then on is a count of the columns.
+So a host that changes nothing sees 0.25.1's storage and 0.25.1's answers
+on every backend. On Postgres the option changes nothing about where the
+linkage lives. Only its schema names the columns, so a Postgres host that
+sets it runs V09.
+
+With the option on, off Postgres, the adapter splits the reserved key into
+the columns on insert. On read it rebuilds the key from the columns when
+`linkage_parent_execution_id` is set, and otherwise hands back the
+`metadata` column as stored. The record it hands back therefore carries
+the reserved key exactly as a Postgres store's record carries it. Every
+write that carries the stored `metadata` forward carries the columns
+forward. The one rewrite the sp-3l2a Amendment sanctions, the pin's
+`content_hash` on a re-pin by `Executions.migrate_tree/4`, rewrites
+`linkage_content_hash` for such a row (`linkage_update/3` in
+`lib/statifier_persistence/storage/ecto.ex` is today's form, which rewrites
+the `metadata` key). The adapter's pin count reads the same columns
+(`child_pins/2`, same file, is today's `jsonb` form). Its "Off Postgres it
+is `0`" sentence in `count_executions_by_content_hash/2`'s doc stays true
+with the option off. With it on, the count is a count of the columns.
 
 The columns are plain scalars rather than JSON text because equality on a
 scalar is SQL that every Ecto backend parses. The containment the
@@ -1402,25 +1413,48 @@ answer unchanged by construction: no Postgres SQL in the adapter changes.
 Moving Postgres onto the columns is not decided here, and no bead asks for
 it.
 
-**4. A Postgres host's existing rows are read in place.** Nothing is
+The second home is opt-in rather than a backend default because a host's
+own adapter can call the shipped one. The reference embedder's SQLite
+adapter, `StatifierExamples.Persistence`, delegates `insert_execution/2`,
+`fetch_execution/2`, `update_execution/2` and `write_tree_migration/2` to
+`StatifierPersistence.Storage.Ecto`, answers `supports_metadata?/1` with
+`true` itself, and answers `list_executions_by_metadata/2`,
+`list_execution_states_by_metadata/2` and
+`count_executions_by_content_hash/2` by reading the `metadata` column
+through its own schema (`lib/statifier_examples/persistence.ex` in
+statifier_examples, read at `fc55a26`). If the shipped adapter moved the
+linkage into the columns by backend, that embedder's delegated inserts
+would leave the `metadata` column without the key its own listings and
+pin count read. Its settlements, cascades and retirement pins would then
+miss every new child, and its re-pins would leave the key it reads stale.
+
+**4. Existing rows are read in place, on every backend.** Nothing is
 migrated or backfilled, and no stored value is rewritten. A child that is
 in flight when its host upgrades keeps its linkage where it is, and it
-settles and answers as before. Unlike V06 (its moduledoc's "What V06 does
-not rename: stored child linkage", in
-`lib/statifier_persistence/ecto/migrations/v06.ex`), this version needs no
-drain before the upgrade. Every Ecto host still runs V09 when it takes
-0.26.0, Postgres hosts included, because the adapter's one schema names
-the six columns on every backend. A host on hand-written DDL adds them
-itself and checks `expected_version/0`, which answers `9`.
+settles and answers as before. On Postgres that is the `jsonb` key. Off
+Postgres, a row can hold a linkage only if the host's own adapter declared
+`metadata` and stored it there, and the key stays in that `metadata`
+column. Unlike V06 (its moduledoc's "What V06 does not rename: stored
+child linkage", in `lib/statifier_persistence/ecto/migrations/v06.ex`),
+this version needs no drain before the upgrade. V09 is needed only by a
+host that sets `linkage_columns: true`. A host that does not may run it or
+leave it, because its schema names none of the columns. A host on
+hand-written DDL that opts in adds the columns itself, and
+`expected_version/0` answers `9`.
 
-**5. A host-written adapter needs no change.** An adapter that answers
+**5. A host-written adapter needs no change, and neither does one that
+delegates to the shipped adapter.** An adapter that answers
 `supports_metadata?/1` with `true` and filters stored `metadata` by
-`Linkage.reserved_key/0` (as the reference embedder's SQLite adapter
-does) keeps working on 0.26.0 unchanged, because the seam it implements
-has not moved (point 1). An adapter that cannot store host keys but can
-store and match the reserved key may now export `supports_linkage?/1` and
-host durable children without declaring `metadata`. The upgrading page
-says both.
+`Linkage.reserved_key/0` keeps working on 0.26.0 unchanged, because the
+seam it implements has not moved (point 1). When it delegates storage to
+`StatifierPersistence.Storage.Ecto` as the reference embedder does, it
+also keeps working, because with `linkage_columns:` left at `false` the
+delegated callbacks store and read the reserved key in the `metadata`
+column exactly as on 0.25.1. Such a host leaves the option off. Setting
+it would move new children's linkage out of the column its own callbacks
+read. An adapter that cannot store host keys but can store and match the
+reserved key may now export `supports_linkage?/1` and host durable
+children without declaring `metadata`. The upgrading page says all three.
 
 **6. Serialization on such a backend is the host's strategy, as it
 already is.** Answering a parent, settling a fan-out and the cascade each
@@ -1456,26 +1490,31 @@ takes no exclusion: it reports what storage held when it read, like
 **8. The tests, and ADR-0005 decision 2.** The build proves the SQLite
 half in the module `SqliteTestRepo` backs
 (`test/statifier_persistence/ecto/sqlite_migrations_test.exs`), with that
-module's `PassThroughSerialization` strategy. It asserts that a single
-child and a fan-out are created, listed, settled, answered and cancelled
-there, and that the V09 columns arrive. The Postgres half is the existing
-`DriverSubchartEctoTest` and `DriverFanoutEctoTest`, which must stay green
-unchanged. This does not move ADR-0005 decision 2. That decision chose the
-harness that proves the conformance suite and the lock contract, and both
-stay on a real Postgres server: no SQLite case asserts `lock_execution/3`
-or runs `StorageConformance`. The module already proves behaviour on its
-own backend beside the migrations, in its "V05's input log on this
-adapter" and "pruning finished executions on this adapter" cases. The
-child cases are the same kind. The sp-y7n Note's SQLite half ("The SQLite
-case therefore asserts what `driver:` has to be there: inert") describes
-the code up to 0.25.1 and stays as written. From the build on, that case
-asserts that an outside fail answers the parent on SQLite too.
+module's `PassThroughSerialization` strategy. With `linkage_columns: true`
+it asserts that a single child and a fan-out are created, listed,
+settled, answered and cancelled there, and that V09's columns arrive.
+With the option left at `false` it asserts that the module's existing
+refusals still answer as they do on 0.25.1. The Postgres half is the
+existing `DriverSubchartEctoTest` and `DriverFanoutEctoTest`, which must
+stay green unchanged. This does not move ADR-0005 decision 2. That
+decision chose the harness that proves the conformance suite and the lock
+contract, and both stay on a real Postgres server: no SQLite case asserts
+`lock_execution/3` or runs `StorageConformance`. The module already
+proves behaviour on its own backend beside the migrations, in its "V05's
+input log on this adapter" and "pruning finished executions on this
+adapter" cases. The child cases are the same kind. The sp-y7n Note's
+SQLite half ("The SQLite case therefore asserts what `driver:` has to be
+there: inert") describes the code up to 0.25.1 and stays as written. From
+the build on, that case asserts that an outside fail answers the parent
+on SQLite when the option is on, and stays inert when it is off.
 
 **What the record now decides.** Decision 2's linkage is still identity
 data under the reserved key at every seam a host or an adapter sees. Its
-storage home is the adapter's own choice, and the shipped Ecto adapter
-stores it in columns on any backend that cannot store `metadata`. ADR-0006
-decision 3 is narrowed by one optional declaration: an adapter can host
-durable children without hosting a host's `metadata`. No other decision in
-this record moves. The sp-3n2 Amendment's "still no join table" stands,
-because the columns sit on the child's own row.
+storage home is the adapter's own choice. The shipped Ecto adapter stores
+it in columns on a backend that cannot store `metadata`, but only for a
+host that opts in with `linkage_columns: true`. Every other host keeps
+0.25.1's storage. ADR-0006 decision 3 is narrowed by one optional
+declaration: an adapter can host durable children without hosting a
+host's `metadata`. No other decision in this record moves. The sp-3n2
+Amendment's "still no join table" stands, because the columns sit on the
+child's own row.
