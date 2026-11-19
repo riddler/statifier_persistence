@@ -16,12 +16,12 @@ defmodule StatifierPersistence.ReadmeExampleTest do
   The guide "How to persist an execution and resume it in another process"
   (`docs/guides/persist-and-resume.md`), executed.
 
-  This project has no doctests (the public functions take a live store, not
-  values a doctest can print), so a snippet has nothing checking it but this
-  file. The test reads the page, takes its `elixir` code blocks in order and
-  evaluates each one, threading the bindings and aliases from block to
-  block, then asserts every output the page claims after the block that
-  claims it. The one host-side call the page leaves to the reader,
+  A guide's snippets are not doctests (the public functions take a live
+  store, not values a doctest can print), so a snippet has nothing checking
+  it but this file. The test reads the page, takes its `elixir` code
+  blocks in order and evaluates each one, threading the bindings and
+  aliases from block to block, then asserts every output the page claims
+  after the block that claims it. The one host-side call the page leaves to the reader,
   `MyApp.Holds.check/2`, is the stand-in defined above.
   """
 

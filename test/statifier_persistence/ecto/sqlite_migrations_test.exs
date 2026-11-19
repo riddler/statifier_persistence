@@ -671,7 +671,9 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
     # unconditionally again -> red here on the first assertion ("Expected
     # false or nil, got true" for `metadata_supported?/1`), and red in the
     # fan-out case below, which started the child instead of refusing.
-    # Verified red, reverted.
+    # Verified red, reverted. And answered `{:ok, []}` from
+    # Executions.active_children/2 when the listing refused -> red on its
+    # assertion here. Verified red, reverted from a copy.
     test "the store declares no metadata support, and the listings refuse" do
       store = sqlite_store()
 
@@ -686,6 +688,9 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
 
       assert {:error, :execution_states_unsupported} =
                Storage.list_execution_states_by_metadata(store, match)
+
+      assert {:error, :child_listing_unsupported} =
+               Executions.active_children(store, "execution_sqlite_absent")
     end
 
     # sabotage: dropped the metadata_supported?/1 conjunct from
@@ -1481,6 +1486,34 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
                Driver.send_event(driver, parent, Event.external("timeout"))
 
       assert_received {^ref, %{count: 0, retained: 0}, %{parent_execution_id: ^parent}}
+    end
+
+    # sabotage: dropped the status filter from Executions.active_children/2
+    # -> red, the completed child came back; and sorted by execution id in
+    # place of invocation id and index -> red, child 10 came before child 2.
+    # Each verified red, reverted from a copy.
+    test "active_children/2 reads the children from the linkage columns" do
+      store = linked_store()
+      parent = "execution_loan_active_children"
+      driver = start_linked_parent(store, parent)
+
+      for index <- [10, 2, 3] do
+        assert :ok = Driver.start_child_at(driver, parent, effect(), index, 11)
+      end
+
+      third = Linkage.child_execution_id(parent, "call", 3)
+
+      assert {:ok, _execution, _machine_state} =
+               Driver.send_event(child_driver(store), third, Event.external("go"))
+
+      assert {:ok, children} = Executions.active_children(store, parent)
+
+      assert Enum.map(children, &{&1.execution_id, &1.status}) == [
+               {Linkage.child_execution_id(parent, "call", 2), :active},
+               {Linkage.child_execution_id(parent, "call", 10), :active}
+             ]
+
+      assert {:ok, []} = Executions.active_children(store, third)
     end
   end
 

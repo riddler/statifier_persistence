@@ -117,9 +117,12 @@ defmodule StatifierPersistence.Executions do
   `unpark/3`, `migrate/4`, `migrate_tree/4` and `inputs/2` - answers
   `{:error, {:reentrant_step, execution_id}}` for a marked id before it
   reads or writes anything. `migrate_tree/4` checks its root and every id
-  its `plans` name. `migrate_batch/3` takes no execution id, but its dry
-  run answers `{:would_refuse, {:reentrant_step, execution_id}}` for a
-  marked id among the executions it lists, before it reads that one, as
+  its `plans` name. `active_children/2` takes an execution id and is not
+  among them: it writes nothing, and answers what storage holds, as
+  `StatifierPersistence.Storage.fetch_execution/2` does.
+  `migrate_batch/3` takes no execution id, but its dry run answers
+  `{:would_refuse, {:reentrant_step, execution_id}}` for a marked id
+  among the executions it lists, before it reads that one, as
   its apply answers `{:refused, {:reentrant_step, execution_id}}` for it
   through `migrate/4` or `migrate_tree/4`. Without the refusal a nested
   door would read the position the outer step has not written yet, write
@@ -2575,6 +2578,62 @@ defmodule StatifierPersistence.Executions do
   defp sweep(store, metadata_match, opts) do
     with {:ok, records} <- Storage.list_executions_by_metadata(store, metadata_match) do
       Enum.reduce_while(records, {:ok, {0, 0}}, &cascade_step(store, &1, opts, &2))
+    end
+  end
+
+  @doc """
+  Lists the active children of `execution_id`: its direct durable subchart
+  children, across every invocation, whose stored status is not terminal
+  (ADR-0008's 2026-11-19 Amendment, point 7).
+
+  Answers `{:ok, executions}`, one `StatifierPersistence.Execution` per
+  child in `:active` or `:needs_migration`; a child in `:completed`,
+  `:failed` or `:cancelled` is left out. The list is ordered by invocation
+  id, then by the child's index within its invocation (`0` for an ordinary
+  durable subchart, its place in the list for a fan-out's child), so a
+  fan-out's tenth child follows its third.
+
+  The children are read through
+  `StatifierPersistence.Storage.list_executions_by_metadata/2` over
+  `StatifierPersistence.Execution.Linkage.parent_match/1`, the read
+  `migrate_tree/4` and `cascade_cancel/3` make, so this answers on every
+  store whose `StatifierPersistence.Storage.child_listing_supported?/1`
+  is true: the in-memory adapter, the Ecto adapter on Postgres, and the
+  Ecto adapter elsewhere for a host that sets `linkage_columns: true`,
+  for example. On a store that cannot list children it answers
+  `{:error, :child_listing_unsupported}`, without calling the adapter.
+
+  A stored linkage that `StatifierPersistence.Execution.Linkage.from_metadata/1`
+  cannot read names no invocation or index, so its execution is left out.
+
+  The parent is not fetched, so an id with no children, stored or not,
+  answers `{:ok, []}`. It reads one level: a child's own children are its
+  own, and a host walks deeper by calling this again with the child's id.
+
+  Read-only, and outside every execution's exclusion: it takes no lock and
+  reports what storage held when it read, as
+  `StatifierPersistence.Storage.fetch_execution/2` does. A child that
+  settles a moment later is still in the answer.
+
+      iex> {:ok, store} = StatifierPersistence.Storage.new(StatifierPersistence.Storage.InMemory, [])
+      iex> StatifierPersistence.Executions.active_children(store, "loan_copy_42")
+      {:ok, []}
+  """
+  @spec active_children(store :: Storage.t(), execution_id :: execution_id()) ::
+          {:ok, [Execution.t()]} | {:error, error()}
+  def active_children(%Storage{} = store, execution_id) when is_binary(execution_id) do
+    with {:ok, records} <-
+           Storage.list_executions_by_metadata(store, Linkage.parent_match(execution_id)) do
+      {:ok,
+       for(
+         record <- records,
+         record.status in [:active, :needs_migration],
+         {:ok, %Linkage{} = linkage} <-
+           [Linkage.from_metadata(record.metadata)],
+         do: {{linkage.invoke_id, linkage.child_index, record.execution_id}, record}
+       )
+       |> Enum.sort_by(&elem(&1, 0))
+       |> Enum.map(fn {_key, record} -> Execution.from_record(record) end)}
     end
   end
 
