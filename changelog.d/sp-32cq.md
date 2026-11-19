@@ -1,6 +1,0 @@
-### Added
-
-- `use StatifierPersistence.Ecto` takes `linkage_columns: true` (default `false`), which gives the generated execution schema six `linkage_*` columns and, on a backend other than Postgres, makes the Ecto adapter store a durable subchart child's linkage in them rather than in `metadata`; on Postgres the linkage stays in the `jsonb` column with the option on or off, and a host that leaves the option off reads and writes what it did before.
-- Migration V09 adds the six nullable `linkage_*` columns to the executions table with an index on the parent and invocation columns and one on the pin's content hash; only a host that sets `linkage_columns: true` needs it, and `Migrations.expected_version/0` now answers `9`.
-- The optional adapter callback `supports_linkage?/1` and the facade predicate `StatifierPersistence.Storage.linkage_supported?/1` say whether a store keeps a child's linkage without keeping a host's `metadata`; the Ecto adapter answers `true` only for a host that sets `linkage_columns: true` on a backend other than Postgres.
-- For such a host, the Ecto adapter's `list_executions_by_metadata/2` and `list_execution_states_by_metadata/2` answer a match on the reserved linkage key alone where they refused `:metadata_unsupported`, and `count_executions_by_content_hash/2` counts a child's pin in `children` where it answered `0`.
