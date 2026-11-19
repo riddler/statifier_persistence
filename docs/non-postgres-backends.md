@@ -19,7 +19,7 @@ steps are about a Postgres index.
 | Surface | Why | What happens elsewhere |
 |---|---|---|
 | `lock_execution/3` | `SELECT pg_advisory_xact_lock(hashtextextended(...))` plus `FOR UPDATE` | The backend does not parse it. The callback raises |
-| `list_executions_by_metadata/2`, `list_execution_states_by_metadata/2` | `jsonb` containment (`@>`) with a `-> ... ->>` extraction | The backend does not parse it, so the callbacks never issue it: each consults `supports_metadata?/1` first and answers `{:error, :metadata_unsupported}`, called directly or through the facade |
+| `list_executions_by_metadata/2`, `list_execution_states_by_metadata/2` | `jsonb` containment (`@>`) with a `-> ... ->>` extraction | The backend does not parse it, so the callbacks never issue it: each consults `supports_metadata?/1` first and answers `{:error, :metadata_unsupported}`, called directly or through the facade. A host that sets `linkage_columns: true` gets an answer for a match on the reserved linkage key alone ([below](#durable-subchart-children-the-linkage-columns)) |
 | `supports_metadata?/1` | Declares the `jsonb` column *and* the list helpers as one capability | Already answers `false` off `repo.__adapter__()`, so both the facade and the two raw callbacks refuse the listings cleanly rather than reaching the Postgres-only SQL |
 | V03's `GIN jsonb_path_ops` index on `executions.metadata` | Serves the containment query above | The migration helper skips it, so `Migrations.up/1` runs to completion and the `outcome_blob` column arrives |
 | V04's concurrent rebuild of that index | `CREATE INDEX CONCURRENTLY` on the same index | A no-op in both directions: there is no index here to rebuild. The `@disable_ddl_transaction` / `@disable_migration_lock` attributes a Postgres host puts on that migration are not needed here |
@@ -99,8 +99,8 @@ If you cannot name the mechanism that makes it true, you need shape 1.
 Two further things a non-Postgres backend does not get, both of which
 refuse rather than break:
 
-- **Durable subcharts and fan-out** (ADR-0008). Starting a child execution
-  needs
+- **Durable subcharts and fan-out** (ADR-0008), unless you opt into the
+  linkage columns below. Starting a child execution needs
   the metadata listing to find children again, so `Storage` refuses at
   open with `{:refused, :child_listing_unsupported}`. No child is started
   and no half-open parent is left behind.
@@ -110,6 +110,68 @@ refuse rather than break:
   `{:error, :execution_states_unsupported}`. Query your own column directly
   instead; ADR-0002's configurable table names make that a supported thing
   to do.
+
+## Durable subchart children: the linkage columns
+
+A durable subchart child's linkage to its parent travels under one
+reserved `metadata` key, and this adapter stores no `metadata` off
+Postgres. Set `linkage_columns: true` on your `use
+StatifierPersistence.Ecto` and run migration V09, and the adapter stores
+that linkage in six columns of the executions table instead (ADR-0008's
+2026-11-19 Amendment):
+
+```elixir
+defmodule MyApp.Persistence do
+  use StatifierPersistence.Ecto,
+    repo: MyApp.Repo,
+    linkage_columns: true
+end
+```
+
+The store then answers `StatifierPersistence.Storage.linkage_supported?/1`
+with `true`, and a child is created, listed, settled, cancelled and
+answered through the same `StatifierPersistence.Driver` doors it takes on
+Postgres. What changes for such a host, each where 0.25.1 refused:
+
+- `Storage.insert_execution/5`, `Storage.check_metadata/2` and so
+  `Executions.create/4` accept a `metadata` map holding the reserved key
+  and nothing else. A host key is still refused
+  `{:error, :metadata_unsupported}`.
+- `Storage.child_listing_supported?/1` and
+  `Storage.execution_states_supported?/1` answer `true`, and
+  `Storage.list_executions_by_metadata/2` and
+  `Storage.list_execution_states_by_metadata/2` answer a match on the
+  reserved key alone. Any other match is refused
+  `{:error, :child_listing_unsupported}` or
+  `{:error, :execution_states_unsupported}`, as before.
+- A durable child's start, through the single-child dispatch or
+  `Driver.start_child_at/6`, creates the child where it refused
+  `{:refused, :child_listing_unsupported}`, and the child's answer, a
+  fail through `Executions.fail/4` with `driver:` included, reaches its
+  parent.
+- Leaving a state that holds a live `<invoke>`, of any type, now lists
+  that invocation's children and cancels them through
+  `Executions.cascade_cancel/3`, under your strategy, and emits one
+  `[:statifier_persistence, :child, :cascade_cancelled]` event, with a
+  count of `0` when the invocation started no durable child.
+- `Executions.cascade_cancel/3` and `Executions.migrate_tree/4` read the
+  children where they answered `{:error, :child_listing_unsupported}`.
+  `migrate_tree/4` then takes each named node's exclusion through the
+  `serialization:` you pass it, so it raises under the default strategy
+  as every other `Executions` call here does.
+- `Executions.executions_on/2` and `Executions.retire_chart/4` count a
+  child's pin in `children` where they counted `0`.
+
+A child is created inside its parent's serialization section, so your
+strategy is entered for the child's id while the parent's body is still
+running. A pass-through strategy stays honest only for a single writer,
+as "Declining the lock callback" above says.
+
+Leave the option off if your own adapter delegates its inserts and
+fetches to `StatifierPersistence.Storage.Ecto` but reads the `metadata`
+column itself: with the option on, new children's linkage would move out
+of the column your callbacks read. A store with the option off answers
+everything as 0.25.1 does, whether or not V09 has run.
 
 ## How to verify
 
@@ -169,8 +231,13 @@ conformance and lock case here still runs against a real Postgres server.
   retired noun; a file name is a cite target), decision 3: metadata
   support as a declared capability, with refusal at open as the arm an
   adapter that cannot store it takes.
+- `docs/adr/0008-durable-subchart-child-runs.md` (the file name keeps the
+  retired noun), its 2026-11-19 Amendment: the linkage columns, who opts
+  in, and the strategy such a host passes.
 - `test/statifier_persistence/ecto/sqlite_migrations_test.exs`: the
   standing proof, on a real SQLite repo, that V03 applies, that the index
   is skipped, that V04's rebuild of it is a no-op, and that what the index
   served refuses rather than raises - through the facade, and through the
-  two raw callbacks a host can reach directly.
+  two raw callbacks a host can reach directly. It also drives a durable
+  child and a fan-out with `linkage_columns: true`, and the same doors'
+  refusals with the option left off.

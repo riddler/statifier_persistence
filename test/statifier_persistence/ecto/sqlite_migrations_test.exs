@@ -16,6 +16,10 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
   ADR-0005 decision 2's Postgres harness is untouched: every storage,
   conformance and lock test still runs against a real Postgres server.
   This module owns its own repo, its own database file, and its own DDL.
+
+  It also drives durable subchart children on this backend, for the host
+  that sets `linkage_columns: true` and the one that does not (ADR-0008's
+  2026-11-19 Amendment, point 8), under `PassThroughSerialization`.
   """
 
   # Its own repo, its own file-backed database, and DDL outside any
@@ -27,6 +31,7 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
   alias Statifier.Effect.Invoke
   alias Statifier.Event
   alias Statifier.Invoke.Types, as: InvokeTypes
+  alias Statifier.Machine
   alias Statifier.MachineState
   alias StatifierPersistence.{Driver, Executions, Storage}
   alias StatifierPersistence.Ecto.Migrations
@@ -235,6 +240,20 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
       </state>
       <state id="approved"/>
       <state id="refused"/>
+  </scxml>
+  """
+
+  # The parent above with a way out of the invoking state, so leaving it
+  # fires the `{:cancel_invoke, _}` effect.
+  @cancelling_parent_source """
+  <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="calling">
+      <state id="calling">
+          <invoke id="call" type="myapp:map"/>
+          <transition event="done.invoke.call" target="approved"/>
+          <transition event="timeout" target="abandoned"/>
+      </state>
+      <state id="approved"/>
+      <state id="abandoned"/>
   </scxml>
   """
 
@@ -724,6 +743,11 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
   # refusal that stops a fan-out at open stops a single durable subchart
   # child at open too. What `driver:` therefore has to be here is inert -
   # an outside fail behaves exactly as it did before the option existed.
+  #
+  # That is the host that leaves `linkage_columns:` off. ADR-0008's
+  # 2026-11-19 Amendment gives the host that sets it a home for the
+  # linkage, and the second case below is that host: its outside fail
+  # answers the parent, as on Postgres.
   describe "an outside fail on this adapter" do
     # `serialization:` is the host's here for the same reason the rest of
     # this module's driving is: `AdapterLock` issues
@@ -767,6 +791,36 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
 
       assert {:ok, parent_record} = Storage.fetch_execution(store, "execution_sqlite_fail_parent")
       assert parent_record.status == :active
+    end
+
+    # ADR-0008's 2026-11-19 Amendment, point 8: the same outside fail, for
+    # the host that opts in, now answers the parent.
+    #
+    # sabotage: in Executions.answer_parent_of_failed/4, dropped the
+    # driver clause's Driver.resolve_and_answer_parent/3 call -> red, the
+    # parent stayed in "calling". Verified red, reverted from a copy.
+    test "with the linkage columns option on, a fail with driver: answers the parent" do
+      store = linked_store()
+      parent = "execution_loan_fail_parent"
+
+      driver =
+        linked_driver(store, @parent_source, subchart_dispatch(),
+          chart_resolver: parent_resolver()
+        )
+
+      assert {:ok, _execution, _machine_state} = Driver.create(driver, parent)
+
+      child = Linkage.child_execution_id(parent, "call", 0)
+
+      assert {:ok, %{status: :failed, failure: "boom"}} =
+               Executions.fail(store, child, "boom",
+                 driver: driver,
+                 serialization: {PassThroughSerialization, nil}
+               )
+
+      parent_state = reload(store, @parent_source, parent)
+      assert leaves(parent_state) == ["refused"]
+      assert parent_state.datamodel["_event"]["data"]["reason"] == "boom"
     end
   end
 
@@ -977,6 +1031,39 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
 
       assert {:ok, %{children: 0}} =
                Storage.Ecto.count_executions_by_content_hash(opts, "sha256:loan-off-child")
+    end
+  end
+
+  # The host that changes nothing, at the facade and the Driver: every
+  # answer below is the one 0.25.1 gives on this backend.
+  describe "the facade and the Driver with the linkage columns option left off" do
+    # sabotage: answered `true` from Storage.linkage_supported?/1 for every
+    # store -> red, the child was stored. Verified red, reverted from a copy.
+    test "a durable child, the cascade and the tree read still refuse" do
+      store = sqlite_store()
+      parent = "execution_loan_off_driver"
+      ref = attach_cascade_handler()
+
+      driver = linked_driver(store, @cancelling_parent_source, subchart_dispatch())
+      assert {:ok, _execution, _machine_state} = Driver.create(driver, parent)
+
+      child = Linkage.child_execution_id(parent, "call", 0)
+      assert {:error, :execution_not_found} = Storage.fetch_execution(store, child)
+
+      assert {:error, :child_listing_unsupported} =
+               Executions.cascade_cancel(store, Linkage.parent_match(parent),
+                 serialization: {PassThroughSerialization, nil}
+               )
+
+      assert {:error, :child_listing_unsupported} =
+               Executions.migrate_tree(store, parent, %{},
+                 serialization: {PassThroughSerialization, nil}
+               )
+
+      assert {:ok, _execution, _machine_state} =
+               Driver.send_event(driver, parent, Event.external("timeout"))
+
+      refute_received {^ref, _measurements, _metadata}
     end
   end
 
@@ -1239,6 +1326,164 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
     end
   end
 
+  # ADR-0008's 2026-11-19 Amendment, the facade and Driver half, on this
+  # adapter: the same doors `DriverSubchartEctoTest` and
+  # `DriverFanoutEctoTest` drive on Postgres, for the host that opts in.
+  # Every case passes `PassThroughSerialization`, the strategy the
+  # Amendment's point 6 leaves to such a host.
+  describe "durable subchart children with the linkage columns option on" do
+    # sabotage: dropped the linkage_supported?/1 arm from Storage's
+    # check_metadata_supported/2 -> red on the first check_metadata/2;
+    # and let a match naming a host key through to the adapter -> red on
+    # `:child_listing_unsupported`, which answered the adapter's own
+    # `:metadata_unsupported`. Each verified red, reverted from a copy.
+    test "the facade admits the reserved key alone and still refuses a host key" do
+      store = linked_store()
+      linkage = Linkage.new("execution_loan_facade", "renewals", 0, "sha256:loan-facade")
+      reserved = Linkage.to_metadata(linkage)
+      host_key = %{"branch" => "east"}
+
+      assert :ok = Storage.check_metadata(store, metadata: reserved)
+      assert :ok = Storage.check_metadata(store, metadata: %{})
+
+      assert {:error, :metadata_unsupported} = Storage.check_metadata(store, metadata: host_key)
+
+      assert {:error, :metadata_unsupported} =
+               Storage.check_metadata(store, metadata: Map.merge(reserved, host_key))
+
+      assert Storage.child_listing_supported?(store)
+      assert Storage.execution_states_supported?(store)
+
+      match = Linkage.parent_match("execution_loan_facade")
+      assert {:ok, []} = Storage.list_executions_by_metadata(store, match)
+      assert {:ok, []} = Storage.list_execution_states_by_metadata(store, match)
+
+      for refused <- [host_key, Map.merge(match, host_key), %{}] do
+        assert {:error, :child_listing_unsupported} =
+                 Storage.list_executions_by_metadata(store, refused)
+
+        assert {:error, :execution_states_unsupported} =
+                 Storage.list_execution_states_by_metadata(store, refused)
+      end
+    end
+
+    # sabotage: put Storage.child_listing_supported?/1 back on
+    # metadata_supported?/1 alone -> red on the child listing, and on every
+    # other case in this block. Verified red, reverted from a copy.
+    test "a single child is created, listed and answers its parent" do
+      store = linked_store()
+      parent = "execution_loan_single"
+      driver = linked_driver(store, @parent_source, subchart_dispatch())
+
+      assert {:ok, _execution, _machine_state} = Driver.create(driver, parent)
+
+      child = Linkage.child_execution_id(parent, "call", 0)
+
+      assert {:ok, [%{execution_id: ^child, status: :active}]} =
+               Storage.list_executions_by_metadata(store, Linkage.parent_match(parent))
+
+      assert {:ok, _execution, _machine_state} =
+               Driver.send_event(child_driver(store), child, Event.external("go"))
+
+      assert {:ok, %{status: :completed}} = Storage.fetch_execution(store, child)
+      assert leaves(reload(store, @parent_source, parent)) == ["approved"]
+    end
+
+    # sabotage: put Storage.execution_states_supported?/1 back on
+    # metadata_supported?/1 alone -> red, start_child_at/6 refused
+    # `:execution_states_unsupported`. Verified red, reverted from a copy.
+    test "a fan-out's children are created, settled and answer their parent" do
+      store = linked_store()
+      parent = "execution_loan_fanout"
+      driver = start_linked_parent(store, parent)
+
+      for index <- 0..1 do
+        assert :ok = Driver.start_child_at(driver, parent, effect(), index, 2)
+      end
+
+      assert {:ok, states} =
+               Storage.list_execution_states_by_metadata(
+                 store,
+                 Linkage.invocation_match(parent, "call")
+               )
+
+      assert states |> Enum.map(& &1.child_index) |> Enum.sort() == [0, 1]
+
+      for index <- 0..1 do
+        child = Linkage.child_execution_id(parent, "call", index)
+
+        assert {:ok, _execution, _machine_state} =
+                 Driver.send_event(child_driver(store), child, Event.external("go"))
+      end
+
+      assert leaves(reload(store, @parent_source, parent)) == ["approved"]
+    end
+
+    # sabotage: in Driver's `:cancel_invoke` arm, answered `:ok` without the
+    # cascade -> red on the child's status. Verified red, reverted from a
+    # copy.
+    test "leaving the invoking state cancels the child and keeps its position" do
+      store = linked_store()
+      parent = "execution_loan_cancel"
+      driver = linked_driver(store, @cancelling_parent_source, subchart_dispatch())
+
+      assert {:ok, _execution, _machine_state} = Driver.create(driver, parent)
+
+      child = Linkage.child_execution_id(parent, "call", 0)
+      assert {:ok, before} = Storage.fetch_execution(store, child)
+
+      assert {:ok, _execution, machine_state} =
+               Driver.send_event(driver, parent, Event.external("timeout"))
+
+      assert leaves(machine_state) == ["abandoned"]
+
+      assert {:ok, %{status: :cancelled, position_blob: position_blob}} =
+               Storage.fetch_execution(store, child)
+
+      assert position_blob == before.position_blob
+    end
+
+    # sabotage: answered `{:error, :child_listing_unsupported}` from
+    # Storage.list_executions_by_metadata/2 for every match -> red on the
+    # first call. Verified red, reverted from a copy.
+    test "cascade_cancel/3 and migrate_tree/4 read the children instead of refusing" do
+      store = linked_store()
+      parent = "execution_loan_tree"
+      driver = linked_driver(store, @cancelling_parent_source, subchart_dispatch())
+
+      assert {:ok, _execution, _machine_state} = Driver.create(driver, parent)
+
+      assert {:ok, []} =
+               Executions.migrate_tree(store, parent, %{},
+                 serialization: {PassThroughSerialization, nil}
+               )
+
+      assert {:ok, 1} =
+               Executions.cascade_cancel(store, Linkage.parent_match(parent),
+                 serialization: {PassThroughSerialization, nil}
+               )
+    end
+
+    # sabotage: same mutation as the case above -> red, no event arrived;
+    # and the `:cancel_invoke` arm's mutation two cases up -> red the same
+    # way. Each verified red, reverted from a copy.
+    test "an invoke's exit with no durable child now queries and reports zero" do
+      store = linked_store()
+      parent = "execution_loan_plain_exit"
+      ref = attach_cascade_handler()
+
+      driver =
+        linked_driver(store, @cancelling_parent_source, fn _type, _params, _ctx -> :pending end)
+
+      assert {:ok, _execution, _machine_state} = Driver.create(driver, parent)
+
+      assert {:ok, _execution, _machine_state} =
+               Driver.send_event(driver, parent, Event.external("timeout"))
+
+      assert_received {^ref, %{count: 0, retained: 0}, %{parent_execution_id: ^parent}}
+    end
+  end
+
   defp event(name), do: %Event{name: name, type: :external}
 
   defp logged_execution(store, execution_id) do
@@ -1253,6 +1498,96 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
   defp linked_store do
     {:ok, store} = Storage.new(Storage.Ecto, persistence: LinkedHost)
     store
+  end
+
+  defp linked_driver(store, source, dispatch, opts \\ []) do
+    {:ok, machine} = Statifier.compile(source)
+
+    Driver.new(
+      store,
+      machine,
+      Keyword.merge(
+        [
+          dispatch: dispatch,
+          invoke_types: InvokeTypes.new(types: ["myapp:map"]),
+          serialization: {PassThroughSerialization, nil}
+        ],
+        opts
+      )
+    )
+  end
+
+  defp start_linked_parent(store, execution_id) do
+    driver =
+      linked_driver(store, @parent_source, fn "myapp:map", _params, _context -> :pending end)
+
+    {:ok, _execution, _machine_state} = Driver.create(driver, execution_id)
+    driver
+  end
+
+  # A driver over the child's chart that can reach the parent's chart, the
+  # shape every node answering a durable child has.
+  defp child_driver(store) do
+    {:ok, parent_machine} = Statifier.compile(@parent_source)
+    parent_hash = Machine.identity(parent_machine).content_hash
+
+    resolver = fn
+      ^parent_hash -> {:ok, parent_machine}
+      _other_hash -> :error
+    end
+
+    linked_driver(store, @child_source, fn _type, _params, _context -> :pending end,
+      chart_resolver: resolver
+    )
+  end
+
+  defp subchart_dispatch do
+    fn "myapp:map", _params, %{invoke_id: invoke_id} ->
+      invoke = %{effect() | invoke_id: invoke_id}
+      {:start_child, invoke, {:invoke, invoke}}
+    end
+  end
+
+  defp reload(store, source, execution_id) do
+    {:ok, machine} = Statifier.compile(source)
+    {:ok, machine_state} = Storage.load_execution_position(store, execution_id, machine)
+    machine_state
+  end
+
+  defp parent_resolver do
+    {:ok, parent_machine} = Statifier.compile(@parent_source)
+    parent_hash = Machine.identity(parent_machine).content_hash
+
+    fn
+      ^parent_hash -> {:ok, parent_machine}
+      _other_hash -> :error
+    end
+  end
+
+  defp leaves(machine_state) do
+    machine_state
+    |> MachineState.active_leaf_states()
+    |> Enum.map(&Machine.id(machine_state.machine, &1))
+    |> Enum.sort()
+  end
+
+  defp attach_cascade_handler do
+    ref = make_ref()
+    test_pid = self()
+    handler_id = {__MODULE__, ref}
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:statifier_persistence, :child, :cascade_cancelled],
+        fn _event, measurements, metadata, _config ->
+          send(test_pid, {ref, measurements, metadata})
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+    ref
   end
 
   # A stored execution in the adapter's own record shape, for the cases

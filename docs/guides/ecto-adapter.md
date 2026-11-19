@@ -84,7 +84,8 @@ SQLite or another backend declines the lock callback by passing its own
 `serialization: {module, config}` strategy, and must not leave the default
 in place, which reaches the Postgres-only `lock_execution/3` and raises
 mid-execution. Run the shipped suite with `mix test --exclude postgres` to
-skip the five conformance cases those callbacks generate.
+skip the five conformance cases those callbacks generate. A host that wants
+durable subchart children there sets `linkage_columns: true` and runs V09.
 
 [How to run the Ecto adapter on a backend that is not
 Postgres](../non-postgres-backends.md) is the full guide: what is

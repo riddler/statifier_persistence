@@ -750,3 +750,55 @@ the new `function_providers:` option and the list does not resolve.
   or anything is written, in the door's own `{:refused, reason}` shape. It
   emits no `[:statifier_persistence, :child, :refused]` event. A driver
   with a list that resolves, or with none, starts children as before.
+
+## After 0.25.1: durable subchart children on another backend
+
+The release after 0.25.1 lets a host on an Ecto backend that is not
+Postgres run durable subchart children, by opting in. A host that changes
+nothing, on any backend, sees every answer 0.25.1 gives: **NONE**. Off
+Postgres such a host's `[:statifier_persistence, :adapter, :call]`
+handler also sees a `:supports_linkage?` call where the package asks
+whether children can be listed, and that call answers `false`.
+
+- **If your adapter is your own and answers `supports_metadata?/1` with
+  `true`**, filtering stored `metadata` by
+  `StatifierPersistence.Execution.Linkage.reserved_key/0`, it needs no
+  change: the linkage still reaches it, and leaves it, under that key.
+  **NONE**.
+- **If your adapter delegates its storage to
+  `StatifierPersistence.Storage.Ecto`** but reads the `metadata` column
+  itself, as the reference embedder's SQLite adapter does, leave
+  `linkage_columns:` off. With it off, the delegated callbacks store and
+  read the linkage in the `metadata` column exactly as 0.25.1 does; with
+  it on, new children's linkage would move out of the column your own
+  callbacks read. **NONE**.
+- **If your adapter cannot store a host's `metadata` but can store and
+  match the reserved key**, it may now export the optional
+  `supports_linkage?/1` callback and answer `true`, and it then hosts
+  durable children without declaring `metadata`.
+- **If you run the shipped Ecto adapter on SQLite or another backend that
+  is not Postgres and want durable subchart children**, set
+  `linkage_columns: true` on your `use StatifierPersistence.Ecto`, run V09
+  before deploying that code ("Before you start" above), and pass your own
+  `serialization:` strategy, as you already do off Postgres. What changes
+  for such a host, each where 0.25.1 refused: `Storage.insert_execution/5`
+  and `Storage.check_metadata/2` accept `metadata` holding the reserved
+  key alone, where they answered `{:error, :metadata_unsupported}` (a host
+  key is still refused); `Storage.child_listing_supported?/1` and
+  `Storage.execution_states_supported?/1` answer `true`, and the two
+  facade listings answer a match on the reserved key alone (any other
+  match is refused as before); a single child's start and
+  `Driver.start_child_at/6` create the child where they refused
+  `:child_listing_unsupported`, and the child's answer reaches its parent;
+  leaving a state that holds a live `<invoke>` lists that invocation's
+  children, cancels them, and emits one
+  `[:statifier_persistence, :child, :cascade_cancelled]` event, with a
+  count of `0` when there were none; `Executions.cascade_cancel/3` and
+  `Executions.migrate_tree/4` read the children where they answered
+  `{:error, :child_listing_unsupported}`, and `migrate_tree/4` then takes
+  each named node's exclusion through your strategy; and
+  `Executions.executions_on/2` and `Executions.retire_chart/4` count a
+  child's pin in `children` where they counted `0`. [How to run the Ecto
+  adapter on a backend that is not
+  Postgres](non-postgres-backends.md#durable-subchart-children-the-linkage-columns)
+  has the same list with the strategy's one new consequence.
