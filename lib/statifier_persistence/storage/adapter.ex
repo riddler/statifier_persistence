@@ -613,6 +613,27 @@ defmodule StatifierPersistence.Storage.Adapter do
   @callback supports_metadata?(opts()) :: boolean()
 
   @doc """
+  Optional declaration that this adapter can store a durable subchart
+  child's linkage without storing a host's `metadata` (ADR-0008's
+  2026-11-19 Amendment).
+
+  The same opt-in-by-export shape `supports_metadata?/1` uses: an adapter
+  that exports it and answers `true` says it stores a record whose
+  `metadata` holds the reserved key
+  (`StatifierPersistence.Execution.Linkage.reserved_key/0`) and nothing
+  else, hands that key back on a fetch exactly as it was given, and
+  answers `list_executions_by_metadata/2` and
+  `list_execution_states_by_metadata/2` for a match that names the
+  reserved key and nothing else. Host keys still need
+  `supports_metadata?/1`. An adapter that does not export it declares
+  nothing, which is every adapter written before the Amendment.
+
+  `StatifierPersistence.Storage.linkage_supported?/1` is the facade's
+  predicate over it.
+  """
+  @callback supports_linkage?(opts()) :: boolean()
+
+  @doc """
   Optional metadata-match listing (ADR-0006 decision 3's equality-match
   helper, promoted to a callback by ADR-0008 decision 5).
 
@@ -1055,6 +1076,7 @@ defmodule StatifierPersistence.Storage.Adapter do
   @optional_callbacks isolate: 1,
                       lock_execution: 3,
                       supports_metadata?: 1,
+                      supports_linkage?: 1,
                       list_executions_by_metadata: 2,
                       supports_execution_outcome?: 1,
                       list_execution_states_by_metadata: 2,

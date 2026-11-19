@@ -705,6 +705,39 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     end
   end
 
+  describe "V09: the executions linkage columns and their two indexes" do
+    # sabotage: built V09's content-hash index on linkage_invoke_id -> red here
+    # on the index definition, and red on its SQLite twin. Verified red,
+    # reverted from a copy.
+    test "executions carries six nullable linkage columns and two non-unique indexes, across every key configuration" do
+      for prefix <- @key_prefixes do
+        table = prefix <> "executions"
+
+        assert identity_columns(table, [
+                 "linkage_parent_execution_id",
+                 "linkage_invoke_id",
+                 "linkage_child_index",
+                 "linkage_content_hash",
+                 "linkage_child_count",
+                 "linkage_policy"
+               ]) == [
+                 ["linkage_child_count", "integer", "YES"],
+                 ["linkage_child_index", "integer", "YES"],
+                 ["linkage_content_hash", "text", "YES"],
+                 ["linkage_invoke_id", "text", "YES"],
+                 ["linkage_parent_execution_id", "text", "YES"],
+                 ["linkage_policy", "text", "YES"]
+               ]
+
+        assert [parent, content_hash] = linkage_index_definitions(table)
+        refute parent =~ "UNIQUE"
+        refute content_hash =~ "UNIQUE"
+        assert parent =~ "(linkage_parent_execution_id, linkage_invoke_id)"
+        assert content_hash =~ "(linkage_content_hash)"
+      end
+    end
+  end
+
   describe "unique indexes enforced" do
     # sabotage: removed V01's charts unique_index -> duplicate insert red
     test "a duplicate content_hash insert violates the charts unique index" do
@@ -913,7 +946,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     # sabotage: skipped parse!'s version validation -> red (KeyError, not ArgumentError)
     test "an unknown version raises before any DDL" do
       assert_raise ArgumentError, ~r/unknown migration version/, fn ->
-        Migrations.up(for: KxUxid, version: 9)
+        Migrations.up(for: KxUxid, version: 10)
       end
 
       assert_raise ArgumentError, ~r/unknown migration version/, fn ->
@@ -935,7 +968,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     # red, reverted.
     test "an unknown down from: raises before any DDL" do
       assert_raise ArgumentError, ~r/unknown migration from/, fn ->
-        Migrations.down(for: KxUxid, from: 9)
+        Migrations.down(for: KxUxid, from: 10)
       end
     end
 
@@ -993,7 +1026,7 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
     # 1, right 5), this case and its SQLite twin alone ("45 tests, 2
     # failures"). Verified red, reverted.
     test "expected_version/0 is the newest version the migration map holds" do
-      assert Migrations.expected_version() == 8
+      assert Migrations.expected_version() == 9
     end
   end
 
@@ -1110,6 +1143,24 @@ defmodule StatifierPersistence.Ecto.MigrationsTest do
       """,
       [content_hash, content_hash]
     )
+  end
+
+  # The two V09 indexes, the parent index first.
+  defp linkage_index_definitions(table) do
+    %{rows: rows} =
+      SQL.query!(
+        TestRepo,
+        """
+        SELECT indexdef
+        FROM pg_indexes
+        WHERE schemaname = 'public' AND tablename = $1
+          AND indexname IN ($1 || '_linkage_parent_index', $1 || '_linkage_content_hash_index')
+        ORDER BY indexname DESC
+        """,
+        [table]
+      )
+
+    List.flatten(rows)
   end
 
   defp ended_at_index_definitions(table) do

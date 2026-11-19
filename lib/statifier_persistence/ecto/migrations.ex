@@ -187,6 +187,25 @@ if Code.ensure_loaded?(Ecto.Migration) do
     a later terminal write stamps it with that write's time.
     `StatifierPersistence.Ecto.Migrations.V08` records why.
 
+    V09 needs no recipe of its own: it adds six nullable `linkage_*`
+    columns to `executions` and two indexes over them, inside an ordinary
+    transaction and on every backend, and reads and writes no row. Only a
+    host that sets `linkage_columns: true` on `use StatifierPersistence.Ecto`
+    needs it, and that host runs it before deploying the code that sets the
+    option; a host that leaves the option off may run it or leave it,
+    because its execution schema names none of the columns. An install
+    already at V08 picks it up with
+
+        defmodule MyApp.Repo.Migrations.AddStatifierPersistenceLinkageColumns do
+          use Ecto.Migration
+
+          def up, do: StatifierPersistence.Ecto.Migrations.up(for: MyApp.Persistence, from: 9)
+          def down, do: StatifierPersistence.Ecto.Migrations.down(for: MyApp.Persistence, version: 9)
+        end
+
+    `StatifierPersistence.Ecto.Migrations.V09` records what the columns
+    hold and why nothing is backfilled.
+
     `expected_version/0` answers what that newest version is. A host that
     delegates its migrations here never needs it; a host whose schema is
     hand-written DDL has to check for itself that its tables are current,
@@ -209,7 +228,8 @@ if Code.ensure_loaded?(Ecto.Migration) do
       5 => StatifierPersistence.Ecto.Migrations.V05,
       6 => StatifierPersistence.Ecto.Migrations.V06,
       7 => StatifierPersistence.Ecto.Migrations.V07,
-      8 => StatifierPersistence.Ecto.Migrations.V08
+      8 => StatifierPersistence.Ecto.Migrations.V08,
+      9 => StatifierPersistence.Ecto.Migrations.V09
     }
 
     # Read off the map rather than written beside it: a version this module

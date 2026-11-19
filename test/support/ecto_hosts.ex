@@ -75,6 +75,17 @@ defmodule StatifierPersistence.EctoHosts do
       leading_columns: [tenant_id: {:text, null: true}]
   end
 
+  # The default host again, on the same tables, with the linkage columns
+  # option on: on Postgres the option changes only the schema, so this
+  # host proves the linkage stays in `metadata` with it set. The
+  # bootstrap's migration 112 gives the shared tables V09's columns.
+  defmodule Linked do
+    @moduledoc false
+    use StatifierPersistence.Ecto,
+      repo: StatifierPersistence.TestRepo,
+      linkage_columns: true
+  end
+
   defmodule KxUxid do
     @moduledoc false
     use StatifierPersistence.Ecto,

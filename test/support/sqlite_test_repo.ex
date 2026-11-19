@@ -32,4 +32,17 @@ defmodule StatifierPersistence.SqliteTestRepo do
       key: :uxid,
       table_prefix: "sq_"
   end
+
+  defmodule LinkedHost do
+    @moduledoc """
+    `Host` again, on the same `sq_` tables, with `linkage_columns: true`:
+    the host that keeps a durable subchart child's linkage in the six
+    columns V09 adds, which `Host`'s own schema does not name.
+    """
+    use StatifierPersistence.Ecto,
+      repo: StatifierPersistence.SqliteTestRepo,
+      key: :uxid,
+      table_prefix: "sq_",
+      linkage_columns: true
+  end
 end

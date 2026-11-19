@@ -32,7 +32,7 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
   alias StatifierPersistence.Ecto.Migrations
   alias StatifierPersistence.Execution.Linkage
   alias StatifierPersistence.SqliteTestRepo
-  alias StatifierPersistence.SqliteTestRepo.Host
+  alias StatifierPersistence.SqliteTestRepo.{Host, LinkedHost}
 
   defmodule MigrateSqlite do
     @moduledoc false
@@ -334,7 +334,7 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
     # 1, right 5), this case and its Postgres twin alone ("45 tests, 2
     # failures"). Verified red, reverted.
     test "expected_version/0 answers the same version this backend migrated through" do
-      assert Migrations.expected_version() == 8
+      assert Migrations.expected_version() == 9
     end
 
     # sabotage: replaced V03.down/1's postgres?() guard with `true`, so
@@ -930,6 +930,315 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
     end
   end
 
+  # ADR-0008's 2026-11-19 Amendment, the storage half, on this adapter.
+  # `Host` leaves `linkage_columns:` at its default and `LinkedHost` sets
+  # it, over the same `sq_` tables: the first block is the host that
+  # changes nothing, the second the host that opts in.
+  describe "the linkage columns option left off on this adapter" do
+    # sabotage: made Storage.Ecto's linkage_columns?/1 ignore the option -> red here
+    # on `refute supports_linkage?`; and passed the default arm's insert its
+    # metadata minus the reserved key -> red here on `assert is_binary(stored)`.
+    # Each verified red, reverted from a copy.
+    test "a host that changes nothing stores and answers a linkage as before" do
+      store = sqlite_store()
+      opts = store.opts
+      linkage = Linkage.new("execution_loan_off", "renewals", 0, "sha256:loan-off-child")
+      child = Linkage.child_execution_id("execution_loan_off", "renewals", 0)
+
+      refute Storage.Ecto.supports_linkage?(opts)
+      refute Storage.linkage_supported?(store)
+      refute Enum.any?(Host.Execution.__schema__(:fields), &linkage_field?/1)
+
+      :ok =
+        Storage.Ecto.insert_execution(
+          opts,
+          raw_record(child, %{metadata: Linkage.to_metadata(linkage)})
+        )
+
+      assert %{rows: [[stored, nil, nil]]} =
+               SQL.query!(
+                 SqliteTestRepo,
+                 "SELECT metadata, linkage_parent_execution_id, linkage_content_hash " <>
+                   "FROM sq_executions WHERE execution_id = ?1",
+                 [child]
+               )
+
+      assert is_binary(stored)
+      assert JSON.decode!(stored) == Linkage.to_metadata(linkage)
+
+      assert {:ok, %{metadata: metadata}} = Storage.Ecto.fetch_execution(opts, child)
+      assert metadata == Linkage.to_metadata(linkage)
+
+      assert {:error, :metadata_unsupported} =
+               Storage.Ecto.list_executions_by_metadata(
+                 opts,
+                 Linkage.parent_match("execution_loan_off")
+               )
+
+      assert {:ok, %{children: 0}} =
+               Storage.Ecto.count_executions_by_content_hash(opts, "sha256:loan-off-child")
+    end
+  end
+
+  describe "V09 on this adapter" do
+    # sabotage: built V09's content-hash index on linkage_invoke_id -> red here
+    # on the index's column list, and red on its Postgres twin in
+    # MigrationsTest. Verified red, reverted from a copy.
+    test "the six linkage columns and their two indexes arrive here too" do
+      columns = columns("sq_executions")
+
+      for column <- ~w(linkage_parent_execution_id linkage_invoke_id linkage_child_index
+                       linkage_content_hash linkage_child_count linkage_policy) do
+        assert column in columns
+        refute column in not_null_columns("sq_executions")
+      end
+
+      indexes = indexes("sq_executions")
+
+      assert "sq_executions_linkage_parent_index" in indexes
+      assert "sq_executions_linkage_content_hash_index" in indexes
+
+      assert index_columns("sq_executions_linkage_parent_index") ==
+               ["linkage_parent_execution_id", "linkage_invoke_id"]
+
+      assert index_columns("sq_executions_linkage_content_hash_index") == [
+               "linkage_content_hash"
+             ]
+    end
+  end
+
+  describe "the linkage columns option on, on this adapter" do
+    # sabotage: made Storage.Ecto.supports_linkage?/1 answer false -> red on
+    # its first assertion. Verified red, reverted from a copy.
+    test "the store declares linkage and still declares no metadata" do
+      store = linked_store()
+
+      assert Storage.Ecto.supports_linkage?(store.opts)
+      assert Storage.linkage_supported?(store)
+      refute Storage.metadata_supported?(store)
+      assert Enum.count(LinkedHost.Execution.__schema__(:fields), &linkage_field?/1) == 6
+    end
+
+    # sabotage: kept the reserved key in the metadata the insert stores -> red
+    # on the stored metadata. Verified red, reverted from a copy.
+    test "an insert stores the linkage in the columns and a fetch hands it back under the key" do
+      opts = linked_store().opts
+      parent = "execution_loan_insert"
+      linkage = Linkage.new(parent, "renewals", 1, "sha256:loan-renewal", 3, :first_error)
+      child = Linkage.child_execution_id(parent, "renewals", 1)
+      metadata = Map.put(Linkage.to_metadata(linkage), "branch", "east")
+
+      :ok = Storage.Ecto.insert_execution(opts, raw_record(child, %{metadata: metadata}))
+
+      assert %{rows: [[stored | columns]]} =
+               SQL.query!(
+                 SqliteTestRepo,
+                 "SELECT metadata, linkage_parent_execution_id, linkage_invoke_id, " <>
+                   "linkage_child_index, linkage_content_hash, linkage_child_count, " <>
+                   "linkage_policy FROM sq_executions WHERE execution_id = ?1",
+                 [child]
+               )
+
+      assert JSON.decode!(stored) == %{"branch" => "east"}
+      assert columns == [parent, "renewals", 1, "sha256:loan-renewal", 3, "first_error"]
+
+      assert {:ok, %{metadata: ^metadata}} = Storage.Ecto.fetch_execution(opts, child)
+      assert {:ok, ^linkage} = Linkage.from_metadata(metadata)
+    end
+
+    # sabotage: dropped with_linkage/2's no-linkage clause, so a plain row came
+    # back with an empty reserved map -> red on `metadata == %{}`. Verified
+    # red, reverted from a copy.
+    test "a record with no linkage keeps its metadata and its columns stay empty" do
+      opts = linked_store().opts
+      execution_id = "execution_loan_plain"
+
+      :ok = Storage.Ecto.insert_execution(opts, raw_record(execution_id))
+
+      assert %{rows: [[nil, nil]]} =
+               SQL.query!(
+                 SqliteTestRepo,
+                 "SELECT metadata, linkage_parent_execution_id FROM sq_executions " <>
+                   "WHERE execution_id = ?1",
+                 [execution_id]
+               )
+
+      assert {:ok, %{metadata: metadata}} = Storage.Ecto.fetch_execution(opts, execution_id)
+      assert metadata == %{}
+    end
+
+    # sabotage: let linkage_column_values/1 skip a pair its columns cannot
+    # hold -> red on the unknown-key insert, which stored. Verified red,
+    # reverted from a copy.
+    test "a reserved value the columns cannot hold is refused at open and writes nothing" do
+      opts = linked_store().opts
+      reserved = Linkage.reserved_key()
+
+      for {suffix, value} <- [
+            {"no_parent", %{"invoke_id" => "renewals"}},
+            {"unknown_key", %{"parent_execution_id" => "execution_loan_x", "branch" => "east"}},
+            {"wrong_type", %{"parent_execution_id" => "execution_loan_x", "child_index" => "0"}},
+            {"not_a_map", "execution_loan_x"}
+          ] do
+        execution_id = "execution_loan_refused_" <> suffix
+
+        assert {:error, :metadata_unsupported} =
+                 Storage.Ecto.insert_execution(
+                   opts,
+                   raw_record(execution_id, %{metadata: %{reserved => value}})
+                 )
+
+        assert {:error, :execution_not_found} = Storage.Ecto.fetch_execution(opts, execution_id)
+      end
+    end
+
+    # sabotage: let linkage_condition/2 drop a pair its columns cannot hold
+    # -> red on the unknown-key match, which listed the children. Verified
+    # red, reverted from a copy.
+    test "the two listings answer a match on the reserved key by equality on the columns" do
+      opts = linked_store().opts
+      parent = "execution_loan_list"
+
+      for {invoke_id, index} <- [{"renewals", 0}, {"renewals", 1}, {"holds", 0}] do
+        linkage = Linkage.new(parent, invoke_id, index, "sha256:loan-list")
+
+        :ok =
+          Storage.Ecto.insert_execution(
+            opts,
+            raw_record(Linkage.child_execution_id(parent, invoke_id, index), %{
+              metadata: Linkage.to_metadata(linkage)
+            })
+          )
+      end
+
+      :ok =
+        Storage.Ecto.insert_execution(
+          opts,
+          raw_record("execution_loan_list_other/renewals/0", %{
+            metadata:
+              Linkage.to_metadata(
+                Linkage.new("execution_loan_list_other", "renewals", 0, "sha256:loan-list")
+              )
+          })
+        )
+
+      assert {:ok, children} =
+               Storage.Ecto.list_executions_by_metadata(opts, Linkage.parent_match(parent))
+
+      assert children |> Enum.map(& &1.execution_id) |> Enum.sort() == [
+               parent <> "/holds/0",
+               parent <> "/renewals/0",
+               parent <> "/renewals/1"
+             ]
+
+      assert Enum.all?(children, &match?({:ok, _linkage}, Linkage.from_metadata(&1.metadata)))
+
+      assert {:ok, states} =
+               Storage.Ecto.list_execution_states_by_metadata(
+                 opts,
+                 Linkage.invocation_match(parent, "renewals")
+               )
+
+      assert Enum.sort_by(states, & &1.child_index) == [
+               %{execution_id: parent <> "/renewals/0", status: :active, child_index: 0},
+               %{execution_id: parent <> "/renewals/1", status: :active, child_index: 1}
+             ]
+
+      reserved = Linkage.reserved_key()
+
+      # A pair no stored linkage can hold matches nothing, as containment
+      # would answer it.
+      assert {:ok, []} =
+               Storage.Ecto.list_executions_by_metadata(opts, %{
+                 reserved => %{"parent_execution_id" => parent, "child_index" => "0"}
+               })
+
+      assert {:ok, []} =
+               Storage.Ecto.list_executions_by_metadata(opts, %{
+                 reserved => %{"parent_execution_id" => parent, "branch" => "east"}
+               })
+
+      # A host key is still metadata this store does not hold.
+      assert {:error, :metadata_unsupported} =
+               Storage.Ecto.list_executions_by_metadata(opts, %{"branch" => "east"})
+
+      assert {:error, :metadata_unsupported} =
+               Storage.Ecto.list_execution_states_by_metadata(
+                 opts,
+                 Map.put(Linkage.parent_match(parent), "branch", "east")
+               )
+    end
+
+    # sabotage: made column_linkage_update/3 write nothing for a linked row ->
+    # red on the re-pinned hash. Verified red, reverted from a copy.
+    test "a step's update carries the columns forward and a re-pin rewrites the pin" do
+      opts = linked_store().opts
+      parent = "execution_loan_repin"
+      linkage = Linkage.new(parent, "renewals", 0, "sha256:loan-repin-old")
+      child = Linkage.child_execution_id(parent, "renewals", 0)
+      record = raw_record(child, %{metadata: Linkage.to_metadata(linkage)})
+
+      :ok = Storage.Ecto.insert_execution(opts, record)
+      :ok = Storage.Ecto.update_execution(opts, %{record | position_blob: "stepped"})
+
+      assert {:ok, %{metadata: metadata, position_blob: "stepped"}} =
+               Storage.Ecto.fetch_execution(opts, child)
+
+      assert metadata == Linkage.to_metadata(linkage)
+
+      :ok =
+        Storage.Ecto.write_tree_migration(opts, [
+          {:repin, %{record | content_hash: "sha256:loan-repin-new"}, "sha256:loan-repin-new"}
+        ])
+
+      assert {:ok, %{metadata: repinned}} = Storage.Ecto.fetch_execution(opts, child)
+
+      assert {:ok, %Linkage{content_hash: "sha256:loan-repin-new", invoke_id: "renewals"}} =
+               Linkage.from_metadata(repinned)
+    end
+
+    # sabotage: put children_pin_count/2 back on supports_metadata?/1 alone ->
+    # red on `children: 1`. Verified red, reverted from a copy.
+    test "the pin count reads the columns while the parent pins" do
+      opts = linked_store().opts
+      parent = "execution_loan_pins"
+      pin = "sha256:loan-pins-child"
+      child = Linkage.child_execution_id(parent, "renewals", 0)
+
+      :ok = Storage.Ecto.insert_execution(opts, raw_record(parent))
+
+      :ok =
+        Storage.Ecto.insert_execution(
+          opts,
+          raw_record(child, %{
+            content_hash: "sha256:loan-pins-elsewhere",
+            metadata: Linkage.to_metadata(Linkage.new(parent, "renewals", 0, pin))
+          })
+        )
+
+      :ok =
+        Storage.Ecto.save_chart(opts, %{
+          content_hash: pin,
+          identity_blob: "identity-bytes",
+          chart_blob: "chart-bytes"
+        })
+
+      assert {:ok, %{children: 1, active: 0}} =
+               Storage.Ecto.count_executions_by_content_hash(opts, pin)
+
+      assert {:error, {:pinned, %{children: 1}}} =
+               Storage.Ecto.retire_chart(opts, pin, %{
+                 retired_at: DateTime.utc_now(),
+                 retired_by: "ops@example.test",
+                 sources: %{}
+               })
+
+      :ok = Storage.Ecto.update_execution(opts, raw_record(parent, %{status: :completed}))
+
+      assert {:ok, %{children: 0}} = Storage.Ecto.count_executions_by_content_hash(opts, pin)
+    end
+  end
+
   defp event(name), do: %Event{name: name, type: :external}
 
   defp logged_execution(store, execution_id) do
@@ -940,6 +1249,32 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
 
     execution_id
   end
+
+  defp linked_store do
+    {:ok, store} = Storage.new(Storage.Ecto, persistence: LinkedHost)
+    store
+  end
+
+  # A stored execution in the adapter's own record shape, for the cases
+  # that drive the callbacks directly.
+  defp raw_record(execution_id, overrides \\ %{}) do
+    Map.merge(
+      %{
+        execution_id: execution_id,
+        status: :active,
+        content_hash: "sha256:loan-chart",
+        identity_blob: "identity-bytes",
+        position_blob: "position-bytes",
+        failure: nil,
+        metadata: %{},
+        outcome_blob: nil,
+        ended_at: nil
+      },
+      overrides
+    )
+  end
+
+  defp linkage_field?(field), do: field |> Atom.to_string() |> String.starts_with?("linkage_")
 
   defp sqlite_store do
     {:ok, store} = Storage.new(Storage.Ecto, persistence: Host)
@@ -1198,6 +1533,12 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
   defp columns(table) do
     %{rows: rows} = SQL.query!(SqliteTestRepo, "PRAGMA table_info(#{table})", [])
     Enum.map(rows, fn row -> Enum.at(row, 1) end)
+  end
+
+  # PRAGMA index_info's third column is the indexed column's name.
+  defp index_columns(index) do
+    %{rows: rows} = SQL.query!(SqliteTestRepo, "PRAGMA index_info(#{index})", [])
+    Enum.map(rows, fn row -> Enum.at(row, 2) end)
   end
 
   defp indexes(table) do
