@@ -1280,7 +1280,7 @@ What was re-read before the flip:
 
 ## Amendment (2026-11-19, sp-lp5): a durable child's linkage can have a home outside `metadata` on a backend that cannot store `metadata`, for a host that opts in, and a host can read an execution's active children
 
-Status of this amendment: proposed (2026-11-19, sp-lp5). The record above
+Status of this amendment: accepted (2026-11-19, sp-lp5). The record above
 stays accepted; this amendment is proposed until the code that implements
 it ships in a published version and every claim below verifies against
 `main` at that version. Every cite below was read on `main` at `ce3cd44`.
@@ -1518,3 +1518,84 @@ declaration: an adapter can host durable children without hosting a
 host's `metadata`. No other decision in this record moves. The sp-3n2
 Amendment's "still no join table" stands, because the columns sit on the
 child's own row.
+
+## Note (2026-11-19): the sp-lp5 Amendment is accepted
+
+The 2026-11-19 sp-lp5 Amendment is accepted on 2026-11-19, under the
+operator's standing grant to flip a record whose code has shipped. The
+code that implements it landed in PR 297 (`b842b3f`, the option, V09 and
+the adapter's second home), PR 298 (`1f3e8da`, the facade's linkage
+predicate and the SQLite cases) and PR 299 (`bad360e`, the reader), and
+shipped in statifier_persistence 0.26.0 (tag `v0.26.0`, `679802a`,
+published on Hex 2026-11-19 by the release workflow). That Amendment's
+own status line flips in place from proposed to accepted; its sentence
+that it "is proposed until the code that implements it ships in a
+published version and every claim below verifies against `main` at that
+version" is met by this Note and stays as written, and the record above
+stays accepted. Every cite below was read at `679802a`, the tag, which is
+also `main`: no commit has landed on `main` since the tag.
+
+What was re-read before the flip:
+
+- **Point 1, the seam.** `lib/statifier_persistence/driver.ex`,
+  `lib/statifier_persistence/execution/linkage.ex` and
+  `lib/statifier_persistence/execution.ex` carry no change since `ce3cd44`;
+  the adapter behaviour's one change is the optional
+  `supports_linkage?/1` callback; `Linkage.from_metadata/1` is still the
+  one reader of a stored linkage above the adapter.
+- **Point 2, the facade.** `Storage.linkage_supported?/1` has
+  `metadata_supported?/1`'s shape. `check_metadata_supported/2` admits a
+  map holding the reserved key alone on such a store and refuses any host
+  key; `child_listing_supported?/1` and `execution_states_supported?/1`
+  read `linkage_storable?/1`; the two listings refuse any other match
+  through `listing_open?/3`, asking `metadata_supported?/1` first. The
+  `Driver` doors still read the predicates alone (`start_child/3`,
+  `perform/5`, `settleable/4`).
+- **Point 3, the second home.** `StatifierPersistence.Ecto.Config` takes
+  `linkage_columns:`, a boolean defaulting to `false`; the generated
+  execution schema names the six columns only when it is `true`
+  (`table_fields/2` in `lib/statifier_persistence/ecto.ex`).
+  `lib/statifier_persistence/ecto/migrations/v09.ex` adds the six
+  nullable columns and the two indexes, touches no row, and its `down/1`
+  drops both indexes and the columns; the `@migrations` map in
+  `migrations.ex` now runs to 9, so `expected_version/0` answers `9`. In
+  `lib/statifier_persistence/storage/ecto.ex`, `linkage_columns?/1` is
+  true only with the option on and `supports_metadata?/1` false, so
+  `supports_linkage?/1` is false on Postgres; `insert_execution/2` splits
+  the reserved key into the columns (`split_linkage/1`), a read rebuilds
+  it (`with_linkage/2`), the two listings answer by equality on the
+  columns (`linkage_match/2`), `linkage_update/3` rewrites
+  `linkage_content_hash` on a re-pin and `child_pins/2` counts the
+  columns. The `jsonb` fragments the Postgres arms issue are the ones
+  `ce3cd44` issued.
+- **Point 3, the reference embedder.** `StatifierExamples.Persistence`
+  at statifier_examples `0831aa3` still delegates `insert_execution/2`,
+  `fetch_execution/2`, `update_execution/2` and `write_tree_migration/2`
+  to the shipped adapter, answers `supports_metadata?/1` with `true`,
+  and answers the two listings and the pin count itself.
+- **Points 4 and 5.** Nothing in V09 or the adapter rewrites a stored
+  linkage: `column_linkage_update/3` falls back to the `metadata` key
+  for a row whose columns hold none. The "0.25 to 0.26" section of
+  `docs/upgrading.md` says the three things point 5 names.
+- **Point 6.** `StatifierPersistence.Serialization.AdapterLock` still
+  delegates to `lock_execution/3`, and `docs/non-postgres-backends.md`
+  carries "Declining the lock callback" and the consequence of a child
+  created inside its parent's serialization section.
+- **Point 7, the reader.** `Executions.active_children/2` lists through
+  `Storage.list_executions_by_metadata/2` over `Linkage.parent_match/1`,
+  keeps `:active` and `:needs_migration`, orders by invocation id then
+  index, and fetches no parent;
+  `test/statifier_persistence/executions_active_children_test.exs`
+  carries its cases.
+- **Point 8, the tests.**
+  `test/statifier_persistence/ecto/sqlite_migrations_test.exs` carries
+  the V09 columns, the option left off, the option on, and the durable
+  children cases under `PassThroughSerialization`, with the outside fail
+  answering the parent with the option on and inert with it off.
+  `driver_subchart_ecto_test.exs` and `driver_fanout_ecto_test.exs` carry
+  no change since `ce3cd44`.
+- **The changelog.** The 0.26.0 section of `CHANGELOG.md` names the
+  option, V09, the callback and predicate, and the reader under Added,
+  and the facade's answers on such a store under Changed. It also names
+  a `:supports_linkage?` call in the adapter telemetry off Postgres with
+  the option off; no answer changes there, which is what point 3 says.
