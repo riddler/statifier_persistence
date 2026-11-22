@@ -38,6 +38,7 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
   alias StatifierPersistence.Execution.Linkage
   alias StatifierPersistence.SqliteTestRepo
   alias StatifierPersistence.SqliteTestRepo.{Host, LinkedHost}
+  alias StatifierPersistence.Test.LoopingSubchart
 
   defmodule MigrateSqlite do
     @moduledoc false
@@ -1394,6 +1395,56 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
       assert leaves(reload(store, @parent_source, parent)) == ["approved"]
     end
 
+    # ADR-0008's 2026-11-22 Amendment with the linkage in the columns: a
+    # later pass's id is the only new thing a loop writes, and it is an
+    # execution id, so the six columns hold every pass's linkage as they are.
+    # sabotage: in Driver's first_child/2, adopted a child at the first id
+    # whatever its status (the 0.26.0 rule) -> red on SQLite, one child
+    # listed where two were asserted. Verified red, reverted from a copy.
+    test "two passes of a loop start two children in order and the parent goes on" do
+      store = linked_store()
+      parent = "execution_loan_renewals_sqlite_1"
+      driver = loop_driver(store)
+      first = Linkage.child_execution_id(parent, LoopingSubchart.invoke_id(), 0)
+
+      assert {:ok, _execution, _machine_state} = Driver.create(driver, parent)
+      assert LoopingSubchart.children(store, parent) == [{first, :active}]
+
+      assert {:ok, %{status: :completed}, _machine_state} = LoopingSubchart.approve(driver, first)
+      assert [{^first, :completed}, {second, :active}] = LoopingSubchart.children(store, parent)
+      assert String.starts_with?(second, first <> "@")
+
+      assert {:ok, %{status: :completed}, _machine_state} =
+               LoopingSubchart.approve(driver, second)
+
+      assert LoopingSubchart.leaves(store, "myapp:map", parent) == ["renewed_all"]
+    end
+
+    # sabotage: in Driver's later_pass/5, refused a child found at the later
+    # pass's id instead of adopting it -> red on SQLite, the refusal sent
+    # the parent to "refused", whose exit cancelled the second pass's
+    # child. Verified red, reverted from a copy.
+    test "a re-drive of a loop's second pass adopts its child" do
+      store = linked_store()
+      parent = "execution_loan_renewals_sqlite_2"
+      driver = loop_driver(store)
+      first = Linkage.child_execution_id(parent, LoopingSubchart.invoke_id(), 0)
+
+      assert {:ok, _execution, _machine_state} = Driver.create(driver, parent)
+      before_second_pass = LoopingSubchart.record(store, parent)
+
+      assert {:ok, %{status: :completed}, _machine_state} = LoopingSubchart.approve(driver, first)
+      assert [{^first, :completed}, {second, :active}] = LoopingSubchart.children(store, parent)
+
+      :ok = LoopingSubchart.lose_step(store, before_second_pass)
+
+      assert {:ok, _execution, _machine_state} =
+               Driver.answer_parent(driver, first, {:done, nil})
+
+      assert [{^first, :completed}, {^second, :active}] = LoopingSubchart.children(store, parent)
+      assert LoopingSubchart.leaves(store, "myapp:map", parent) == ["renewing"]
+    end
+
     # sabotage: put Storage.execution_states_supported?/1 back on
     # metadata_supported?/1 alone -> red, start_child_at/6 refused
     # `:execution_states_unsupported`. Verified red, reverted from a copy.
@@ -1526,6 +1577,10 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
     :ok = Storage.insert_execution(store, execution_id, machine_state, :active)
 
     execution_id
+  end
+
+  defp loop_driver(store) do
+    LoopingSubchart.driver(store, "myapp:map", serialization: {PassThroughSerialization, nil})
   end
 
   defp linked_store do

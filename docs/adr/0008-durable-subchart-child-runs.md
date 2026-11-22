@@ -1599,3 +1599,174 @@ What was re-read before the flip:
   and the facade's answers on such a store under Changed. It also names
   a `:supports_linkage?` call in the adapter telemetry off Postgres with
   the option off; no answer changes there, which is what point 3 says.
+
+## Amendment (2026-11-22, sp-5pfj): every pass of a loop over a durable subchart gets a child of its own, and a re-drive of a pass still adopts that pass's child
+
+Status of this amendment: proposed (2026-11-22, sp-5pfj). The record above
+stays accepted; this amendment is proposed until the code that implements
+it ships in a published version and every claim below verifies against
+`main` at that version. Every cite below to code that predates this change
+was read on `main` at `46746e4`; code this change adds is cited by name
+alone.
+
+Decision 3 creates a single child under one derived id,
+`Linkage.child_execution_id/3`, the parent's execution id, the invoke id
+and the index joined by `/` (`lib/statifier_persistence/execution/linkage.ex`,
+read at `46746e4`). A create that answers `:execution_exists` is read as
+ADR-0004 decision 3's at-least-once re-drive, and the existing child is
+adopted when its linkage names the same parent and invocation
+(`adopt_child/3` in `lib/statifier_persistence/driver.ex`, read at
+`46746e4`). That reading assumed one invocation of an `<invoke>` element
+per parent. A loop breaks it. A loop re-enters the invoking state, and an
+`<invoke>` with an authored `id` keeps that id on every pass: the
+interpreter generates an id only for an element that has none
+(`generate_invoke_id/3` in statifier 2.15.0's
+`lib/statifier/interpreter.ex`). So the second pass asked for the first
+pass's id, adopted the first pass's finished child, and the parent waited
+for an answer that had already been given. Ruled by the operator,
+2026-11-22: the fix lives in statifier_persistence, recorded here with the
+code, with no change to statifier_blocks.
+
+**1. A pass is named by the parent's macrostep and round on the invoke
+effect.** `Linkage.invocation/1` (in this change) writes
+`"<macrostep>.<round>"` from the `macrostep` and `round` fields of the
+`Statifier.Effect.Invoke` the interpreter emitted
+(`lib/statifier/effect/invoke.ex` in statifier 2.15.0). Both counters are
+part of the persisted position (`Position.to_binary/1` drops neither, in
+statifier 2.15.0's `lib/statifier/position.ex`), so a re-drive, which
+steps the same event from the same stored position, stamps the same two
+values. A later pass cannot. Leaving the invoking state and entering it
+again takes either a later macrostep (`begin_macrostep/1` raises the
+count once per external event and resets `round` to 0) or a later round of
+the same one, which is the case a macrostep's invoke pass re-entered after
+an internal event makes possible; `round` is what tells those two apart,
+and it is why the token is not the macrostep alone. The token is computed
+from the effect the interpreter emitted, never from the effect a dispatch
+handler answers with, so a handler that rebuilds the effect cannot change
+it.
+
+**2. The first pass keeps its id; a later pass's id extends it.** A single
+child is still created under `Linkage.child_execution_id/3` on its first
+pass, so a fresh child of an `<invoke>` outside a loop is stored under
+exactly the id it was stored under before. That is deliberate: a host
+derives that id to show or open a child (the reference embedder's
+execution feed does, `child_execution_id/2` in statifier_examples'
+`lib/statifier_examples/charts/durable.ex`, read at `44e6f4a`), and every child already stored keeps its id. A later
+pass's child is created under `Linkage.child_execution_id/4` (in this
+change), the first pass's id, then `@`, then the pass's token, for example
+`loan_9/renewal/0@5.1`. It still strictly extends the parent's id, so the
+acyclicity the cascade's termination rests on (decision 5) holds. The
+linkage stored on every pass's child is the same four values a single
+child's linkage has carried since the sp-3n2 Amendment: the pass is in the id, and nothing is added to the reserved map, to
+the V09 columns of the 2026-11-19 Amendment, or to any adapter's schema.
+
+**3. Which id a pass takes, and what it adopts.** A single child is read
+for before it is created (`existing/2` and `create_child/6` in
+`lib/statifier_persistence/driver.ex`, in this change):
+
+| What the read finds at the first pass's id | What the pass does |
+|---|---|
+| nothing | creates its child there |
+| a child linked to this parent and invocation that has not ended | adopts it: the re-drive of decision 3, as before |
+| a child linked to this parent and invocation that has ended (`:completed`, `:failed` or `:cancelled`) | goes to its own id under point 2: creates its child there, or adopts the child it finds there when that child is linked to this parent and invocation |
+| a child linked to anything else | refuses `:execution_exists`, as before |
+
+A child that has ended is an earlier pass's, never this pass's re-drive in
+the ordinary case: the first pass's state is entered again only after it
+was left, and leaving it either followed the child's answer or cancelled
+the child through decision 5's cascade, which reaches a parked child too
+(`Executions.cancel/3`'s documentation, read at `46746e4`). One case reads
+otherwise, and this amendment accepts it. A first pass's child created by a
+drive that was interrupted before the parent persisted, and that then
+ended before the re-drive, is not adopted: the re-drive creates a later
+pass's child and runs it. Adopting it instead would leave the parent
+waiting for good, because the ended child's answer reached a parent that
+did not hold the invocation and was discarded (`late_answer/3` in
+`lib/statifier_persistence/driver.ex`, read at `46746e4`). A later pass
+has no such case: its id carries its token, so a child found there is that
+pass's, and a re-drive of it adopts it whatever its status.
+
+The read comes before the create, rather than the adoption read after a
+refused create, because on Postgres the refused insert aborts the parent's
+own lock transaction, and nothing can be read inside it afterwards; on
+`0.26.0` a re-drive that found its child already created there raised
+`in_failed_sql_transaction`. The parent's own exclusion is what keeps the
+read and the create together: nothing else creates a parent's single
+child. A fan-out's child, created outside the parent's step by
+`Driver.start_child_at/6`, keeps the create-then-adopt order.
+
+**4. The exit of a pass cancels that pass's child, not the next one's.**
+A loop's exit from the invoking state and its entry again land in one
+step, so a re-drive of that step runs decision 5's cancel for the
+invocation being left before the invoke of the new pass. Decision 5's walk
+matches every child of the invocation's id (`Linkage.invocation_match/2`),
+which would also reach a later pass's child that the interrupted drive
+had already created, and cancel the child the re-drive is about to adopt.
+So the `{:cancel_invoke, _}` arm now spares a later pass's child whose
+token is at or after the cancel effect's own macrostep and round
+(`started_before?/3` in `lib/statifier_persistence/driver.ex`, in this
+change), through an internal narrowing of the walk's first level
+(`Executions.cascade_cancel_where/4`, undocumented, in this change).
+Everything that walk reached before is still reached: the first pass's
+child, a fan-out's children, and a later pass's child whose token is
+earlier than the cancel's. `Executions.cascade_cancel/3` is unchanged.
+
+**5. Nothing stored before this change moves.** A row written by `0.26.0`
+or earlier sits at the first pass's id with the same four linkage values,
+and point 3 reads it by the same rule: a child still running is adopted,
+answered and cancelled as before. No migration version is added, no
+stored value is rewritten, and a storage adapter a host wrote against
+`0.26.0` sees the same records, the same matches and only execution ids of
+a new shape, which an adapter already stores as opaque strings.
+
+**6. A fan-out is not decided here.** `Driver.start_child_at/6`, its
+children's ids under `Linkage.child_execution_id/3`, its adoption rule and
+its settlement are unchanged. A fan-out whose invoking state a loop
+re-enters still asks for the first pass's ids; that is left to a later
+record.
+
+**What a host sees.** Two functions are added,
+`Linkage.child_execution_id/4` and `Linkage.invocation/1`, and a host that
+derives a later pass's child id uses them with the pass's invoke effect.
+`[:statifier_persistence, :child, :started]` carries the id the child was
+created or adopted under, a later pass's included; no event, key or value
+is added. The read of point 3 is an adapter call like any other, so
+`[:statifier_persistence, :adapter, :call]` now reports a
+`:fetch_execution` before a single child's `:insert_execution`, with
+`outcome: :error` and `reason: :execution_not_found` when the id is free,
+which is the ordinary case; a later pass reports one such read for each id
+it tries. The changelog fragment names these under Added, Changed and
+Fixed.
+
+Choices weighed and not taken:
+
+- **A count of the starts of an invoke id, kept per parent.** A count read
+  at the start of a pass is the same on the pass that follows a finished
+  one and on the re-drive of a pass whose child was created before the
+  crash, so it cannot tell them apart without a second stored mark.
+- **The token stored in the linkage.** Exact for every pass, first
+  included, but the V09 columns hold exactly six values
+  (`@linkage_columns` in `lib/statifier_persistence/storage/ecto.ex`, read
+  at `46746e4`), so it needs a seventh column and a migration
+  version for a host with `linkage_columns: true`, and it changes the
+  stored map a host adapter reads.
+- **Every single child under a token id.** Exact for every pass too, but it
+  moves the id of every fresh single child, which hosts derive today.
+- **An invoke id generated per pass by the compiler.** A statifier_blocks
+  change, which the ruling above rules out.
+
+Where this is proved:
+
+| Store | Two passes, in order, the parent goes on | A re-drive of the second pass adopts its child |
+|---|---|---|
+| In-memory adapter | `driver_subchart_loop_test.exs` | `driver_subchart_loop_test.exs` |
+| Ecto adapter on Postgres, under `AdapterLock` | `driver_subchart_ecto_test.exs` | `driver_subchart_ecto_test.exs` |
+| Ecto adapter on SQLite, `linkage_columns: true` | `ecto/sqlite_migrations_test.exs` | `ecto/sqlite_migrations_test.exs` |
+
+`driver_subchart_loop_test.exs` also carries a loop left mid-pass twice,
+which cancels the first pass's child and then a later pass's;
+`driver_subchart_ecto_test.exs` carries a single child's re-drive on
+Postgres; `execution_linkage_test.exs` carries the two new functions. All
+paths are under `test/statifier_persistence/`.
+
+No other decision in this record moves.

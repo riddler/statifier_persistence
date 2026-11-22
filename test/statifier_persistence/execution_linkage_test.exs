@@ -70,6 +70,30 @@ defmodule StatifierPersistence.ExecutionLinkageTest do
     end
   end
 
+  describe "child_execution_id/4 and invocation/1 (a later pass of a loop)" do
+    # sabotage: invocation/1 answered "#{macrostep}" without the round ->
+    # red, two invocations in one macrostep answered the same token.
+    # Verified red, reverted from a copy.
+    test "invocation/1 is the effect's macrostep and round, and tells them apart" do
+      assert Linkage.invocation(effect(4, 2)) == "4.2"
+      assert Linkage.invocation(effect(4, 2)) == Linkage.invocation(effect(4, 2))
+      refute Linkage.invocation(effect(4, 2)) == Linkage.invocation(effect(4, 3))
+      refute Linkage.invocation(effect(4, 2)) == Linkage.invocation(effect(5, 2))
+    end
+
+    # sabotage: child_execution_id/4 answered child_execution_id/3's id,
+    # dropping the invocation -> red, the later pass's id equalled the
+    # first pass's. Verified red, reverted from a copy.
+    test "extends the first pass's id by the invocation, so passes never share an id" do
+      first = Linkage.child_execution_id("execution_loan_7", "renewal", 0)
+      later = Linkage.child_execution_id("execution_loan_7", "renewal", 0, "4.2")
+
+      assert later == first <> "@4.2"
+      refute Linkage.child_execution_id("execution_loan_7", "renewal", 0, "5.1") == later
+      assert String.starts_with?(later, "execution_loan_7")
+    end
+  end
+
   describe "parent_match/1 and invocation_match/2" do
     # sabotage: parent_match/1's inner map key changed from "parent_execution_id"
     # to "WRONG_KEY" -> red, the assertion below failed on the mismatched
@@ -191,6 +215,17 @@ defmodule StatifierPersistence.ExecutionLinkageTest do
           },
           extra
         )
+    }
+  end
+
+  defp effect(macrostep, round) do
+    %Statifier.Effect.Invoke{
+      invoke_id: "renewal",
+      state_index: 0,
+      invoke_index: 0,
+      macrostep: macrostep,
+      microstep: 0,
+      round: round
     }
   end
 end

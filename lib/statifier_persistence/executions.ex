@@ -2566,6 +2566,32 @@ defmodule StatifierPersistence.Executions do
     end
   end
 
+  @doc false
+  # `cascade_cancel/3` with the top level narrowed to the matched children
+  # `cancel?` answers `true` for, the walk below each of them unchanged.
+  # The Driver's `{:cancel_invoke, _}` arm is the one caller: a loop's exit
+  # and re-entry of an invoking state land in one step, and that exit
+  # cancels the invocation being left, never a child a later pass of the
+  # same `<invoke>` already started from an interrupted drive of the same
+  # step (ADR-0008's 2026-11-22 Amendment).
+  @spec cascade_cancel_where(
+          Storage.t(),
+          Adapter.metadata(),
+          (execution_id() -> boolean()),
+          keyword()
+        ) :: {:ok, non_neg_integer()} | {:error, error()}
+  def cascade_cancel_where(%Storage{} = store, metadata_match, cancel?, opts \\ [])
+      when is_function(cancel?, 1) do
+    with {:ok, records} <- Storage.list_executions_by_metadata(store, metadata_match),
+         {:ok, {cancelled, retained}} <-
+           records
+           |> Enum.filter(&cancel?.(&1.execution_id))
+           |> Enum.reduce_while({:ok, {0, 0}}, &cascade_step(store, &1, opts, &2)) do
+      emit_cascade(metadata_match, cancelled, retained)
+      {:ok, cancelled}
+    end
+  end
+
   # The recursive half. It is separate from the public function for one
   # reason: `[:statifier_persistence, :child, :cascade_cancelled]` reports
   # the whole sweep once (ADR-0009 decision 3's fourth bullet), and a
