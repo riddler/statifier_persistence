@@ -6,9 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Entries for unreleased work are not written here directly. Each issue drops a
-fragment in [`changelog.d/`](https://github.com/riddler/statifier_persistence/blob/v0.26.0/changelog.d/README.md); the fragments are assembled
+fragment in [`changelog.d/`](https://github.com/riddler/statifier_persistence/blob/v0.27.0/changelog.d/README.md); the fragments are assembled
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
+
+## [0.27.0] 2026-11-22
+
+Feature release: a durable subchart inside a loop now starts a child for every pass, where the second pass adopted the first pass's finished child and the parent waited for good, and `StatifierPersistence.Execution.Linkage.child_execution_id/4` with `Linkage.invocation/1` derives a later pass's child id. On Postgres a re-driven step that finds its single child already created adopts it, where 0.26.0 raised.
+
+Upgrading: no migration and no stored value moves; a host that derives a later pass's child id itself uses the two new functions, and a handler on the adapter telemetry sees the extra calls named under Changed. See "0.26 to 0.27" in the upgrading page.
+
+### Added
+
+- `StatifierPersistence.Execution.Linkage.child_execution_id/4` and `StatifierPersistence.Execution.Linkage.invocation/1`: the id of a later pass's durable subchart child, and the pass token it ends in (the parent's macrostep and round on the invoke effect, written `"<macrostep>.<round>"`).
+
+### Changed
+
+- Starting a single durable subchart child reads for the child before creating it, so `[:statifier_persistence, :adapter, :call]` reports a `:fetch_execution` ahead of the `:insert_execution`, with `outcome: :error` and `reason: :execution_not_found` for a fresh child. A handler that alerts on every `:error` outcome of that event treats `:execution_not_found` from `:fetch_execution` as ordinary. A single child's answer, through `Driver.answer_parent/3` or the automatic answer, also adds a `:list_executions_by_metadata` call to that event while the invocation is live; on a store that cannot list children the facade refuses that read and no such call is made.
+
+### Fixed
+
+- A single durable child's answer reaches its parent only when that child is the newest of its invocation's children. Every pass of a loop shares the invoke id, so the invoke id alone cannot tell them apart: a duplicate answer of an earlier pass, delivered after the next pass started, is discarded, and `Driver.answer_parent/3` answers `{:discarded, execution}` for it, as it does for an invocation that is no longer live. This is exact on Postgres under the default `AdapterLock`. On a store where a child's create and its parent's step commit apart, such as the in-memory adapter, a later pass's child left by a lost drive ranks newest, so the waited-on pass's answer is discarded until that child ends and its answer is taken instead, and when no other step of the parent came between the lost drive and that answer, the next pass adopts that same child and takes its answer again (a known limit of this release). A later pass's child that ended before its pass was re-driven answers that pass when the re-drive adopts it.
+- A durable subchart inside a loop starts a child for every pass. Before, every pass of the same `<invoke>` element asked for the one id `Linkage.child_execution_id/3` derives, so the second pass adopted the first pass's finished child and the parent waited on it for good. The first pass's child keeps that id; a pass that finds it held by a child that has ended creates its own under `child_execution_id(parent, invoke_id, 0, invocation)`, and a re-drive of that pass adopts it. A child at the first id that has not ended is adopted as before, rows written by 0.26.0 included, and nothing is migrated. A host that derives a child's id to show or open it uses `child_execution_id/4` with `invocation/1` of the invoke effect for a pass after the first. A fan-out's children keep their ids.
+- On Postgres, a re-driven step that finds its single durable child already created adopts it. Before, the refused insert of the second create aborted the parent's own lock transaction and the adoption read that followed it raised; the child is now read for before it is created.
 
 ## [0.26.0] 2026-11-19
 
