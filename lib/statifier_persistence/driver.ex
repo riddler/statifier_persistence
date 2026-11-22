@@ -1095,7 +1095,7 @@ defmodule StatifierPersistence.Driver do
 
   # A single child's answer, through the same door `respond_to_parent/3`
   # takes, with one more condition on the parent's liveness read: the
-  # answering child is the invocation's newest (`current_pass?/2`). A loop
+  # answering child is the invocation's newest (`current_pass?/3`). A loop
   # reuses the invoke id on every pass, so the invoke id alone cannot tell
   # an earlier pass's duplicate answer from the answer of the pass the
   # parent is waiting on (ADR-0008's 2026-11-22 Amendment, point 3).
@@ -2277,11 +2277,19 @@ defmodule StatifierPersistence.Driver do
 
   # A later pass's child found at its own id is this pass's, from a drive
   # interrupted before the parent persisted. Running, it is adopted. Ended,
-  # its answer was never taken for this pass, which the parent had not
-  # started, so it is adopted and answered from what its record holds:
+  # it is adopted and answered from what its record holds, because no step
+  # of the parent has taken its answer for this pass:
   # the recorded answer, or a failed child's `failure`. An ended child whose
   # record holds neither - a cancelled one, or a completed one on a store
   # that keeps no answer - cannot answer, and is refused as a clash.
+  #
+  # Its answer may already have been taken for the pass before, on a store
+  # where a child's create and the parent's step commit apart: a stray
+  # ranks newest (`current_pass?/3`), and when no other step of the parent
+  # comes between the lost drive and the stray's answer, the step that
+  # answer drives re-uses the lost macrostep and round, so this pass derives
+  # the stray's own id and takes the same answer again. That is the known
+  # limit ADR-0008's 2026-11-22 Amendment names.
   @spec adopt_later(Adapter.execution_record(), Linkage.t()) ::
           :ok | {:answered, {:done, term()} | {:failed, keyword()}} | {:refused, term()}
   defp adopt_later(execution_record, linkage) do
