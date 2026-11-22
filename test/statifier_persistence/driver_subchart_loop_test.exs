@@ -205,5 +205,34 @@ defmodule StatifierPersistence.DriverSubchartLoopTest do
     assert LoopingSubchart.leaves(store, @type_name, parent) == ["renewing"]
   end
 
+  # The same known limit with no other step between the lost drive and the
+  # stray's answer: the stray's answer is taken for the first pass, and the
+  # step it drives re-uses the lost macrostep and round, so the second pass
+  # derives the stray's own id, adopts it and takes the same answer again.
+  # One child's answer satisfies both passes; the first pass's own answer
+  # is never taken.
+  # sabotage: in Driver's adopt_later/2, refused an ended child instead of
+  # answering from its record -> red, the parent landed in "refused"
+  # instead of "renewed_all". Verified red, reverted from a copy.
+  test "a stray's answer with no step between: it answers the first pass and the next", %{
+    store: store
+  } do
+    parent = "execution_loan_renewals_7"
+    driver = LoopingSubchart.driver(store, @type_name)
+    first = Linkage.child_execution_id(parent, LoopingSubchart.invoke_id(), 0)
+
+    assert {:ok, _execution, _machine_state} = Driver.create(driver, parent)
+    before_second_pass = LoopingSubchart.record(store, parent)
+
+    assert {:ok, %{status: :completed}, _machine_state} = LoopingSubchart.approve(driver, first)
+    assert [{^first, :completed}, {stray, :active}] = LoopingSubchart.children(store, parent)
+
+    :ok = LoopingSubchart.lose_step(store, before_second_pass)
+    assert {:ok, %{status: :completed}, _machine_state} = LoopingSubchart.approve(driver, stray)
+
+    assert [{^first, :completed}, {^stray, :completed}] = LoopingSubchart.children(store, parent)
+    assert LoopingSubchart.leaves(store, @type_name, parent) == ["renewed_all"]
+  end
+
   defp skip, do: Statifier.Event.external("skip")
 end

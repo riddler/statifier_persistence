@@ -1721,7 +1721,12 @@ parent's step separately - a lost drive can leave a later pass's child the
 parent never started. Ruled by the operator, 2026-11-22: that case is a
 known limit of this release, not decided here. Such a stray child ranks
 newest, so the answer of the pass the parent waits on is discarded until
-the stray ends; the stray's answer is then taken for that pass. If the
+the stray ends; the stray's answer is then taken for that pass. When no
+other step of the parent comes between the lost drive and the stray's
+answer, the step that answer drives re-uses the lost macrostep and round,
+so the next pass derives the stray's own id, adopts it and takes the same
+answer again (the second table): one child's answer satisfies both
+passes, and the waited-on pass's own answer is never taken. If the
 stray had already ended, the parent waits until the host delivers that
 stray's answer again. Routing exactly on every store needs the parent's
 persisted position to record each live invocation's counters, a later
@@ -1736,7 +1741,7 @@ So, case by case:
 | An earlier pass's answer, delivered again after the next pass started | discarded; the parent and the next pass's child are unchanged |
 | A later pass's child left by a lost drive, on Postgres under `AdapterLock` | cannot occur: the child's insert is undone with the step |
 | A later pass's child left by a lost drive, on a store where the two commit apart, which ends before the re-drive and whose answer the parent never took | the re-drive of that pass adopts it and delivers its recorded answer, by the second table |
-| The same stray child, on such a store, while the parent waits on the pass before it | the known limit above: the waited-on pass's answer is discarded until the stray ends, and the stray's answer is then taken for that pass |
+| The same stray child, on such a store, while the parent waits on the pass before it | the known limit above: the waited-on pass's answer is discarded until the stray ends, and the stray's answer is then taken for that pass; when no other step of the parent came between the lost drive and that answer, the next pass adopts the stray and takes the same answer again, so one answer satisfies both passes |
 | A first pass's child created by an interrupted drive, which ends before the re-drive | its answer is discarded, as on `0.26.0` (the stored position holds no live invocation of that id); the re-drive finds it ended at the first pass's id, reads it as an earlier pass's, and creates a later pass's child. **The cost this amendment accepts: that child's work runs twice.** The first pass's id carries no token, so this child cannot be told from an earlier pass's ended child; adopting it instead would leave the parent waiting for an answer already discarded |
 
 The read comes before the create, rather than the adoption read after a
@@ -1829,7 +1834,9 @@ the third row and the re-drive table row start from is built by putting the
 parent's record back, since a lost drive cannot leave it there;
 `ecto/loop_lost_drive_test.exs` carries the second row, a lost drive on
 Postgres that leaves no child behind, and `driver_subchart_loop_test.exs`
-pins the fourth, the known limit, on the in-memory adapter.
+pins the fourth, the known limit, on the in-memory adapter, both with
+another step between the lost drive and the stray's answer (a fresh child
+starts) and with none (the stray answers both passes).
 `driver_subchart_ecto_test.exs` also carries a single child's re-drive on
 Postgres; `execution_linkage_test.exs` carries the two new functions. All
 paths are under `test/statifier_persistence/`.
