@@ -236,6 +236,48 @@ defmodule StatifierPersistence.DriverSubchartEctoTest do
     assert LoopingSubchart.leaves(store, "myapp:subchart", parent) == ["renewed_all"]
   end
 
+  # sabotage: in Driver's current_pass?/4, answered true for every child
+  # -> red against Postgres, the duplicate was delivered and
+  # answer_parent/3 answered {:ok, ...}, not {:discarded, _}. Verified red,
+  # reverted from a copy.
+  test "a duplicate answer of a loop's earlier pass changes nothing", %{store: store} do
+    parent = "execution_ecto_renewals_3"
+    driver = LoopingSubchart.driver(store, "myapp:subchart")
+    first = Linkage.child_execution_id(parent, LoopingSubchart.invoke_id(), 0)
+
+    assert {:ok, _execution, _ms} = Driver.create(driver, parent)
+    assert {:ok, %{status: :completed}, _ms} = LoopingSubchart.approve(driver, first)
+    assert [{^first, :completed}, {second, :active}] = LoopingSubchart.children(store, parent)
+
+    assert {:discarded, _execution} = Driver.answer_parent(driver, first, {:done, nil})
+    assert [{^first, :completed}, {^second, :active}] = LoopingSubchart.children(store, parent)
+    assert LoopingSubchart.leaves(store, "myapp:subchart", parent) == ["renewing"]
+  end
+
+  # sabotage: in Driver's adopt_later/2, refused an ended child instead of
+  # answering from its record -> red against Postgres, the parent landed in
+  # "refused". Verified red, reverted from a copy.
+  test "a loop's later-pass child that ended before the re-drive answers its pass", %{
+    store: store
+  } do
+    parent = "execution_ecto_renewals_4"
+    driver = LoopingSubchart.driver(store, "myapp:subchart")
+    first = Linkage.child_execution_id(parent, LoopingSubchart.invoke_id(), 0)
+
+    assert {:ok, _execution, _ms} = Driver.create(driver, parent)
+    before_second_pass = LoopingSubchart.record(store, parent)
+
+    assert {:ok, %{status: :completed}, _ms} = LoopingSubchart.approve(driver, first)
+    assert [{^first, :completed}, {second, :active}] = LoopingSubchart.children(store, parent)
+
+    :ok = LoopingSubchart.lose_step(store, before_second_pass)
+    assert {:ok, %{status: :completed}, _ms} = LoopingSubchart.approve(driver, second)
+    assert LoopingSubchart.leaves(store, "myapp:subchart", parent) == ["renewing"]
+
+    assert {:ok, _execution, _ms} = Driver.answer_parent(driver, first, {:done, nil})
+    assert LoopingSubchart.leaves(store, "myapp:subchart", parent) == ["renewed_all"]
+  end
+
   defp nesting_dispatch do
     fn "myapp:subchart", _params, %{invoke_id: invoke_id} ->
       content = if invoke_id == "call", do: @nesting_child_source, else: @child_source

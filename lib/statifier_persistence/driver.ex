@@ -748,7 +748,7 @@ defmodule StatifierPersistence.Driver do
     case parent_link(driver.store, child_execution_id) do
       {:ok, %Linkage{child_count: nil} = linkage} ->
         record_single_answer(driver, child_execution_id, donedata_or_failure)
-        result = respond_to_parent(driver, linkage, donedata_or_failure)
+        result = respond_as_child(driver, linkage, child_execution_id, donedata_or_failure)
         report_answered(child_execution_id, linkage, donedata_or_failure, result)
         result
 
@@ -1078,7 +1078,11 @@ defmodule StatifierPersistence.Driver do
   # are telemetry only (sp-8wv's ADR-0009 amendment): they are what
   # makes the step span carrying a whole fan-out's assembled answer
   # recognisable as that, and not an ordinary invocation answer.
-  @spec respond_to_parent(t(), Linkage.t(), {:done, term()} | {:failed, keyword()}) :: result()
+  #
+  # A fan-out's assembled answer is the one this carries: a settlement
+  # answers with a list, even when an index failed. A single child answers
+  # through `respond_as_child/4`.
+  @spec respond_to_parent(t(), Linkage.t(), {:done, term()}) :: result()
   defp respond_to_parent(driver, %Linkage{} = linkage, {:done, donedata}) do
     done_invocation(
       driver,
@@ -1089,14 +1093,99 @@ defmodule StatifierPersistence.Driver do
     )
   end
 
-  defp respond_to_parent(driver, %Linkage{} = linkage, {:failed, failure}) do
-    failed_invocation(
+  # A single child's answer, through the same door `respond_to_parent/3`
+  # takes, with one more condition on the parent's liveness read: the
+  # answering child is the invocation's current pass (`current_pass?/4`).
+  # A loop reuses the invoke id on every pass, so the invoke id alone
+  # cannot tell an earlier pass's duplicate answer, or the answer of a
+  # later pass's child that an interrupted drive created, from the answer
+  # of the pass the parent is waiting on (ADR-0008's 2026-11-22
+  # Amendment, point 3).
+  @spec respond_as_child(
+          t(),
+          Linkage.t(),
+          Executions.execution_id(),
+          {:done, term()} | {:failed, keyword()}
+        ) :: result()
+  defp respond_as_child(driver, %Linkage{} = linkage, child_execution_id, answer) do
+    reenter(
       driver,
       linkage.parent_execution_id,
+      answer_opts(linkage),
       linkage.invoke_id,
-      failure,
-      answer_opts(linkage)
+      answer,
+      &current_pass?(driver.store, linkage, child_execution_id, &1)
     )
+  end
+
+  # Whether `child_execution_id` is the child of the pass the parent's
+  # stored position is waiting on: the newest of the invocation's children
+  # that position could have started. The first pass's child is the oldest;
+  # a later pass's child is ordered by its token (`Linkage.invocation/1`),
+  # and one whose macrostep is after the position's own was started by a
+  # drive the parent never persisted, so it cannot be the one waited on. A
+  # listing that fails keeps the invoke id's own liveness read as the whole
+  # check, which is the rule before this one.
+  @spec current_pass?(Storage.t(), Linkage.t(), Executions.execution_id(), MachineState.t()) ::
+          boolean()
+  defp current_pass?(store, %Linkage{} = linkage, child_execution_id, %MachineState{} = position) do
+    first = Linkage.child_execution_id(linkage.parent_execution_id, linkage.invoke_id, 0)
+    match = Linkage.invocation_match(linkage.parent_execution_id, linkage.invoke_id)
+
+    case Storage.list_executions_by_metadata(store, match) do
+      {:ok, records} ->
+        records
+        |> Enum.flat_map(&pass_order(&1.execution_id, first, position.macrostep))
+        |> Enum.max_by(fn {_execution_id, order} -> order end, fn -> nil end)
+        |> case do
+          {^child_execution_id, _order} -> true
+          _other -> false
+        end
+
+      {:error, _reason} ->
+        true
+    end
+  end
+
+  # `[{execution_id, order}]` for a child the position could have started,
+  # `[]` for any other: the first pass's id orders before every token, and
+  # a later pass's id orders by its token's macrostep and round.
+  @spec pass_order(Executions.execution_id(), Executions.execution_id(), non_neg_integer()) ::
+          [{Executions.execution_id(), {integer(), integer()}}]
+  defp pass_order(first, first, _macrostep), do: [{first, {-1, -1}}]
+
+  defp pass_order(execution_id, first, macrostep) do
+    case later_pass_token(execution_id, first) do
+      {:ok, {pass_macrostep, _round} = token} when pass_macrostep <= macrostep ->
+        [{execution_id, token}]
+
+      _not_reachable ->
+        []
+    end
+  end
+
+  # The `{macrostep, round}` a later pass's id ends in
+  # (`Linkage.child_execution_id/4`), or `:error` for any id not of that
+  # shape under `first`.
+  @spec later_pass_token(Executions.execution_id(), Executions.execution_id()) ::
+          {:ok, {non_neg_integer(), non_neg_integer()}} | :error
+  defp later_pass_token(execution_id, first) do
+    prefix = first <> "@"
+
+    with true <- String.starts_with?(execution_id, prefix),
+         invocation =
+           binary_part(
+             execution_id,
+             byte_size(prefix),
+             byte_size(execution_id) - byte_size(prefix)
+           ),
+         [macrostep, round] <- String.split(invocation, "."),
+         {macrostep, ""} <- Integer.parse(macrostep),
+         {round, ""} <- Integer.parse(round) do
+      {:ok, {macrostep, round}}
+    else
+      _not_a_later_pass -> :error
+    end
   end
 
   @spec answer_opts(Linkage.t()) :: keyword()
@@ -1648,13 +1737,17 @@ defmodule StatifierPersistence.Driver do
           Executions.execution_id(),
           keyword(),
           String.t(),
-          {:done, term()} | {:failed, keyword()}
+          {:done, term()} | {:failed, keyword()},
+          (MachineState.t() -> boolean())
         ) :: result()
-  defp reenter(driver, execution_id, opts, invoke_id, answer) do
+  defp reenter(driver, execution_id, opts, invoke_id, answer, current? \\ fn _ms -> true end) do
     with :ok <- check_function_providers(driver, opts) do
       ref = make_ref()
       opts = Keyword.put_new(opts, :entry, door(answer))
-      builder = fn machine_state -> late_answer(machine_state, invoke_id, answer) end
+
+      builder = fn machine_state ->
+        late_answer(machine_state, invoke_id, answer, current?)
+      end
 
       result =
         advance(
@@ -1676,10 +1769,19 @@ defmodule StatifierPersistence.Driver do
   # runs the other way over the same map. An id with no entry is an
   # invocation that was cancelled, or that already answered and left its
   # state - either way there is nothing live for this answer to reach.
-  @spec late_answer(MachineState.t(), String.t(), {:done, term()} | {:failed, keyword()}) ::
+  #
+  # `current?` is the answering child's own condition, read under the same
+  # exclusion: `respond_as_child/4`'s pass check, and always `true` for an
+  # answer that names an invocation rather than a child.
+  @spec late_answer(
+          MachineState.t(),
+          String.t(),
+          {:done, term()} | {:failed, keyword()},
+          (MachineState.t() -> boolean())
+        ) ::
           {:ok, Event.t()} | :discard
-  defp late_answer(%MachineState{} = machine_state, invoke_id, answer) do
-    if invoke_id in Map.values(machine_state.active_invocations) do
+  defp late_answer(%MachineState{} = machine_state, invoke_id, answer, current?) do
+    if invoke_id in Map.values(machine_state.active_invocations) and current?.(machine_state) do
       {:ok, answer_event(machine_state, invoke_id, answer)}
     else
       :discard
@@ -1932,6 +2034,13 @@ defmodule StatifierPersistence.Driver do
           :ok ->
             :ok
 
+          # A later pass's child an interrupted drive created, which ended
+          # before this re-drive adopted it: its answer was discarded then
+          # (`current_pass?/4`), so it is delivered now, from its record,
+          # to the invocation this step just started.
+          {:answered, answer} ->
+            buffer(reader, ref, invoke, answer)
+
           {:refused, detail} ->
             buffer(
               reader,
@@ -2003,21 +2112,9 @@ defmodule StatifierPersistence.Driver do
   @spec started_before?(Executions.execution_id(), Executions.execution_id(), CancelInvoke.t()) ::
           boolean()
   defp started_before?(child_execution_id, first, %CancelInvoke{} = cancel) do
-    prefix = first <> "@"
-
-    with true <- String.starts_with?(child_execution_id, prefix),
-         invocation =
-           binary_part(
-             child_execution_id,
-             byte_size(prefix),
-             byte_size(child_execution_id) - byte_size(prefix)
-           ),
-         [macrostep, round] <- String.split(invocation, "."),
-         {macrostep, ""} <- Integer.parse(macrostep),
-         {round, ""} <- Integer.parse(round) do
-      {macrostep, round} < {cancel.macrostep, cancel.round}
-    else
-      _not_a_later_pass -> true
+    case later_pass_token(child_execution_id, first) do
+      {:ok, token} -> token < {cancel.macrostep, cancel.round}
+      :error -> true
     end
   end
 
@@ -2040,7 +2137,8 @@ defmodule StatifierPersistence.Driver do
   # `create/3` or the adoption read answers with - the last two being
   # decision 4's one durable-only reason, a child execution that could not be
   # created. Counting the arms is not the invariant; the single return is.
-  @spec start_child(t(), Invoke.t(), dispatch_context()) :: :ok | {:refused, term()}
+  @spec start_child(t(), Invoke.t(), dispatch_context()) ::
+          :ok | {:answered, {:done, term()} | {:failed, keyword()}} | {:refused, term()}
   defp start_child(driver, %Invoke{} = resolved, context) do
     result =
       if Storage.child_listing_supported?(driver.store) do
@@ -2052,7 +2150,7 @@ defmodule StatifierPersistence.Driver do
     report_refusal(result, context)
   end
 
-  @spec report_refusal(:ok | {:refused, term()}, dispatch_context()) :: :ok | {:refused, term()}
+  @spec report_refusal(result, dispatch_context()) :: result when result: term()
   defp report_refusal({:refused, reason} = result, context) do
     Telemetry.child_refused(
       parent_execution_id: context.execution_id,
@@ -2069,7 +2167,7 @@ defmodule StatifierPersistence.Driver do
   # (`Statifier.Invoke.Source`) - the durable path resolves a child exactly
   # as `Statifier.Session` does, rather than compiling it itself.
   @spec resolve_child(t(), Invoke.t(), dispatch_context(), fan_out()) ::
-          :ok | {:refused, term()}
+          :ok | {:answered, {:done, term()} | {:failed, keyword()}} | {:refused, term()}
   defp resolve_child(driver, resolved, context, fan_out) do
     case Source.resolve(resolved, []) do
       {:ok, child_machine} -> identify_child(driver, resolved, context, child_machine, fan_out)
@@ -2081,7 +2179,7 @@ defmodule StatifierPersistence.Driver do
   # cannot be guarded on reload, so a child that resolves to one is refused
   # rather than started unpinned.
   @spec identify_child(t(), Invoke.t(), dispatch_context(), Machine.t(), fan_out()) ::
-          :ok | {:refused, term()}
+          :ok | {:answered, {:done, term()} | {:failed, keyword()}} | {:refused, term()}
   defp identify_child(driver, resolved, context, child_machine, fan_out) do
     case Machine.identity(child_machine) do
       nil ->
@@ -2126,7 +2224,7 @@ defmodule StatifierPersistence.Driver do
   # created outside the parent's step, keeps the create-then-adopt order
   # and the one adoption rule it has always had.
   @spec create_child(t(), Invoke.t(), dispatch_context(), Machine.t(), String.t(), fan_out()) ::
-          :ok | {:refused, term()}
+          :ok | {:answered, {:done, term()} | {:failed, keyword()}} | {:refused, term()}
   defp create_child(driver, resolved, context, child_machine, content_hash, nil) do
     {child_index, linkage} = child_linkage(context, content_hash, nil)
 
@@ -2162,7 +2260,7 @@ defmodule StatifierPersistence.Driver do
   # there, it can only be this same pass's child from an interrupted drive,
   # so it is adopted under the same linkage check as any other.
   @spec later_pass(t(), Invoke.t(), dispatch_context(), Machine.t(), Linkage.t()) ::
-          :ok | {:refused, term()}
+          :ok | {:answered, {:done, term()} | {:failed, keyword()}} | {:refused, term()}
   defp later_pass(driver, resolved, context, child_machine, linkage) do
     child_execution_id =
       Linkage.child_execution_id(
@@ -2174,8 +2272,45 @@ defmodule StatifierPersistence.Driver do
 
     case existing(driver.store, child_execution_id) do
       :absent -> create_or_adopt(driver, resolved, child_machine, child_execution_id, linkage)
-      {:ok, execution_record} -> adopt(execution_record, linkage)
+      {:ok, execution_record} -> adopt_later(execution_record, linkage)
       {:refused, _reason} = refused -> refused
+    end
+  end
+
+  # A later pass's child found at its own id is this pass's, from a drive
+  # interrupted before the parent persisted. Running, it is adopted. Ended,
+  # its answer reached a parent still waiting on the pass before and was
+  # discarded, so it is adopted and answered from what its record holds:
+  # the recorded answer, or a failed child's `failure`. An ended child whose
+  # record holds neither - a cancelled one, or a completed one on a store
+  # that keeps no answer - cannot answer, and is refused as a clash.
+  @spec adopt_later(Adapter.execution_record(), Linkage.t()) ::
+          :ok | {:answered, {:done, term()} | {:failed, keyword()}} | {:refused, term()}
+  defp adopt_later(execution_record, linkage) do
+    cond do
+      not same_invocation?(execution_record, linkage) ->
+        {:refused, :execution_exists}
+
+      not terminal?(execution_record.status) ->
+        report_started(execution_record.execution_id, linkage, nil)
+
+      answer = recorded_answer(execution_record) ->
+        report_started(execution_record.execution_id, linkage, nil)
+        {:answered, answer}
+
+      true ->
+        {:refused, :execution_exists}
+    end
+  end
+
+  @spec recorded_answer(Adapter.execution_record()) ::
+          {:done, term()} | {:failed, keyword()} | nil
+  defp recorded_answer(execution_record) do
+    case {decode_outcome(Map.get(execution_record, :outcome_blob)), execution_record.status} do
+      {{:done, _donedata} = answer, :completed} -> answer
+      {{:failed, _failure} = answer, :failed} -> answer
+      {nil, :failed} -> {:failed, reason: execution_record.failure}
+      _no_answer -> nil
     end
   end
 

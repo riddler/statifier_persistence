@@ -1668,23 +1668,55 @@ for before it is created (`existing/2` and `create_child/6` in
 |---|---|
 | nothing | creates its child there |
 | a child linked to this parent and invocation that has not ended | adopts it: the re-drive of decision 3, as before |
-| a child linked to this parent and invocation that has ended (`:completed`, `:failed` or `:cancelled`) | goes to its own id under point 2: creates its child there, or adopts the child it finds there when that child is linked to this parent and invocation |
+| a child linked to this parent and invocation that has ended (`:completed`, `:failed` or `:cancelled`) | goes to its own id under point 2, and acts on what it finds there by the second table below |
 | a child linked to anything else | refuses `:execution_exists`, as before |
 
-A child that has ended is an earlier pass's, never this pass's re-drive in
-the ordinary case: the first pass's state is entered again only after it
-was left, and leaving it either followed the child's answer or cancelled
-the child through decision 5's cascade, which reaches a parked child too
-(`Executions.cancel/3`'s documentation, read at `46746e4`). One case reads
-otherwise, and this amendment accepts it. A first pass's child created by a
-drive that was interrupted before the parent persisted, and that then
-ended before the re-drive, is not adopted: the re-drive creates a later
-pass's child and runs it. Adopting it instead would leave the parent
-waiting for good, because the ended child's answer reached a parent that
-did not hold the invocation and was discarded (`late_answer/3` in
-`lib/statifier_persistence/driver.ex`, read at `46746e4`). A later pass
-has no such case: its id carries its token, so a child found there is that
-pass's, and a re-drive of it adopts it whatever its status.
+| What the read finds at a later pass's own id | What the pass does |
+|---|---|
+| nothing | creates its child there |
+| a child linked to this parent and invocation that has not ended | adopts it |
+| a child linked to this parent and invocation that has ended with an answer its record holds (a recorded answer, or a failed child's `failure`) | adopts it and delivers that answer to the invocation it has just started, in the same drive (`adopt_later/2` and `recorded_answer/1`, in this change) |
+| a child linked to this parent and invocation that has ended with no answer its record holds (a cancelled child, or a completed one on a store that keeps no answer) | refuses `:execution_exists`, which reaches the chart as decision 4's `child_execution_creation_failed` |
+| a child linked to anything else | refuses `:execution_exists` |
+
+A child that has ended at the first pass's id is an earlier pass's, never
+this pass's re-drive in the ordinary case: the first pass's state is
+entered again only after it was left, and leaving it either followed the
+child's answer or cancelled the child through decision 5's cascade, which
+reaches a parked child too (`Executions.cancel/3`'s documentation, read at
+`46746e4`). A later pass's id carries its token, so a child found there is
+that pass's, from a drive interrupted before the parent persisted.
+
+**An answer reaches only the pass whose child it is.** The parent's door
+reads liveness by invoke id alone (`late_answer/3` in
+`lib/statifier_persistence/driver.ex`, read at `46746e4`), and a loop
+reuses the invoke id on every pass, so that read cannot tell the pass the
+parent waits on from any other. A single child's answer, from
+`Driver.answer_parent/3` or the automatic answer, is now delivered only
+when the answering child is the current pass's: the newest of the
+invocation's children that the parent's stored position could have
+started (`current_pass?/4`, in this change, read inside the parent's step
+under its exclusion). The first pass's child is the oldest; a later pass's
+child is ordered by its token; and a later pass's child whose macrostep is
+after the stored position's own was started by a drive the parent never
+persisted, so it is not counted. Any other single child's answer is
+discarded, exactly as an answer to an invocation that is no longer live is
+discarded today: `answer_parent/3` answers `{:discarded, execution}` and
+the parent's position is untouched. The answer stays recorded on the
+child's own record (the sp-51ah Amendment). An answer that names an
+invocation rather than a child, through `Driver.done_invocation/5` or
+`Driver.failed_invocation/5`, and a fan-out's settled answer, keep the
+invoke id's liveness read alone. If the listing of the invocation's
+children fails, the invoke id's liveness read alone decides, as before
+this change.
+
+So, case by case:
+
+| Case | What happens |
+|---|---|
+| An earlier pass's answer, delivered again after the next pass started | discarded; the parent and the next pass's child are unchanged |
+| A later pass's child created by an interrupted drive, which ends before the re-drive | its answer is discarded (its macrostep is after the stored position's); the re-drive of that pass adopts it and delivers its recorded answer, by the second table |
+| A first pass's child created by an interrupted drive, which ends before the re-drive | its answer is discarded, as on `0.26.0` (the stored position holds no live invocation of that id); the re-drive finds it ended at the first pass's id, reads it as an earlier pass's, and creates a later pass's child. **The cost this amendment accepts: that child's work runs twice.** The first pass's id carries no token, so this child cannot be told from an earlier pass's ended child; adopting it instead would leave the parent waiting for an answer already discarded |
 
 The read comes before the create, rather than the adoption read after a
 refused create, because on Postgres the refused insert aborts the parent's
@@ -1735,8 +1767,9 @@ is added. The read of point 3 is an adapter call like any other, so
 `:fetch_execution` before a single child's `:insert_execution`, with
 `outcome: :error` and `reason: :execution_not_found` when the id is free,
 which is the ordinary case; a later pass reports one such read for each id
-it tries. The changelog fragment names these under Added, Changed and
-Fixed.
+it tries. A single child's answer adds one
+`:list_executions_by_metadata` call, the current-pass read. The changelog
+fragment names these under Added, Changed and Fixed.
 
 Choices weighed and not taken:
 
@@ -1764,8 +1797,12 @@ Where this is proved:
 | Ecto adapter on SQLite, `linkage_columns: true` | `ecto/sqlite_migrations_test.exs` | `ecto/sqlite_migrations_test.exs` |
 
 `driver_subchart_loop_test.exs` also carries a loop left mid-pass twice,
-which cancels the first pass's child and then a later pass's;
-`driver_subchart_ecto_test.exs` carries a single child's re-drive on
+which cancels the first pass's child and then a later pass's.
+`driver_subchart_loop_test.exs` and `driver_subchart_ecto_test.exs` each
+carry the first two rows of the case table above: an earlier pass's
+answer delivered again is discarded, and a later pass's child that ended
+before the re-drive answers the pass that adopts it.
+`driver_subchart_ecto_test.exs` also carries a single child's re-drive on
 Postgres; `execution_linkage_test.exs` carries the two new functions. All
 paths are under `test/statifier_persistence/`.
 
