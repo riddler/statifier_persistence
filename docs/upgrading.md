@@ -1,7 +1,7 @@
-# Upgrading a host from 0.13 to 0.26.0
+# Upgrading a host from 0.13 to 0.27.0
 
 This page says what a host changes to move `statifier_persistence` from
-0.13.0 to 0.26.0, one minor at a time. A host here is the code that
+0.13.0 to 0.27.0, one minor at a time. A host here is the code that
 embeds the package: the module that calls `use StatifierPersistence.Ecto`,
 the migrations it runs, the options it passes to
 `StatifierPersistence.Executions` and `StatifierPersistence.Driver`, the
@@ -14,10 +14,11 @@ Take the minors in order, and move the pin with each one, as the README
 recommends: `{:statifier_persistence, "~> 0.14.0"}`, then `"~> 0.15.0"`,
 then `"~> 0.16.0"`, then `"~> 0.17.0"`, then `"~> 0.18.0"`, then
 `"~> 0.19.0"`, then `"~> 0.20.0"`, then `"~> 0.21.0"`, then `"~> 0.22.0"`,
-then `"~> 0.23.0"`, then `"~> 0.24.0"`, then `"~> 0.25.0"`, then `"~> 0.26.0"`.
+then `"~> 0.23.0"`, then `"~> 0.24.0"`, then `"~> 0.25.0"`, then `"~> 0.26.0"`,
+then `"~> 0.27.0"`.
 The `statifier` floor stays `~> 2.6` through 0.17.0; 0.18.0 moves it to
 `~> 2.9`, and every later release through 0.24.2 keeps it there; 0.25.0
-moves it to `~> 2.15`, and 0.26.0 keeps it there.
+moves it to `~> 2.15`, and 0.26.0 and 0.27.0 keep it there.
 
 ## Before you start: the database is at V07
 
@@ -42,7 +43,8 @@ nullable `linkage_*` columns on the executions table and two indexes. Only
 a host that sets the new `linkage_columns: true` option on
 `use StatifierPersistence.Ecto` needs it, and it runs V09 before deploying
 the code that sets the option; a host that leaves the option off may run
-V09 or leave it, because its schema names none of the columns.
+V09 or leave it, because its schema names none of the columns. 0.27.0
+adds no migration.
 
 ## If the database is older than V07: V03 and V04
 
@@ -802,3 +804,73 @@ whether children can be listed, and that call answers `false`.
   adapter on a backend that is not
   Postgres](non-postgres-backends.md#durable-subchart-children-the-linkage-columns)
   has the same list with the strategy's one new consequence.
+
+## 0.26 to 0.27: a durable subchart inside a loop
+
+0.27.0 makes a durable subchart inside a loop start a child for every
+pass. Before, every pass of the same `<invoke>` element asked for the one
+id `Linkage.child_execution_id/3` derives, so the second pass adopted the
+first pass's finished child and the parent waited on it for good. Schema:
+**NONE**. 0.27.0 adds no migration, rewrites no stored value, and keeps
+the `statifier` floor at `~> 2.15` (ADR-0008's 2026-11-22 Amendment,
+point 5). The points cited below are that Amendment's.
+
+- **If you have executions in flight under 0.26.0**, deploy 0.27.0 as it
+  is: **NONE**. A row written by 0.26.0 sits at the first pass's id with
+  the same four linkage values, and 0.27.0 reads it by the same rule: a
+  child still running is adopted, answered and cancelled as before
+  (point 5). A storage adapter of your own sees the same records and the
+  same matches, and only execution ids of a new shape, which it already
+  stores as opaque strings.
+- **If you derive a durable child's execution id yourself**, to show or
+  open it, keep `StatifierPersistence.Execution.Linkage.child_execution_id/3`
+  for a child of an `<invoke>` outside a loop and for the first pass's
+  child of one inside a loop: those ids do not move, apart from the last
+  bullet's case. A later pass's child
+  is stored under a new shape, the first pass's id, then `@`, then the
+  pass's token, for example `loan_9/renewal/0@5.1`. Derive it with
+  `Linkage.child_execution_id/4`, passing
+  `Linkage.invocation/1` of that pass's `Statifier.Effect.Invoke`, which
+  writes the parent's `macrostep` and `round` on the effect as
+  `"<macrostep>.<round>"` (points 1 and 2). A fan-out's children keep
+  their ids (point 6).
+- **If you attach a handler to `[:statifier_persistence, :adapter,
+  :call]`**, expect two more calls. Starting a single durable child reads
+  for it before creating it, so a `:fetch_execution` comes ahead of the
+  `:insert_execution`, with `outcome: :error` and `reason:
+  :execution_not_found` for a fresh child, which is the ordinary case; a
+  later pass reports one such read for each id it tries. A handler that
+  alerts on every `:error` outcome of that event treats this one as
+  ordinary. A single child's answer, through `Driver.answer_parent/3` or
+  the automatic answer, adds one `:list_executions_by_metadata` call while
+  the invocation is live; on a store that cannot list children the facade
+  refuses that read and no such call is made. No event, key or value is
+  added (the Amendment's "What a host sees").
+- **If you match the answers of `Driver.answer_parent/3`**, no arm is
+  added. A single child's answer reaches its parent only when that child
+  is the newest of its invocation's children; any other, such as an
+  earlier pass's answer delivered again after the next pass started, is
+  discarded with `{:discarded, execution}`, the answer an invocation that
+  is no longer live already gives, and the parent's position is untouched
+  (point 3). An answer that names an invocation, through
+  `Driver.done_invocation/5` or `Driver.failed_invocation/5`, and a
+  fan-out's settled answer read liveness as before.
+- **If you run the Ecto adapter on Postgres under the default
+  `AdapterLock`**, the routing above is exact, and a re-driven step that
+  finds its single child already created now adopts it, where 0.26.0
+  raised `in_failed_sql_transaction` (point 3). **NONE**.
+- **If your store creates a child outside the parent's transaction**,
+  such as the in-memory adapter, or a store or serialization that writes
+  the child and the parent's step separately, know the limit this release
+  names: a drive lost before the parent persisted can leave a later
+  pass's child the parent never started. That child ranks newest, so the
+  answer of the pass the parent waits on is discarded until it ends, and
+  its own answer is then taken for that pass; when no other step of the
+  parent came between, the next pass adopts the same child and takes the
+  same answer again. Re-deliver the event that drove the lost step
+  instead: that re-drive adopts the child as its own pass's. Ruled by the
+  operator, 2026-11-22: a known limit of this release (point 3).
+- **A first pass's child created by an interrupted drive, which ends
+  before the re-drive**, is read as an earlier pass's, and the re-drive
+  creates a later pass's child, so that child's work runs twice: the cost
+  point 3 accepts. **NONE** to do.
