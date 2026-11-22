@@ -1,0 +1,12 @@
+### Added
+
+- `StatifierPersistence.Execution.Linkage.child_execution_id/4` and `StatifierPersistence.Execution.Linkage.invocation/1`: the id of a later pass's durable subchart child, and the pass token it ends in (the parent's macrostep and round on the invoke effect, written `"<macrostep>.<round>"`).
+
+### Changed
+
+- Starting a single durable subchart child reads for the child before creating it, so `[:statifier_persistence, :adapter, :call]` reports a `:fetch_execution` ahead of the `:insert_execution`, with `outcome: :error` and `reason: :execution_not_found` for a fresh child. A handler that alerts on every `:error` outcome of that event treats `:execution_not_found` from `:fetch_execution` as ordinary.
+
+### Fixed
+
+- A durable subchart inside a loop starts a child for every pass. Before, every pass of the same `<invoke>` element asked for the one id `Linkage.child_execution_id/3` derives, so the second pass adopted the first pass's finished child and the parent waited on it for good. The first pass's child keeps that id; a pass that finds it held by a child that has ended creates its own under `child_execution_id(parent, invoke_id, 0, invocation)`, and a re-drive of that pass adopts it. A child at the first id that has not ended is adopted as before, rows written by 0.26.0 included, and nothing is migrated. A host that derives a child's id to show or open it uses `child_execution_id/4` with `invocation/1` of the invoke effect for a pass after the first. A fan-out's children keep their ids.
+- On Postgres, a re-driven step that finds its single durable child already created adopts it. Before, the refused insert of the second create aborted the parent's own lock transaction and the adoption read that followed it raised; the child is now read for before it is created.

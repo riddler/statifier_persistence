@@ -1963,17 +1963,26 @@ defmodule StatifierPersistence.Driver do
   # `Executions`'s own re-entry wave through `reentry_origin/1`'s existing
   # `:cancel_invoke` arm and re-enters the chart as `error.communication`,
   # exactly as any other executor failure on this effect does.
+  #
+  # The walk spares a later pass's child whose invocation is at or after
+  # this cancel's own counters: a loop's exit and re-entry land in one step,
+  # and a child that step already started, from a drive interrupted before
+  # the parent persisted, is the one the re-drive's invoke adopts, not the
+  # invocation this exit leaves (ADR-0008's 2026-11-22 Amendment).
   defp perform(
          driver,
-         {:cancel_invoke, %CancelInvoke{invoke_id: invoke_id}},
+         {:cancel_invoke, %CancelInvoke{invoke_id: invoke_id} = cancel},
          context,
          _reader,
          _ref
        ) do
     if Storage.child_listing_supported?(driver.store) do
-      case Executions.cascade_cancel(
+      first = Linkage.child_execution_id(context.execution_id, invoke_id, 0)
+
+      case Executions.cascade_cancel_where(
              driver.store,
              Linkage.invocation_match(context.execution_id, invoke_id),
+             &started_before?(&1, first, cancel),
              cascade_opts(driver)
            ) do
         {:ok, _newly_cancelled} -> :ok
@@ -1985,6 +1994,32 @@ defmodule StatifierPersistence.Driver do
   end
 
   defp perform(_driver, _effect, _context, _reader, _ref), do: :ok
+
+  # Whether the cancel reaches `child_execution_id`. Every child it always
+  # reached still answers `true`: the first pass's, a fan-out's, anything
+  # not under `first`'s later-pass shape. A later pass's child answers
+  # `true` only when its invocation's counters are strictly before the
+  # cancel's own (`Linkage.child_execution_id/4`, `Linkage.invocation/1`).
+  @spec started_before?(Executions.execution_id(), Executions.execution_id(), CancelInvoke.t()) ::
+          boolean()
+  defp started_before?(child_execution_id, first, %CancelInvoke{} = cancel) do
+    prefix = first <> "@"
+
+    with true <- String.starts_with?(child_execution_id, prefix),
+         invocation =
+           binary_part(
+             child_execution_id,
+             byte_size(prefix),
+             byte_size(child_execution_id) - byte_size(prefix)
+           ),
+         [macrostep, round] <- String.split(invocation, "."),
+         {macrostep, ""} <- Integer.parse(macrostep),
+         {round, ""} <- Integer.parse(round) do
+      {macrostep, round} < {cancel.macrostep, cancel.round}
+    else
+      _not_a_later_pass -> true
+    end
+  end
 
   @spec cascade_opts(t()) :: keyword()
   defp cascade_opts(%__MODULE__{serialization: nil}), do: []
@@ -2075,14 +2110,104 @@ defmodule StatifierPersistence.Driver do
   # (st-ADR-0078: inheritance is a later record). The driver
   # itself keeps the list, because the same driver answers the parent
   # once the child is terminal, and the parent's step takes it.
+  #
+  # A single child is read for before it is created, under
+  # `Linkage.child_execution_id/3` first. Found there, `first_child/2`
+  # reads whose it is: this invocation's own child, still running, is
+  # adopted (the at-least-once re-drive); one that has ended belongs to an
+  # earlier pass of the same `<invoke>` element - a loop re-entered its
+  # state - and this pass's child is created under
+  # `Linkage.child_execution_id/4` instead (ADR-0008's 2026-11-22
+  # Amendment). The read comes first because a refused insert can leave the
+  # parent's own lock transaction unusable on some backends (Postgres
+  # aborts it), so the adoption read after one could not run there; the
+  # parent's exclusion is what keeps the read and the create together, as
+  # nothing else creates this parent's single child. A fan-out child,
+  # created outside the parent's step, keeps the create-then-adopt order
+  # and the one adoption rule it has always had.
   @spec create_child(t(), Invoke.t(), dispatch_context(), Machine.t(), String.t(), fan_out()) ::
           :ok | {:refused, term()}
+  defp create_child(driver, resolved, context, child_machine, content_hash, nil) do
+    {child_index, linkage} = child_linkage(context, content_hash, nil)
+
+    child_execution_id =
+      Linkage.child_execution_id(context.execution_id, context.invoke_id, child_index)
+
+    case existing(driver.store, child_execution_id) do
+      :absent ->
+        create_or_adopt(driver, resolved, child_machine, child_execution_id, linkage)
+
+      {:ok, execution_record} ->
+        case first_child(execution_record, linkage) do
+          :adopt -> report_started(child_execution_id, linkage, nil)
+          :earlier_pass -> later_pass(driver, resolved, context, child_machine, linkage)
+          {:refused, _reason} = refused -> refused
+        end
+
+      {:refused, _reason} = refused ->
+        refused
+    end
+  end
+
   defp create_child(driver, resolved, context, child_machine, content_hash, fan_out) do
     {child_index, linkage} = child_linkage(context, content_hash, fan_out)
 
     child_execution_id =
       Linkage.child_execution_id(context.execution_id, context.invoke_id, child_index)
 
+    create_or_adopt(driver, resolved, child_machine, child_execution_id, linkage)
+  end
+
+  # A later pass's child, under the id its own invocation names. Found
+  # there, it can only be this same pass's child from an interrupted drive,
+  # so it is adopted under the same linkage check as any other.
+  @spec later_pass(t(), Invoke.t(), dispatch_context(), Machine.t(), Linkage.t()) ::
+          :ok | {:refused, term()}
+  defp later_pass(driver, resolved, context, child_machine, linkage) do
+    child_execution_id =
+      Linkage.child_execution_id(
+        context.execution_id,
+        context.invoke_id,
+        0,
+        Linkage.invocation(context.invoke)
+      )
+
+    case existing(driver.store, child_execution_id) do
+      :absent -> create_or_adopt(driver, resolved, child_machine, child_execution_id, linkage)
+      {:ok, execution_record} -> adopt(execution_record, linkage)
+      {:refused, _reason} = refused -> refused
+    end
+  end
+
+  # The read before a single child's create. Not found is the ordinary
+  # answer; any other read failure refuses the start, as a failed create
+  # always has.
+  @spec existing(Storage.t(), Executions.execution_id()) ::
+          :absent | {:ok, Adapter.execution_record()} | {:refused, term()}
+  defp existing(store, child_execution_id) do
+    case Storage.fetch_execution(store, child_execution_id) do
+      {:ok, execution_record} -> {:ok, execution_record}
+      {:error, :execution_not_found} -> :absent
+      {:error, reason} -> {:refused, reason}
+    end
+  end
+
+  # The create, and the adoption `{:error, :execution_exists}` has always
+  # led to.
+  @spec create_or_adopt(t(), Invoke.t(), Machine.t(), Executions.execution_id(), Linkage.t()) ::
+          :ok | {:refused, term()}
+  defp create_or_adopt(driver, resolved, child_machine, child_execution_id, linkage) do
+    case create_linked(driver, resolved, child_machine, child_execution_id, linkage) do
+      :exists -> adopt_child(driver.store, child_execution_id, linkage)
+      result -> result
+    end
+  end
+
+  # The create itself, shared by every id a child can be created under.
+  # `:exists` is the one answer the caller reads further.
+  @spec create_linked(t(), Invoke.t(), Machine.t(), Executions.execution_id(), Linkage.t()) ::
+          :ok | :exists | {:refused, term()}
+  defp create_linked(driver, resolved, child_machine, child_execution_id, linkage) do
     child_driver = %{driver | machine: child_machine}
     datamodel = Invocations.seed_datamodel(resolved.params, child_machine)
 
@@ -2095,7 +2220,7 @@ defmodule StatifierPersistence.Driver do
         report_started(child_execution_id, linkage, child_session_id(machine_state))
 
       {:error, :execution_exists} ->
-        adopt_child(driver.store, child_execution_id, linkage)
+        :exists
 
       {:error, reason} ->
         {:refused, reason}
@@ -2157,19 +2282,46 @@ defmodule StatifierPersistence.Driver do
           :ok | {:refused, term()}
   defp adopt_child(store, child_execution_id, linkage) do
     case Storage.fetch_execution(store, child_execution_id) do
-      {:ok, execution_record} ->
-        case Linkage.from_metadata(execution_record.metadata) do
-          {:ok, %Linkage{parent_execution_id: parent_execution_id, invoke_id: invoke_id}}
-          when parent_execution_id == linkage.parent_execution_id and
-                 invoke_id == linkage.invoke_id ->
-            report_started(child_execution_id, linkage, nil)
+      {:ok, execution_record} -> adopt(execution_record, linkage)
+      {:error, reason} -> {:refused, reason}
+    end
+  end
 
-          _other ->
-            {:refused, :execution_exists}
-        end
+  # `adopt_child/3`'s rule over a record already in hand.
+  @spec adopt(Adapter.execution_record(), Linkage.t()) :: :ok | {:refused, term()}
+  defp adopt(execution_record, linkage) do
+    if same_invocation?(execution_record, linkage),
+      do: report_started(execution_record.execution_id, linkage, nil),
+      else: {:refused, :execution_exists}
+  end
 
-      {:error, reason} ->
-        {:refused, reason}
+  # The first id of a single child, found taken. A child linked to this
+  # same parent and invocation that has not ended is this invocation's own,
+  # from a drive that was interrupted before the parent persisted: adopted,
+  # as `adopt_child/3` always has. One that has ended - completed, failed
+  # or cancelled - is not: an earlier pass's child has ended before its
+  # state is entered again (its answer moved the parent on, or the exit's
+  # cascade cancelled it), so this pass needs a child of its own. A row
+  # written before this rule, which records no pass, reads by the same
+  # rule. Anything else at the id is a genuine clash.
+  @spec first_child(Adapter.execution_record(), Linkage.t()) ::
+          :adopt | :earlier_pass | {:refused, term()}
+  defp first_child(execution_record, linkage) do
+    cond do
+      not same_invocation?(execution_record, linkage) -> {:refused, :execution_exists}
+      terminal?(execution_record.status) -> :earlier_pass
+      true -> :adopt
+    end
+  end
+
+  @spec same_invocation?(Adapter.execution_record(), Linkage.t()) :: boolean()
+  defp same_invocation?(execution_record, linkage) do
+    case Linkage.from_metadata(execution_record.metadata) do
+      {:ok, %Linkage{parent_execution_id: parent_execution_id, invoke_id: invoke_id}} ->
+        parent_execution_id == linkage.parent_execution_id and invoke_id == linkage.invoke_id
+
+      :no_linkage ->
+        false
     end
   end
 

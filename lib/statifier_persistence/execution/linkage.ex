@@ -41,6 +41,16 @@ defmodule StatifierPersistence.Execution.Linkage do
   never seen the parent live be placed at its index (ADR-0008's sp-3n2
   amendment, point 2).
 
+  ## A later pass of a loop
+
+  A loop that re-enters an invoking state starts the same `<invoke>`
+  element again, under the same invoke id. The first pass's single child
+  takes `child_execution_id/3`'s id, as every single child always has; a
+  later pass's child takes `child_execution_id/4`'s, which adds the pass's
+  `invocation/1` (ADR-0008's 2026-11-22 Amendment). The linkage itself is
+  the same four values for every pass: the pass is in the id, not in the
+  stored map.
+
   ## The two fan-out values
 
   `child_count` and `policy` are the amendment's ordered set expressed
@@ -60,6 +70,7 @@ defmodule StatifierPersistence.Execution.Linkage do
   constant, never personal data.
   """
 
+  alias Statifier.Effect.Invoke
   alias StatifierPersistence.Storage.Adapter
 
   @typedoc """
@@ -276,6 +287,11 @@ defmodule StatifierPersistence.Execution.Linkage do
   acyclicity property the cascade in Phase 5 rests on: no execution can be its
   own descendant, because every descendant's id is strictly longer than
   its ancestor's.
+
+  This is the id of every fan-out child and of the first pass's single
+  child. A later pass of the same `<invoke>` element, which a loop starts,
+  takes `child_execution_id/4`'s id instead (ADR-0008's 2026-11-22
+  Amendment).
   """
   @spec child_execution_id(
           parent_execution_id :: Adapter.execution_id(),
@@ -286,6 +302,52 @@ defmodule StatifierPersistence.Execution.Linkage do
       when is_binary(parent_execution_id) and is_binary(invoke_id) and
              is_integer(child_index) and child_index >= 0 do
     parent_execution_id <> "/" <> invoke_id <> "/" <> Integer.to_string(child_index)
+  end
+
+  @doc """
+  A later pass's child execution id (ADR-0008's 2026-11-22 Amendment):
+  `child_execution_id/3`'s id, then `"@"`, then `invocation`.
+
+      parent_execution_id <> "/" <> invoke_id <> "/" <> Integer.to_string(child_index)
+        <> "@" <> invocation
+
+  A loop re-enters the same invoking state, so every pass starts the same
+  `<invoke>` element under the same invoke id. The first pass's child keeps
+  `child_execution_id/3`'s id; a pass that finds that id taken by a child
+  that has already ended is a later pass, and its child is created here,
+  under the `invocation/1` of its own invoke effect. `invocation` is the
+  same on an at-least-once re-drive of that pass and different on any
+  other pass, so the adapter's `:execution_exists` refusal still answers
+  the re-drive. The result strictly extends `parent_execution_id`, so the
+  acyclicity `child_execution_id/3` names holds here too.
+  """
+  @spec child_execution_id(
+          parent_execution_id :: Adapter.execution_id(),
+          invoke_id :: String.t(),
+          child_index :: non_neg_integer(),
+          invocation :: String.t()
+        ) :: Adapter.execution_id()
+  def child_execution_id(parent_execution_id, invoke_id, child_index, invocation)
+      when is_binary(invocation) and invocation != "" do
+    child_execution_id(parent_execution_id, invoke_id, child_index) <> "@" <> invocation
+  end
+
+  @doc """
+  The token that tells one invocation of an `<invoke>` element from a later
+  one of the same element in the same parent: the parent's `macrostep` and
+  `round` counters as the interpreter stamped them on the invoke effect,
+  written `"<macrostep>.<round>"`.
+
+  Both counters are part of the parent's persisted position, so a re-drive
+  of the step, from the same position with the same event, stamps the same
+  two values. A later pass cannot: leaving the invoking state and entering
+  it again takes at least one more round of the same macrostep, or a later
+  macrostep.
+  """
+  @spec invocation(Invoke.t()) :: String.t()
+  def invocation(%Invoke{macrostep: macrostep, round: round})
+      when is_integer(macrostep) and macrostep >= 0 and is_integer(round) and round >= 0 do
+    Integer.to_string(macrostep) <> "." <> Integer.to_string(round)
   end
 
   @doc """
