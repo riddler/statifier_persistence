@@ -1420,6 +1420,9 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
       assert LoopingSubchart.leaves(store, "myapp:map", parent) == ["renewed_all"]
     end
 
+    # Here the child's create and the parent's step commit apart
+    # (`PassThroughSerialization`), so a lost persist can leave this
+    # state: the second pass's child stored, the parent back on the first.
     # sabotage: in Driver's later_pass/5, refused a child found at the later
     # pass's id instead of adopting it -> red on SQLite, the refusal sent
     # the parent to "refused", whose exit cancelled the second pass's
@@ -1433,15 +1436,17 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
       assert {:ok, _execution, _machine_state} = Driver.create(driver, parent)
       before_second_pass = LoopingSubchart.record(store, parent)
 
-      assert {:ok, %{status: :completed}, _machine_state} = LoopingSubchart.approve(driver, first)
-      assert [{^first, :completed}, {second, :active}] = LoopingSubchart.children(store, parent)
+      assert {:ok, _execution, _machine_state} =
+               Driver.send_event(driver, parent, Event.external("skip"))
+
+      assert [{^first, :cancelled}, {second, :active}] = LoopingSubchart.children(store, parent)
 
       :ok = LoopingSubchart.lose_step(store, before_second_pass)
 
       assert {:ok, _execution, _machine_state} =
-               Driver.answer_parent(driver, first, {:done, nil})
+               Driver.send_event(driver, parent, Event.external("skip"))
 
-      assert [{^first, :completed}, {^second, :active}] = LoopingSubchart.children(store, parent)
+      assert [{^first, :cancelled}, {^second, :active}] = LoopingSubchart.children(store, parent)
       assert LoopingSubchart.leaves(store, "myapp:map", parent) == ["renewing"]
     end
 

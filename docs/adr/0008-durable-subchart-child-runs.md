@@ -1687,35 +1687,56 @@ reaches a parked child too (`Executions.cancel/3`'s documentation, read at
 `46746e4`). A later pass's id carries its token, so a child found there is
 that pass's, from a drive interrupted before the parent persisted.
 
-**An answer reaches only the pass whose child it is.** The parent's door
+**An answer reaches only the newest pass's child.** The parent's door
 reads liveness by invoke id alone (`late_answer/3` in
 `lib/statifier_persistence/driver.ex`, read at `46746e4`), and a loop
 reuses the invoke id on every pass, so that read cannot tell the pass the
 parent waits on from any other. A single child's answer, from
 `Driver.answer_parent/3` or the automatic answer, is now delivered only
-when the answering child is the current pass's: the newest of the
-invocation's children that the parent's stored position could have
-started (`current_pass?/4`, in this change, read inside the parent's step
-under its exclusion). The first pass's child is the oldest; a later pass's
-child is ordered by its token; and a later pass's child whose macrostep is
-after the stored position's own was started by a drive the parent never
-persisted, so it is not counted. Any other single child's answer is
-discarded, exactly as an answer to an invocation that is no longer live is
-discarded today: `answer_parent/3` answers `{:discarded, execution}` and
-the parent's position is untouched. The answer stays recorded on the
-child's own record (the sp-51ah Amendment). An answer that names an
-invocation rather than a child, through `Driver.done_invocation/5` or
+when the invoke id reads live and the answering child is the newest of the
+invocation's single-child ids (`current_pass?/3`, in this change, read
+inside the parent's step under its exclusion): the first pass's child is
+the oldest, and a later pass's child is ordered by its token. Any other
+single child's answer is discarded, exactly as an answer to an invocation
+that is no longer live is discarded today: `answer_parent/3` answers
+`{:discarded, execution}` and the parent's position is untouched. The
+answer stays recorded on the child's own record where the store keeps one
+(the sp-51ah Amendment). An answer that names an invocation rather than a
+child, through `Driver.done_invocation/5` or
 `Driver.failed_invocation/5`, and a fan-out's settled answer, keep the
 invoke id's liveness read alone. If the listing of the invocation's
 children fails, the invoke id's liveness read alone decides, as before
 this change.
+
+The rule is exact wherever a child's create commits with the parent's
+step. Decision 3 creates the child inside the parent's step, so on the
+shipped Ecto adapter on Postgres under the default `AdapterLock`, whose
+`lock_execution/3` runs the step in one transaction
+(`lib/statifier_persistence/storage/ecto.ex`, read at `46746e4`), a drive
+that is lost before it commits leaves no child behind, and every child
+stored is one the parent's stored position started; the newest is the pass
+the parent waits on. On a store where the two commit apart - the in-memory
+adapter, or a store or serialization that writes the child and the
+parent's step separately - a lost drive can leave a later pass's child the
+parent never started. Ruled by the operator, 2026-11-22: that case is a
+known limit of this release, not decided here. Such a stray child ranks
+newest, so the answer of the pass the parent waits on is discarded until
+the stray ends; the stray's answer is then taken for that pass. If the
+stray had already ended, the parent waits until the host delivers that
+stray's answer again. Routing exactly on every store needs the parent's
+persisted position to record each live invocation's counters, a later
+change outside this package. Re-delivering the event that drove the lost
+step re-drives it instead, and that re-drive adopts the stray as its own
+pass's child (the second table).
 
 So, case by case:
 
 | Case | What happens |
 |---|---|
 | An earlier pass's answer, delivered again after the next pass started | discarded; the parent and the next pass's child are unchanged |
-| A later pass's child created by an interrupted drive, which ends before the re-drive | its answer is discarded (its macrostep is after the stored position's); the re-drive of that pass adopts it and delivers its recorded answer, by the second table |
+| A later pass's child left by a lost drive, on Postgres under `AdapterLock` | cannot occur: the child's insert is undone with the step |
+| A later pass's child left by a lost drive, on a store where the two commit apart, which ends before the re-drive and whose answer the parent never took | the re-drive of that pass adopts it and delivers its recorded answer, by the second table |
+| The same stray child, on such a store, while the parent waits on the pass before it | the known limit above: the waited-on pass's answer is discarded until the stray ends, and the stray's answer is then taken for that pass |
 | A first pass's child created by an interrupted drive, which ends before the re-drive | its answer is discarded, as on `0.26.0` (the stored position holds no live invocation of that id); the re-drive finds it ended at the first pass's id, reads it as an earlier pass's, and creates a later pass's child. **The cost this amendment accepts: that child's work runs twice.** The first pass's id carries no token, so this child cannot be told from an earlier pass's ended child; adopting it instead would leave the parent waiting for an answer already discarded |
 
 The read comes before the create, rather than the adoption read after a
@@ -1768,8 +1789,10 @@ is added. The read of point 3 is an adapter call like any other, so
 `outcome: :error` and `reason: :execution_not_found` when the id is free,
 which is the ordinary case; a later pass reports one such read for each id
 it tries. A single child's answer adds one
-`:list_executions_by_metadata` call, the current-pass read. The changelog
-fragment names these under Added, Changed and Fixed.
+`:list_executions_by_metadata` call, the newest-child read, when the
+invoke id reads live; on a store that cannot list children the facade
+refuses the read and no `:list_executions_by_metadata` call is made. The
+changelog fragment names these under Added, Changed and Fixed.
 
 Choices weighed and not taken:
 
@@ -1799,9 +1822,14 @@ Where this is proved:
 `driver_subchart_loop_test.exs` also carries a loop left mid-pass twice,
 which cancels the first pass's child and then a later pass's.
 `driver_subchart_loop_test.exs` and `driver_subchart_ecto_test.exs` each
-carry the first two rows of the case table above: an earlier pass's
-answer delivered again is discarded, and a later pass's child that ended
-before the re-drive answers the pass that adopts it.
+carry the case table's first row (an earlier pass's answer delivered
+again is discarded) and its third (a later pass's child that ended before
+the re-drive answers the pass that adopts it). On Postgres the stored state
+the third row and the re-drive table row start from is built by putting the
+parent's record back, since a lost drive cannot leave it there;
+`ecto/loop_lost_drive_test.exs` carries the second row, a lost drive on
+Postgres that leaves no child behind, and `driver_subchart_loop_test.exs`
+pins the fourth, the known limit, on the in-memory adapter.
 `driver_subchart_ecto_test.exs` also carries a single child's re-drive on
 Postgres; `execution_linkage_test.exs` carries the two new functions. All
 paths are under `test/statifier_persistence/`.

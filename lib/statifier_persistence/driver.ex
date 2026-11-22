@@ -1095,12 +1095,10 @@ defmodule StatifierPersistence.Driver do
 
   # A single child's answer, through the same door `respond_to_parent/3`
   # takes, with one more condition on the parent's liveness read: the
-  # answering child is the invocation's current pass (`current_pass?/4`).
-  # A loop reuses the invoke id on every pass, so the invoke id alone
-  # cannot tell an earlier pass's duplicate answer, or the answer of a
-  # later pass's child that an interrupted drive created, from the answer
-  # of the pass the parent is waiting on (ADR-0008's 2026-11-22
-  # Amendment, point 3).
+  # answering child is the invocation's newest (`current_pass?/2`). A loop
+  # reuses the invoke id on every pass, so the invoke id alone cannot tell
+  # an earlier pass's duplicate answer from the answer of the pass the
+  # parent is waiting on (ADR-0008's 2026-11-22 Amendment, point 3).
   @spec respond_as_child(
           t(),
           Linkage.t(),
@@ -1114,28 +1112,29 @@ defmodule StatifierPersistence.Driver do
       answer_opts(linkage),
       linkage.invoke_id,
       answer,
-      &current_pass?(driver.store, linkage, child_execution_id, &1)
+      fn _position -> current_pass?(driver.store, linkage, child_execution_id) end
     )
   end
 
-  # Whether `child_execution_id` is the child of the pass the parent's
-  # stored position is waiting on: the newest of the invocation's children
-  # that position could have started. The first pass's child is the oldest;
-  # a later pass's child is ordered by its token (`Linkage.invocation/1`),
-  # and one whose macrostep is after the position's own was started by a
-  # drive the parent never persisted, so it cannot be the one waited on. A
-  # listing that fails keeps the invoke id's own liveness read as the whole
-  # check, which is the rule before this one.
-  @spec current_pass?(Storage.t(), Linkage.t(), Executions.execution_id(), MachineState.t()) ::
-          boolean()
-  defp current_pass?(store, %Linkage{} = linkage, child_execution_id, %MachineState{} = position) do
+  # Whether `child_execution_id` is the newest of the invocation's
+  # children: the first pass's child is the oldest, and a later pass's
+  # child is ordered by its token (`Linkage.invocation/1`). That is the
+  # pass the parent waits on wherever a child's create commits with the
+  # parent's step, since every child stored then is one the parent's
+  # stored position started. On a store where the two commit apart, a
+  # later pass's child left by a lost drive ranks newest too: the
+  # Amendment names that as a known limit. A listing that fails keeps the
+  # invoke id's own liveness read as the whole check, the rule before
+  # this one.
+  @spec current_pass?(Storage.t(), Linkage.t(), Executions.execution_id()) :: boolean()
+  defp current_pass?(store, %Linkage{} = linkage, child_execution_id) do
     first = Linkage.child_execution_id(linkage.parent_execution_id, linkage.invoke_id, 0)
     match = Linkage.invocation_match(linkage.parent_execution_id, linkage.invoke_id)
 
     case Storage.list_executions_by_metadata(store, match) do
       {:ok, records} ->
         records
-        |> Enum.flat_map(&pass_order(&1.execution_id, first, position.macrostep))
+        |> Enum.flat_map(&pass_order(&1.execution_id, first))
         |> Enum.max_by(fn {_execution_id, order} -> order end, fn -> nil end)
         |> case do
           {^child_execution_id, _order} -> true
@@ -1147,20 +1146,17 @@ defmodule StatifierPersistence.Driver do
     end
   end
 
-  # `[{execution_id, order}]` for a child the position could have started,
-  # `[]` for any other: the first pass's id orders before every token, and
-  # a later pass's id orders by its token's macrostep and round.
-  @spec pass_order(Executions.execution_id(), Executions.execution_id(), non_neg_integer()) ::
+  # `[{execution_id, order}]` for one of the invocation's single-child
+  # ids, `[]` for any other: the first pass's id orders before every
+  # token, and a later pass's id orders by its token's macrostep and round.
+  @spec pass_order(Executions.execution_id(), Executions.execution_id()) ::
           [{Executions.execution_id(), {integer(), integer()}}]
-  defp pass_order(first, first, _macrostep), do: [{first, {-1, -1}}]
+  defp pass_order(first, first), do: [{first, {-1, -1}}]
 
-  defp pass_order(execution_id, first, macrostep) do
+  defp pass_order(execution_id, first) do
     case later_pass_token(execution_id, first) do
-      {:ok, {pass_macrostep, _round} = token} when pass_macrostep <= macrostep ->
-        [{execution_id, token}]
-
-      _not_reachable ->
-        []
+      {:ok, token} -> [{execution_id, token}]
+      :error -> []
     end
   end
 
@@ -1772,7 +1768,9 @@ defmodule StatifierPersistence.Driver do
   #
   # `current?` is the answering child's own condition, read under the same
   # exclusion: `respond_as_child/4`'s pass check, and always `true` for an
-  # answer that names an invocation rather than a child.
+  # answer that names an invocation rather than a child. It is asked only
+  # once the invoke id reads live, so an answer to an invocation that is
+  # no longer live costs no listing.
   @spec late_answer(
           MachineState.t(),
           String.t(),
@@ -2035,8 +2033,8 @@ defmodule StatifierPersistence.Driver do
             :ok
 
           # A later pass's child an interrupted drive created, which ended
-          # before this re-drive adopted it: its answer was discarded then
-          # (`current_pass?/4`), so it is delivered now, from its record,
+          # before this re-drive adopted it: no step of the parent took its
+          # answer for this pass, so it is delivered now, from its record,
           # to the invocation this step just started.
           {:answered, answer} ->
             buffer(reader, ref, invoke, answer)
@@ -2279,8 +2277,8 @@ defmodule StatifierPersistence.Driver do
 
   # A later pass's child found at its own id is this pass's, from a drive
   # interrupted before the parent persisted. Running, it is adopted. Ended,
-  # its answer reached a parent still waiting on the pass before and was
-  # discarded, so it is adopted and answered from what its record holds:
+  # its answer was never taken for this pass, which the parent had not
+  # started, so it is adopted and answered from what its record holds:
   # the recorded answer, or a failed child's `failure`. An ended child whose
   # record holds neither - a cancelled one, or a completed one on a store
   # that keeps no answer - cannot answer, and is refused as a clash.

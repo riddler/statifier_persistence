@@ -212,6 +212,11 @@ defmodule StatifierPersistence.DriverSubchartEctoTest do
     assert LoopingSubchart.leaves(store, "myapp:subchart", parent) == ["renewed_all"]
   end
 
+  # The stored state a lost persist leaves where the child's create and
+  # the parent's step commit apart, built here by putting the parent's
+  # record back: on Postgres under `AdapterLock` a lost drive cannot leave
+  # it (`LoopLostDriveTest`), so this pins the re-drive's code path under
+  # real lock transactions rather than a state this store reaches.
   # sabotage: in Driver's started_before?/3, answered true for every child
   # (the cancel reached every pass) -> red against Postgres, the re-drive's
   # own exit cancelled the second pass's child before its invoke adopted
@@ -224,19 +229,17 @@ defmodule StatifierPersistence.DriverSubchartEctoTest do
     assert {:ok, _execution, _ms} = Driver.create(driver, parent)
     before_second_pass = LoopingSubchart.record(store, parent)
 
-    assert {:ok, %{status: :completed}, _ms} = LoopingSubchart.approve(driver, first)
-    assert [{^first, :completed}, {second, :active}] = LoopingSubchart.children(store, parent)
+    assert {:ok, _execution, _ms} = Driver.send_event(driver, parent, Event.external("skip"))
+    assert [{^first, :cancelled}, {second, :active}] = LoopingSubchart.children(store, parent)
 
     :ok = LoopingSubchart.lose_step(store, before_second_pass)
-    assert {:ok, _execution, _ms} = Driver.answer_parent(driver, first, {:done, nil})
+    assert {:ok, _execution, _ms} = Driver.send_event(driver, parent, Event.external("skip"))
 
-    assert [{^first, :completed}, {^second, :active}] = LoopingSubchart.children(store, parent)
-
-    assert {:ok, %{status: :completed}, _ms} = LoopingSubchart.approve(driver, second)
-    assert LoopingSubchart.leaves(store, "myapp:subchart", parent) == ["renewed_all"]
+    assert [{^first, :cancelled}, {^second, :active}] = LoopingSubchart.children(store, parent)
+    assert LoopingSubchart.leaves(store, "myapp:subchart", parent) == ["renewing"]
   end
 
-  # sabotage: in Driver's current_pass?/4, answered true for every child
+  # sabotage: in Driver's current_pass?/3, answered true for every child
   # -> red against Postgres, the duplicate was delivered and
   # answer_parent/3 answered {:ok, ...}, not {:discarded, _}. Verified red,
   # reverted from a copy.
@@ -254,6 +257,9 @@ defmodule StatifierPersistence.DriverSubchartEctoTest do
     assert LoopingSubchart.leaves(store, "myapp:subchart", parent) == ["renewing"]
   end
 
+  # The same built state, and the second pass's child ends first with its
+  # answer kept on its record but never taken (its parent's chart did not
+  # resolve); the re-drive's buffered answer runs inside the lock.
   # sabotage: in Driver's adopt_later/2, refused an ended child instead of
   # answering from its record -> red against Postgres, the parent landed in
   # "refused". Verified red, reverted from a copy.
@@ -262,20 +268,24 @@ defmodule StatifierPersistence.DriverSubchartEctoTest do
   } do
     parent = "execution_ecto_renewals_4"
     driver = LoopingSubchart.driver(store, "myapp:subchart")
+
+    unresolving =
+      LoopingSubchart.driver(store, "myapp:subchart", chart_resolver: fn _hash -> :error end)
+
     first = Linkage.child_execution_id(parent, LoopingSubchart.invoke_id(), 0)
 
     assert {:ok, _execution, _ms} = Driver.create(driver, parent)
     before_second_pass = LoopingSubchart.record(store, parent)
 
-    assert {:ok, %{status: :completed}, _ms} = LoopingSubchart.approve(driver, first)
-    assert [{^first, :completed}, {second, :active}] = LoopingSubchart.children(store, parent)
+    assert {:ok, _execution, _ms} = Driver.send_event(driver, parent, Event.external("skip"))
+    assert [{^first, :cancelled}, {second, :active}] = LoopingSubchart.children(store, parent)
 
     :ok = LoopingSubchart.lose_step(store, before_second_pass)
-    assert {:ok, %{status: :completed}, _ms} = LoopingSubchart.approve(driver, second)
-    assert LoopingSubchart.leaves(store, "myapp:subchart", parent) == ["renewing"]
+    assert {:ok, %{status: :completed}, _ms} = LoopingSubchart.approve(unresolving, second)
+    assert {:ok, _execution, _ms} = Driver.send_event(driver, parent, Event.external("skip"))
 
-    assert {:ok, _execution, _ms} = Driver.answer_parent(driver, first, {:done, nil})
-    assert LoopingSubchart.leaves(store, "myapp:subchart", parent) == ["renewed_all"]
+    assert [{^first, :cancelled}, {^second, :completed}, {_third, :active}] =
+             LoopingSubchart.children(store, parent)
   end
 
   defp nesting_dispatch do
