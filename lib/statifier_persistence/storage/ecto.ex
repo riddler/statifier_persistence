@@ -50,6 +50,18 @@ if Code.ensure_loaded?(Ecto) do
     | Any other backend, `linkage_columns: false` (the default) | `false` | `false` | In the `metadata` column, as the record this adapter is handed carries it |
     | Any other backend, `linkage_columns: true` | `false` | `true` | In the V09 columns; no reserved key is written into `metadata` |
 
+    A host that opts in on such a backend after rows were written with the
+    option off may hold a child whose linkage is in `metadata` and whose
+    V09 columns are empty. Only the re-pin reads that row's linkage there:
+    `write_tree_migration/2` rewrites its pin in `metadata`. The two
+    listings, the `children` pin count of
+    `count_executions_by_content_hash/2` and the retirement guard of
+    `retire_chart/3` read the columns alone, so that child is not listed
+    by a linkage match, is not counted as a pin, and does not block a
+    retirement. Such a row is written only past the facade: with the option
+    off on these backends, `StatifierPersistence.Storage` refuses a
+    non-empty `metadata` map with `{:error, :metadata_unsupported}`.
+
     Engine identities (`content_hash`, `session_id`, `execution_id`) are
     stored verbatim in `text` columns and blobs in `bytea` columns, so
     both round-trip byte-identically (ADR-0002 decision 1, ADR-0003
