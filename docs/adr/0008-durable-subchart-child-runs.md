@@ -1938,8 +1938,10 @@ What was re-read before the flip:
   `Storage.list_executions_by_metadata/2` report through the facade's
   adapter call telemetry, with `outcome: :error` and the reason for an
   `{:error, _}` answer, and the listing refuses with
-  `:child_listing_unsupported` before any adapter call on a store that
-  cannot list children. The changelog fragment the Amendment names was
+  `:child_listing_unsupported` before any `:list_executions_by_metadata`
+  adapter call on a store that cannot list children (its capability
+  check, `listing_open?/3`, may itself report a `:supports_metadata?` or
+  `:supports_linkage?` call first). The changelog fragment the Amendment names was
   promoted by the release prep into the 0.27.0 section of `CHANGELOG.md`,
   under Added, Changed and Fixed, and `docs/upgrading.md` carries "0.26
   to 0.27".
