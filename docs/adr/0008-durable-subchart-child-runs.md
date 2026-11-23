@@ -1602,7 +1602,7 @@ What was re-read before the flip:
 
 ## Amendment (2026-11-22, sp-5pfj): every pass of a loop over a durable subchart gets a child of its own, and a re-drive of a pass still adopts that pass's child
 
-Status of this amendment: proposed (2026-11-22, sp-5pfj). The record above
+Status of this amendment: accepted (2026-11-22, sp-5pfj). The record above
 stays accepted; this amendment is proposed until the code that implements
 it ships in a published version and every claim below verifies against
 `main` at that version. Every cite below to code that predates this change
@@ -1842,3 +1842,111 @@ Postgres; `execution_linkage_test.exs` carries the two new functions. All
 paths are under `test/statifier_persistence/`.
 
 No other decision in this record moves.
+
+## Note (2026-11-23): the sp-5pfj Amendment is accepted
+
+The 2026-11-22 sp-5pfj Amendment is accepted on 2026-11-23, under the
+operator's standing grant to flip a record whose code has shipped. The
+code that implements it landed in PR 302 (`e6d6577`, `6e18657`,
+`731769c` and `550e132`), and shipped in statifier_persistence 0.27.0
+(tag `v0.27.0`, `5791dd6`, published on Hex 2026-11-22 by the release
+workflow). That Amendment's own status line flips in place from proposed
+to accepted; its sentence that it "is proposed until the code that
+implements it ships in a published version and every claim below
+verifies against `main` at that version" is met by this Note and stays
+as written, and the record above stays accepted. Every cite below was
+read at `5791dd6`, the tag, which is also `main`: no commit has landed
+on `main` since the tag, and the two commits after PR 302 (`b4ddbd1`,
+the upgrading page, and `5791dd6`, the release prep) touch no file under
+`lib/` or `test/`.
+
+What was re-read before the flip:
+
+- **The opening.** At `46746e4`, the cite the Amendment names for code
+  that predates it, `late_answer/3` read liveness by invoke id alone and
+  `adopt_child/3` adopted any child at the derived id linked to the same
+  parent and invocation. At the tag the parent's door is `late_answer/4`,
+  whose fourth argument is the newest-child condition point 3 adds; the
+  `/3` cite is to the code before this change, as the Amendment's status
+  paragraph says. statifier 2.15.0, the version `mix.lock` resolves,
+  keeps an authored invoke id (`generate_invoke_id/3` in
+  `lib/statifier/interpreter.ex` generates one only for an element with
+  none).
+- **Point 1, the token.** `Linkage.invocation/1` writes
+  `"<macrostep>.<round>"` from the `Statifier.Effect.Invoke` fields.
+  In statifier 2.15.0 both counters are among the fields `Position`
+  exports, and `MachineState.begin_macrostep/1` raises `macrostep` by one
+  and resets `round` to 0. The Driver takes the token from the effect the
+  interpreter emitted (the dispatch context's `invoke`, set from the
+  `{:invoke, _}` effect before the dispatch fun runs), never from the
+  handler's `{:start_child, resolved, _}` answer.
+- **Point 2, the ids.** `Linkage.child_execution_id/3` is unchanged, and
+  `Linkage.child_execution_id/4` appends `"@"` and the invocation to it.
+  The linkage stored on a later pass's child is the one the first pass
+  writes (index `0`, no `child_count`, no policy). The reference
+  embedder's cite was read at statifier_examples `44e6f4a`; at that
+  repo's `main` (`1271a84`) its `child_execution_id/1` still derives the
+  first pass's id with `child_execution_id/3`, and derives a later
+  pass's id with the two new functions.
+- **Point 3, the two tables.** `create_child/6` reads with `existing/2`
+  before any create for a single child. `first_child/2` adopts a running
+  child linked to the same invocation, reads an ended one (`terminal?/1`:
+  `:completed`, `:failed`, `:cancelled`) as an earlier pass's, and
+  refuses any other with `:execution_exists`. `later_pass/5` reads the
+  later pass's id, and `adopt_later/2` adopts a running child, adopts
+  and answers an ended one whose `recorded_answer/1` holds a recorded
+  answer or a failed child's `failure`, and refuses with
+  `:execution_exists` both an ended child with neither and a child
+  linked to anything else. `Executions.cancel/3`'s documentation says a
+  cancel reaches a parked child.
+- **Point 3, the answer.** `answer_parent/3` delivers a single child's
+  answer through `respond_as_child/4`, whose condition is
+  `current_pass?/3`, asked only once the invoke id reads live. It lists
+  the invocation's children, ranks the first pass's id oldest and a later
+  pass's id by its token, whatever the child's status, and answers `true`
+  when the listing fails. The automatic answer reaches the same function
+  through `resolve_and_answer_parent/3`. `done_invocation/5`,
+  `failed_invocation/5` and a fan-out's settled answer reach the door
+  with the invoke id's read alone.
+- **Point 3, the known limit.** The rule is exact where the child's
+  create commits with the parent's step: the Ecto adapter's
+  `lock_execution/3` runs the step inside `repo.transaction/1`, and
+  `AdapterLock` is the default serialization. The limit is stated as the
+  code behaves: because `current_pass?/3` ranks a stray by its token
+  whatever its status, the waited-on pass's answer is discarded while the
+  stray is newest, the stray's answer is taken, and an ended stray whose
+  answer was never delivered keeps the parent waiting until the host
+  delivers it. `driver_subchart_loop_test.exs` pins both halves on the
+  in-memory adapter ("a stray later-pass child after a lost drive and
+  another step: the named limit" and "a stray's answer with no step
+  between: it answers the first pass and the next").
+- **Point 4, the cancel.** The `{:cancel_invoke, _}` arm walks
+  `Executions.cascade_cancel_where/4` (`@doc false`) with
+  `started_before?/3`, which spares a later pass's child whose token is
+  not strictly before the cancel's `{macrostep, round}` and reaches every
+  other child. `Executions.cascade_cancel/3` is unchanged since
+  `46746e4`.
+- **Points 5 and 6.** Between `46746e4` and the tag only
+  `lib/statifier_persistence/driver.ex`,
+  `lib/statifier_persistence/execution/linkage.ex` and
+  `lib/statifier_persistence/executions.ex` change under `lib/`, and
+  nothing under `priv/`: no migration version is added and no adapter
+  changes. `start_child_at/6` has no change, and a fan-out's create keeps
+  the create-then-adopt order.
+- **What a host sees.** `report_started/3` carries the id the child was
+  created or adopted under. `Storage.fetch_execution/2` and
+  `Storage.list_executions_by_metadata/2` report through the facade's
+  adapter call telemetry, with `outcome: :error` and the reason for an
+  `{:error, _}` answer, and the listing refuses with
+  `:child_listing_unsupported` before any adapter call on a store that
+  cannot list children. The changelog fragment the Amendment names was
+  promoted by the release prep into the 0.27.0 section of `CHANGELOG.md`,
+  under Added, Changed and Fixed, and `docs/upgrading.md` carries "0.26
+  to 0.27".
+- **Where this is proved.** Every test file the Amendment names exists at
+  the tag and carries the cases it names: the loop cases in
+  `driver_subchart_loop_test.exs`, `driver_subchart_ecto_test.exs` and
+  `ecto/sqlite_migrations_test.exs` (under "durable subchart children
+  with the linkage columns option on"), the lost drive in
+  `ecto/loop_lost_drive_test.exs`, and the two functions in
+  `execution_linkage_test.exs`.
