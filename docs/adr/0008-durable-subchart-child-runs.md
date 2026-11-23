@@ -2228,3 +2228,67 @@ What was re-read before the flip:
   `Driver.start_child/4`. The release prep promoted the change into the
   0.28.0 section of `CHANGELOG.md`, under Added, and `docs/upgrading.md`
   carries "0.27 to 0.28".
+
+## Note (2026-11-23): five readings of the sp-lp5 Amendment, checked against the code
+
+The two reviews of the 2026-11-19 sp-lp5 Amendment left five readings of
+it. Each is checked here against `main`. None of them changes an answer
+the Amendment gives, and this Note decides nothing: it states what the
+code does today. Every cite below was read at `a2304eb`.
+
+**1. V09's indexes on Postgres.** `up/1` in
+`lib/statifier_persistence/ecto/migrations/v09.ex` creates both indexes
+with no adapter guard, so a Postgres repo that runs V09 gets them,
+although the six columns stay `NULL` there (that module's moduledoc says
+both). V03's `metadata` index is the contrast: `up/1` in
+`lib/statifier_persistence/ecto/migrations/v03.ex` creates it only when
+`postgres?/0` is true, because its spelling is Postgres-only. The
+Amendment's point 3 says V09 "also adds two indexes" and names no
+backend, which is what the code does.
+
+**2. ADR-0005's reopening trigger.** ADR-0005's Consequences name "a
+second database the adapter must support" as one thing that would reopen
+it. The Amendment's point 8 argues that ADR-0005 decision 2 does not move
+from what the harness proves, and it does not name that trigger. Whether
+the Amendment meets the trigger is ADR-0005's question, and this Note
+does not answer it. What the repository holds: `mix.exs` carries
+`ecto_sqlite3` in the `:test` set beside `postgrex`, and the SQLite cases
+are in `test/statifier_persistence/ecto/sqlite_migrations_test.exs`.
+
+**3. The two homes when a host changes backend.** On Postgres,
+`linkage_columns?/1` in `lib/statifier_persistence/storage/ecto.ex` is
+false with the option on or off, so a read hands the record back as
+stored (`to_execution_record/2`) and both listings are `jsonb`
+containment over `metadata` (`list_executions_by_metadata/2`). Off
+Postgres with the option on, `insert_execution/2` moves the reserved key
+into the V09 columns (`split_linkage/1`), and both listings match on
+those columns alone (`linkage_query/2` keeps only rows whose
+`linkage_parent_execution_id` is set). So a linkage stored in one home is
+not listed by the arm that reads the other. The Amendment does not say
+whether a host can move its stored executions from one backend to the
+other, and this Note does not either.
+
+**4. The facade table's last row.** On a store that declares linkage and
+not `metadata`, a match naming any host key does not reach the adapter:
+`listing_open?/3` in `lib/statifier_persistence/storage.ex` is false, so
+`Storage.list_executions_by_metadata/2` answers
+`{:error, :child_listing_unsupported}` and
+`Storage.list_execution_states_by_metadata/2` answers
+`{:error, :execution_states_unsupported}`. Those are the reasons the two
+functions gave at `v0.25.1` whenever they refused a store. Called
+directly, the shipped adapter's two listings answer such a match off
+Postgres with `{:error, :metadata_unsupported}`, with the option on
+(`linkage_match/2`) or off.
+
+**5. A host that turns the option on with children in flight.** With the
+option on, off Postgres, the shipped adapter hands back a row whose
+columns hold no linkage with its `metadata` as stored, the reserved key
+included (`with_linkage/2`), and a re-pin of such a row rewrites the key
+in `metadata` (`column_linkage_update/3`). Its two listings and its pin
+count read the columns alone (`linkage_query/2`, `column_child_pins/2`).
+So a child whose linkage was stored in `metadata` before the option was
+turned on is found by `Storage.fetch_execution/2` and is not found by the
+shipped adapter's listings or counted by its pin count. The Amendment's
+point 5 tells a host whose own adapter reads the `metadata` column to
+leave the option off. It says nothing of a host that turns the option on
+while such children exist, and this Note decides nothing about that.
