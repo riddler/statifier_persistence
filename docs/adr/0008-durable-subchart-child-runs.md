@@ -1952,3 +1952,159 @@ What was re-read before the flip:
   with the linkage columns option on"), the lost drive in
   `ecto/loop_lost_drive_test.exs`, and the two functions in
   `execution_linkage_test.exs`.
+
+## Amendment (2026-11-23, sp-ezfr): a durable child carries the host metadata keys the host names as inherited
+
+Status of this amendment: proposed (2026-11-23, sp-ezfr). The record above
+stays accepted; this amendment is proposed until the code that implements
+it ships in a published version and every claim below verifies against
+`main` at that version. Every cite below to code that exists was read on
+`main` at `b0defbb`; the option and the function this amendment decides
+do not exist yet and are cited by name alone.
+
+A host keeps its own identities in an execution's `metadata` (ADR-0006
+decision 1): a library host might keep `"branch_id"` on a loan's
+execution, so it can list the loans of one branch. A durable child does
+not have them. `create_linked/5` in `lib/statifier_persistence/driver.ex`,
+the one create every durable child goes through, a single child on any
+pass and each child of a fan-out, passes `Driver.create/3` the child's
+`linkage:` and no `metadata:`, so a child's stored map holds the
+package's linkage under `Linkage.reserved_key/0` and nothing of the
+host's. A host that wants to know which branch a child's work belongs to
+has to walk `Driver.parent_link/2` up to the root and read the root's
+record. Ruled by the operator, 2026-11-23: a host's scope is stored as
+host metadata on its execution, and a durable child copies the metadata
+keys the host names as inherited. The package names no host, no product
+and no key of its own: the keys are the host's. What follows is the
+shape; its engineering choices were decided by the conductor under a
+standing consent, 2026-11-23.
+
+**1. The host names the keys once, on the driver.** `Driver.new/3`
+takes one more option, `inherited_metadata_keys:`, a list of string keys,
+defaulting to `[]`: "this driver copies no key". It is read from the
+driver that creates the child, and it is not overridden per call: the
+docstring of `Driver.new/3` says every option except `dispatch:` may be
+overridden in a `create/3` or `send_event/4` call, and this option joins
+`dispatch:` as the second exception, because a child is created inside
+drives the host does not start through those two calls (an answer
+through `Driver.answer_parent/3`, a fan-out child through
+`Driver.start_child_at/6`), and one list on the driver is the one place
+every such drive reads. A child is driven by the same driver with its
+own machine (`create_linked/5`), so a grandchild copies the same keys
+from the child, and so on down the tree.
+
+`Driver.new/3` refuses, by raising `ArgumentError`, a value that is not a
+list of strings, and a list that names `Linkage.reserved_key/0`. That is
+the posture `Executions.create/4` already takes toward a host's
+`metadata:` that carries the reserved key (`metadata/1` in
+`lib/statifier_persistence/executions.ex` raises): the package's linkage
+is never a host's key, so it can be neither supplied nor inherited.
+
+**2. What is copied, and from where.** At a child's create, the child is
+given, as its `metadata:`, each named key the parent's host metadata
+holds, with the parent's value, verbatim. `Executions.create/4` already
+merges a `metadata:` and a `linkage:` into one stored map, so the copied
+keys sit beside the linkage, never inside it. A named key the parent does
+not hold is not written: no `nil`, no placeholder. A parent that holds
+none of them gives the child an empty `metadata:`, and the child is
+created exactly as it is today.
+
+The parent's host metadata is the map its record stores. A host's keys
+are set by `Executions.create/4` and nowhere else: a step and a fail
+carry the stored map forward (that function's documentation), and
+`Storage.update_execution/5`'s documentation calls the map write-once.
+So the parent's host keys do not change over its life. The copy reads
+it from the parent's stored record (`Storage.fetch_execution/2`), with
+one case where no record exists yet:
+a child started from the parent's initial configuration is created during
+the parent's own create, and that create executes its effects before it
+inserts the record (`persist_tail/8` in
+`lib/statifier_persistence/executions.ex`). There the copy reads the
+`metadata:` the parent's create was given, which is the map the insert
+then stores. A fan-out child started through `Driver.start_child_at/6`
+already has the parent's record in hand, read to build its context
+(`start_context/3` in `lib/statifier_persistence/driver.ex`), and copies
+from that. A parent record that cannot be read refuses the child's start
+with the read's reason, the posture a failed create has always had.
+With `inherited_metadata_keys: []` no copy is made and no read is added.
+
+**3. ADR-0006's rule stands unchanged.** The map holds identities only,
+never personal data (ADR-0006 decision 2). The copy adds no value of the
+package's: it puts on the child only what the host already put on the
+parent, so the rule binds a copied key exactly as it binds the original,
+and enforcing it stays the host's, as that record's Consequences say it
+is.
+
+**4. A backend without `metadata` has nothing to inherit.** The shipped
+Ecto adapter declares `metadata` on Postgres only (`supports_metadata?/1`
+in `lib/statifier_persistence/storage/ecto.ex`), and on any other backend
+a parent's create with a non-empty host map is refused with
+`{:error, :metadata_unsupported}` (`check_metadata_supported/2` in
+`lib/statifier_persistence/storage.ex`). So no parent there holds a host
+key, the child is given an empty `metadata:`, and it is created as it is
+today, through the linkage home of the 2026-11-19 Amendment where the
+host opted in. Naming keys on such a backend is not an error. The
+in-memory adapter declares `metadata` (`supports_metadata?/1` in
+`lib/statifier_persistence/storage/in_memory.ex`) and inherits as
+Postgres does.
+
+**5. An adopted child keeps what it was created with.** The copy happens
+at a create and nowhere else. A child adopted rather than created - the
+re-drive of a pass that finds its child (`first_child/2`, `adopt_later/2`,
+`adopt_child/3`) - is not written to, and carries the keys its create
+gave it. A later pass of a loop creates its own child (the 2026-11-22
+Amendment, point 2), which copies at its own create; since the parent's
+host keys do not change, every pass's child carries the same values. A
+child created by `0.27.0` or earlier, or by a driver without the
+option, carries none of the keys. A host falls back for such a child by
+walking `Driver.parent_link/2` to the root, the execution that answers
+`:no_parent`, and reading the root's own keys. Nothing stored is
+rewritten, no migration version is added, and no adapter callback or
+schema changes.
+
+**6. A host reads the keys with a new function; `Execution` does not
+change.** `Executions.inherited_metadata/3` answers, for one execution id
+and a list of keys, `{:ok, map}` holding each named key the execution's
+stored record holds, with its value, and `{:error, reason}` when the
+record cannot be read. It reads the stored record and nothing else: it
+does not walk the linkage, it takes no lock, and like
+`Executions.active_children/2` it reports what storage held when it read.
+Naming `Linkage.reserved_key/0` raises `ArgumentError`, as at point 1.
+For a root it answers the root's own keys, so the fallback of point 5 is
+the same call on another id. `StatifierPersistence.Execution` gains no
+field: `Executions.active_children/2` returns that struct, and a field
+added to it would change what that function answers.
+
+What a host sees. Without `inherited_metadata_keys:`, nothing: every
+function answers as on `0.27.0`. With it, a child's stored map carries
+the named keys beside its linkage. A listing by a copied key's value
+(`Storage.list_executions_by_metadata/2`) now matches the children
+created under the option as well as the root; a host that wants roots
+alone keeps the records whose metadata has no `Linkage.reserved_key/0`
+key, or names only keys it wants matched on the whole tree. On a step of
+the parent, a child's create adds one `:fetch_execution` adapter call on
+the parent's id, reported through
+`[:statifier_persistence, :adapter, :call]`; no event, key or value is
+added to the package's telemetry.
+
+Choices weighed and not taken:
+
+- **Copy every host key.** A key that belongs to one execution, a
+  correlation id, would land on every child, and a listing by it would
+  answer the whole tree. Which keys describe the tree rather than one
+  execution is the host's knowledge.
+- **No copy; resolve at read time by walking the linkage.** A read pays a
+  fetch per level on every call, and a containment listing by the host's
+  key can never find a child, because the child does not hold it.
+- **A per-call option.** A child is created inside drives the host does
+  not start with a `create/3` or `send_event/4` call, so a per-call list
+  would miss them.
+- **A `metadata` field on `StatifierPersistence.Execution`.** It changes
+  what `Executions.active_children/2` answers.
+
+This amendment does not decide how a fan-out whose invoking state a loop
+re-enters names its children per pass (the 2026-11-22 Amendment, point 6,
+leaves it to a later record); and `function_providers:`, which a child
+does not inherit (the `Driver.new/3` docstring), is unchanged.
+
+No other decision in this record moves.
