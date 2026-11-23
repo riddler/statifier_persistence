@@ -1,7 +1,7 @@
-# Upgrading a host from 0.13 to 0.27.0
+# Upgrading a host from 0.13 to 0.28.0
 
 This page says what a host changes to move `statifier_persistence` from
-0.13.0 to 0.27.0, one minor at a time. A host here is the code that
+0.13.0 to 0.28.0, one minor at a time. A host here is the code that
 embeds the package: the module that calls `use StatifierPersistence.Ecto`,
 the migrations it runs, the options it passes to
 `StatifierPersistence.Executions` and `StatifierPersistence.Driver`, the
@@ -15,10 +15,10 @@ recommends: `{:statifier_persistence, "~> 0.14.0"}`, then `"~> 0.15.0"`,
 then `"~> 0.16.0"`, then `"~> 0.17.0"`, then `"~> 0.18.0"`, then
 `"~> 0.19.0"`, then `"~> 0.20.0"`, then `"~> 0.21.0"`, then `"~> 0.22.0"`,
 then `"~> 0.23.0"`, then `"~> 0.24.0"`, then `"~> 0.25.0"`, then `"~> 0.26.0"`,
-then `"~> 0.27.0"`.
+then `"~> 0.27.0"`, then `"~> 0.28.0"`.
 The `statifier` floor stays `~> 2.6` through 0.17.0; 0.18.0 moves it to
 `~> 2.9`, and every later release through 0.24.2 keeps it there; 0.25.0
-moves it to `~> 2.15`, and 0.26.0 and 0.27.0 keep it there.
+moves it to `~> 2.15`, and 0.26.0, 0.27.0 and 0.28.0 keep it there.
 
 ## Before you start: the database is at V07
 
@@ -44,7 +44,7 @@ a host that sets the new `linkage_columns: true` option on
 `use StatifierPersistence.Ecto` needs it, and it runs V09 before deploying
 the code that sets the option; a host that leaves the option off may run
 V09 or leave it, because its schema names none of the columns. 0.27.0
-adds no migration.
+and 0.28.0 add no migration.
 
 ## If the database is older than V07: V03 and V04
 
@@ -874,3 +874,55 @@ point 5). The points cited below are that Amendment's.
   before the re-drive**, is read as an earlier pass's, and the re-drive
   creates a later pass's child, so that child's work runs twice: the cost
   point 3 accepts. **NONE** to do.
+
+## 0.27 to 0.28: a durable child inherits the host keys you name
+
+0.28.0 lets a durable subchart child carry host metadata keys copied
+from its parent, and adds a function that reads them. A host that names
+no key changes nothing: every function answers as on 0.27.0 (ADR-0008's
+2026-11-23 Amendment, "What a host sees"). Schema: **NONE**. 0.28.0 adds
+no migration, rewrites no stored value and changes no adapter callback
+(point 5), and keeps the `statifier` floor at `~> 2.15`. The points
+cited below are that Amendment's.
+
+- **If you name no keys**, deploy 0.28.0 as it is: **NONE**. Without
+  `inherited_metadata_keys:` a child is created with the same options as
+  before, and no read is added (point 2).
+- **If you want a child to carry keys from its parent**, name them once
+  on the driver: `StatifierPersistence.Driver.new/3` takes
+  `inherited_metadata_keys:`, a list of string keys. At its create, each
+  child, a single child on any pass or each child of a fan-out, is given
+  each named key its parent's metadata holds, with the parent's value,
+  beside its linkage; a key the parent does not hold is not written, and
+  a grandchild copies the same keys from its child (points 1 and 2). The
+  option is the driver's alone: passing it to `Driver.create/3`,
+  `Driver.send_event/4`, `Driver.done_invocation/5` or
+  `Driver.failed_invocation/5` raises `ArgumentError`, and so does a list
+  that is not strings or names `Linkage.reserved_key/0` (point 1). A
+  copied key is bound by ADR-0006's rule exactly as the original is:
+  identities only, never personal data (point 3).
+- **If you read a child's keys**, use
+  `StatifierPersistence.Executions.inherited_metadata/3`, which answers
+  `{:ok, map}` with each named key the execution's stored record holds.
+  It reads that one record and does not walk the linkage (point 6). A
+  child created by 0.27.0 or earlier, or by a driver without the option,
+  carries none of the keys, and is not rewritten: for such a child, walk
+  `StatifierPersistence.Driver.parent_link/2` to the root and call the
+  same function with the root's id (point 5). A child adopted rather than
+  created keeps what its create gave it (point 5).
+- **If you list executions by a key you name as inherited**, through
+  `StatifierPersistence.Storage.list_executions_by_metadata/2`, the
+  listing now matches the children created under the option as well as
+  the root. To keep roots alone, keep the records whose metadata has no
+  `Linkage.reserved_key/0` key. A `StatifierPersistence.Executions.cascade_cancel/3`
+  match on such a key now reaches those children directly too: each is
+  cancelled once, a later visit counts it as retained, and a child may be
+  cancelled before its parent ("What a host sees").
+- **If you attach a handler to `[:statifier_persistence, :adapter,
+  :call]`** and name keys, a child created on a step of its parent adds
+  one `:fetch_execution` of the parent. No event, key or value is added
+  ("What a host sees").
+- **If you run the Ecto adapter on a backend that is not Postgres**,
+  **NONE**. No parent there holds a host key, so a child inherits
+  nothing and is created as on 0.27.0; naming keys is not an error
+  (point 4).
