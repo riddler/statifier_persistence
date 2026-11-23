@@ -2033,11 +2033,18 @@ inserts the record (`persist_tail/8` in
 `metadata:` the parent's create was given, which is the map the insert
 stores when it succeeds. When the parent's insert fails, the parent has
 no record and its keys are stored nowhere. On Postgres under
-`AdapterLock` the failed insert aborts the transaction the child's insert
-ran in, so the child is not stored either (`failed_write/2` in
-`lib/statifier_persistence/executions.ex`); on a store where the two
-commit apart, the child stays, holding keys copied from a create that
-stored nothing, as it holds a linkage to a parent with no record. A fan-out child started through `Driver.start_child_at/6`
+`AdapterLock`, an insert whose statement runs and fails (the unique
+index's `:execution_exists`, `insert_execution/2` in
+`lib/statifier_persistence/storage/ecto.ex`) aborts the transaction the
+child's insert ran in, so the child is not stored either. A refusal that
+adapter answers before any statement (`{:error, :metadata_unsupported}`
+from the same function, for a `metadata:` value it cannot store) aborts
+nothing: a create's failed insert asks for no roll-back (`failed_write/2`
+in `lib/statifier_persistence/executions.ex`), so the child commits, as
+on a store where the two commit apart. In both cases the child stays, holding
+keys copied from a create that stored nothing, as it holds a linkage to
+a parent with no record. A fan-out child started through
+`Driver.start_child_at/6`
 already has the parent's record in hand, read to build its context
 (`start_context/3` in `lib/statifier_persistence/driver.ex`), and copies
 from that. A parent record that cannot be read refuses the child's start
