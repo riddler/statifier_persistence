@@ -471,7 +471,7 @@ Emitted on the parent's stepping process, at dispatch time.
 
 | Event | Emitted from | Measurements | Metadata |
 |---|---|---|---|
-| `[:statifier_persistence, :child, :started]` | `Driver.start_child/3`, after `adopt_child/3` | `system_time` | `parent_execution_id`, `child_execution_id`, `invoke_id`, `child_index`, `content_hash`, `session_id` |
+| `[:statifier_persistence, :child, :started]` | `Driver.start_child/4`, after `adopt_child/3` | `system_time` | `parent_execution_id`, `child_execution_id`, `invoke_id`, `child_index`, `content_hash`, `session_id` |
 | `[:statifier_persistence, :child, :refused]` | the same chain, on any refusal | `system_time` | `parent_execution_id`, `invoke_id`, `reason` |
 | `[:statifier_persistence, :child, :recorded]` | `Driver.record_and_settle/5`, after the child's own answer is written | `system_time` | `parent_execution_id`, `child_execution_id`, `invoke_id`, `child_index`, `outcome` |
 | `[:statifier_persistence, :child, :answered]` | `Driver.answer_parent/3`, after the parent's door returns; `Driver.resolve_and_answer_parent/3`, when the parent is never reached | `system_time` | `child_execution_id`, `parent_execution_id`, `invoke_id`, `outcome`, `child_count`, `failed_count`, `delivery` |

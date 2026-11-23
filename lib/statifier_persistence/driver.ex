@@ -337,6 +337,7 @@ defmodule StatifierPersistence.Driver do
     :chart_resolver,
     :child_canceller,
     :after_step,
+    inherited_metadata_keys: [],
     max_turns: 1_000
   ]
 
@@ -352,8 +353,16 @@ defmodule StatifierPersistence.Driver do
           chart_resolver: chart_resolver() | nil,
           child_canceller: child_canceller() | nil,
           after_step: after_step() | nil,
+          inherited_metadata_keys: [String.t()],
           max_turns: pos_integer()
         }
+
+  # Where a child's create reads its parent's host metadata from
+  # (ADR-0008's 2026-11-23 Amendment, point 2): the map in hand - the
+  # `metadata:` the parent's own create was given, or the parent's record
+  # a fan-out door has already read - or `:stored`, the parent's record,
+  # read at the child's create.
+  @typep parent_metadata :: {:metadata, Adapter.metadata()} | :stored
 
   # One buffered answer: the invocation's `{state_index, invoke_index}`
   # liveness key, its id, and what the host answered with.
@@ -365,6 +374,10 @@ defmodule StatifierPersistence.Driver do
   # aggregation policy. `nil` is the ordinary single-child subchart, which
   # records none of the three and answers its parent's door directly.
   @typep fan_out :: {non_neg_integer(), pos_integer(), Linkage.policy()} | nil
+
+  # A resolved child chart, and where its create reads the parent's host
+  # metadata from.
+  @typep child :: %{machine: Machine.t(), parent_metadata: parent_metadata()}
 
   @doc """
   Builds a driver over `store` and `machine`.
@@ -443,15 +456,41 @@ defmodule StatifierPersistence.Driver do
     propagates (the 2026-09-08 amendment's clauses 3 to 5, which also say
     why this is not ADR-0009's telemetry). Defaults to `nil`, "this driver
     reports no steps".
+  - `inherited_metadata_keys:` - the host metadata keys a durable
+    subchart child copies from its parent at its create (ADR-0008's
+    2026-11-23 Amendment): a list of string keys, defaulting to `[]`,
+    "this driver copies no key". At every child's create - a single
+    child on any pass, and each child of a fan-out started through
+    `start_child_at/6` - the child is given, as its `metadata:`, each
+    named key its parent's host metadata holds, with the parent's value;
+    a named key the parent does not hold is not written. The parent's
+    map is its stored record, or, for a child started during the
+    parent's own create, the `metadata:` that create was given. A child
+    is driven by this same driver, so a grandchild copies the same keys
+    from the child. A child adopted rather than created is not written
+    to. With `[]` no copy is made and no read is added: a child is
+    created exactly as it is without this option. A value that is not a
+    list of strings, or a list naming
+    `StatifierPersistence.Execution.Linkage.reserved_key/0`, raises
+    `ArgumentError`. The keys are the host's: ADR-0006 decision 2's rule
+    (identities only, never personal data) binds a copied key exactly as
+    it binds the original.
   - `max_turns:` - the answer-fed steps one drive will take before
     refusing to take another. Defaults to 1000.
 
-  Every one of these except `dispatch:` may be overridden per call by
-  passing the same key in a `create/3` or `send_event/4` `opts` list.
+  Every one of these except `dispatch:` and `inherited_metadata_keys:`
+  may be overridden per call by passing the same key in a `create/3` or
+  `send_event/4` `opts` list. `inherited_metadata_keys:` is the driver's
+  alone, because a child is also created inside drives a host does not
+  start through those two calls: `create/3`, `send_event/4`,
+  `done_invocation/5` and `failed_invocation/5` raise `ArgumentError` on
+  an `opts` list that carries it, before any read or write.
   """
   @spec new(store :: Storage.t(), machine :: Machine.t(), opts :: keyword()) :: t()
   def new(%Storage{} = store, %Machine{} = machine, opts) do
     %__MODULE__{
+      inherited_metadata_keys:
+        inherited_metadata_keys!(Keyword.get(opts, :inherited_metadata_keys, [])),
       store: store,
       machine: machine,
       dispatch: Keyword.fetch!(opts, :dispatch),
@@ -467,6 +506,49 @@ defmodule StatifierPersistence.Driver do
     }
   end
 
+  # The option's shape is the one thing `new/3` validates, and a malformed
+  # list is a caller bug, so this raises, the posture
+  # `StatifierPersistence.Executions.create/4` takes toward a `metadata:`
+  # that carries the reserved key: the package's linkage is never a host's
+  # key, so it can be neither supplied nor inherited.
+  @spec inherited_metadata_keys!(term()) :: [String.t()]
+  defp inherited_metadata_keys!(keys) when is_list(keys) do
+    cond do
+      not Enum.all?(keys, &is_binary/1) ->
+        raise ArgumentError,
+              "inherited_metadata_keys: must be a list of string keys, got: #{inspect(keys)}"
+
+      Linkage.reserved_key() in keys ->
+        raise ArgumentError,
+              "the #{inspect(Linkage.reserved_key())} metadata key is reserved by " <>
+                "statifier_persistence for durable subchart linkage (ADR-0008 " <>
+                "decision 2) and cannot be inherited"
+
+      true ->
+        keys
+    end
+  end
+
+  defp inherited_metadata_keys!(other) do
+    raise ArgumentError,
+          "inherited_metadata_keys: must be a list of string keys, got: #{inspect(other)}"
+  end
+
+  # The option is the driver's alone (`new/3`), and the call's `opts` are
+  # passed on to `StatifierPersistence.Executions` with every key this
+  # module does not take for itself (`execution_opts/4`), so a per-call
+  # list would not otherwise be refused anywhere.
+  @spec refuse_per_call_inheritance!(keyword()) :: :ok
+  defp refuse_per_call_inheritance!(opts) do
+    if Keyword.has_key?(opts, :inherited_metadata_keys) do
+      raise ArgumentError,
+            "inherited_metadata_keys: is a driver option (Driver.new/3) and cannot be " <>
+              "passed per call"
+    end
+
+    :ok
+  end
+
   @doc """
   Creates the execution under `execution_id` and drives it to quiescence.
 
@@ -479,13 +561,25 @@ defmodule StatifierPersistence.Driver do
   @spec create(driver :: t(), execution_id :: Executions.execution_id(), opts :: keyword()) ::
           result()
   def create(%__MODULE__{} = driver, execution_id, opts \\ []) do
+    :ok = refuse_per_call_inheritance!(opts)
+
     with :ok <- check_function_providers(driver, opts) do
       ref = make_ref()
       opts = driver |> create_opts(opts) |> Keyword.put_new(:entry, :create)
 
+      # A child started from this execution's initial configuration is
+      # created before this execution's record is inserted, so it copies
+      # from the `metadata:` this create was given, the map the insert
+      # stores (ADR-0008's 2026-11-23 Amendment, point 2).
+      parent_metadata = {:metadata, Keyword.get(opts, :metadata, %{})}
+
       result =
         driver.store
-        |> Executions.create(execution_id, driver.machine, execution_opts(driver, opts, ref))
+        |> Executions.create(
+          execution_id,
+          driver.machine,
+          execution_opts(driver, opts, ref, parent_metadata)
+        )
         |> fire_after_step(driver, execution_id, opts, ref)
 
       result = advance(driver, execution_id, opts, result, drain(ref, []), 0)
@@ -575,6 +669,8 @@ defmodule StatifierPersistence.Driver do
           opts :: keyword()
         ) :: result()
   def send_event(%__MODULE__{} = driver, execution_id, %Event{} = event, opts \\ []) do
+    :ok = refuse_per_call_inheritance!(opts)
+
     with :ok <- check_function_providers(driver, opts) do
       ref = make_ref()
       opts = Keyword.put_new(opts, :entry, :step)
@@ -620,6 +716,7 @@ defmodule StatifierPersistence.Driver do
         opts \\ []
       )
       when is_binary(invoke_id) do
+    :ok = refuse_per_call_inheritance!(opts)
     reenter(driver, execution_id, opts, invoke_id, {:done, donedata})
   end
 
@@ -651,6 +748,7 @@ defmodule StatifierPersistence.Driver do
         opts \\ []
       )
       when is_binary(invoke_id) and is_list(failure) do
+    :ok = refuse_per_call_inheritance!(opts)
     reenter(driver, execution_id, opts, invoke_id, {:failed, failure})
   end
 
@@ -921,8 +1019,8 @@ defmodule StatifierPersistence.Driver do
     policy = Keyword.get(opts, :policy, :all)
 
     with :ok <- check_start_providers(driver),
-         {:ok, context} <- start_context(driver, parent_execution_id, resolved) do
-      result = settleable(driver, context, resolved, {index, count, policy})
+         {:ok, context, parent_metadata} <- start_context(driver, parent_execution_id, resolved) do
+      result = settleable(driver, context, resolved, {index, count, policy}, parent_metadata)
       report_refusal(result, context)
     end
   end
@@ -947,9 +1045,11 @@ defmodule StatifierPersistence.Driver do
   # The parent's own record supplies the `content_hash` a
   # `t:dispatch_context/0` carries, and reading it doubles as the check
   # that the parent exists at all: creating a child of an execution that is not
-  # there would leave a linked orphan nothing ever settles.
+  # there would leave a linked orphan nothing ever settles. The same record
+  # is the map a child copies its inherited keys from (ADR-0008's
+  # 2026-11-23 Amendment, point 2), so no second read is made for them.
   @spec start_context(t(), Executions.execution_id(), Invoke.t()) ::
-          {:ok, dispatch_context()} | {:refused, term()}
+          {:ok, dispatch_context(), parent_metadata()} | {:refused, term()}
   defp start_context(driver, parent_execution_id, %Invoke{} = resolved) do
     case Storage.fetch_execution(driver.store, parent_execution_id) do
       {:ok, parent_record} ->
@@ -959,20 +1059,21 @@ defmodule StatifierPersistence.Driver do
            content_hash: parent_record.content_hash,
            invoke_id: resolved.invoke_id,
            invoke: resolved
-         }}
+         }, {:metadata, parent_record.metadata}}
 
       {:error, reason} ->
         {:refused, reason}
     end
   end
 
-  # The fan-out counterpart of `start_child/3`'s refusal at open, with the
+  # The fan-out counterpart of `start_child/4`'s refusal at open, with the
   # two settlement capabilities added to the enumeration one. Kept as a
   # single expression so every arm still funnels through one
   # `report_refusal/2` return, which is what keeps the refusal event to
   # one emission site.
-  @spec settleable(t(), dispatch_context(), Invoke.t(), fan_out()) :: :ok | {:refused, term()}
-  defp settleable(driver, context, resolved, fan_out) do
+  @spec settleable(t(), dispatch_context(), Invoke.t(), fan_out(), parent_metadata()) ::
+          :ok | {:refused, term()}
+  defp settleable(driver, context, resolved, fan_out, parent_metadata) do
     cond do
       not Storage.child_listing_supported?(driver.store) ->
         {:refused, :child_listing_unsupported}
@@ -984,7 +1085,7 @@ defmodule StatifierPersistence.Driver do
         {:refused, :execution_states_unsupported}
 
       true ->
-        resolve_child(driver, resolved, context, fan_out)
+        resolve_child(driver, resolved, context, fan_out, parent_metadata)
     end
   end
 
@@ -1857,7 +1958,12 @@ defmodule StatifierPersistence.Driver do
           result()
   defp step(driver, execution_id, opts, event, ref) do
     driver.store
-    |> Executions.step(execution_id, driver.machine, event, execution_opts(driver, opts, ref))
+    |> Executions.step(
+      execution_id,
+      driver.machine,
+      event,
+      execution_opts(driver, opts, ref, :stored)
+    )
     |> fire_after_step(driver, execution_id, opts, ref)
   end
 
@@ -1870,7 +1976,7 @@ defmodule StatifierPersistence.Driver do
   #
   # The effects come back through the mailbox rather than through the
   # entry point's return value, which the amendment's clause 1 rules out
-  # widening: `execution_opts/3` hands `StatifierPersistence.Executions` a
+  # widening: `execution_opts/4` hands `StatifierPersistence.Executions` a
   # `step_reporter:` that sends the step's whole effect list here, tagged
   # with this drive's own reference, exactly as `buffer/4` sends a
   # dispatched invocation's answer. That is what makes the callback fire
@@ -1879,7 +1985,7 @@ defmodule StatifierPersistence.Driver do
   #
   # A drive that took no step - a discard, an error, a create the adapter
   # refused - has no message to read and fires nothing. `nil` reads no
-  # mailbox at all and adds no message to it: `execution_opts/3` writes no
+  # mailbox at all and adds no message to it: `execution_opts/4` writes no
   # `step_reporter:` in that case, so a driver without an `after_step:`
   # takes exactly the steps and makes exactly the calls it took before
   # this option existed.
@@ -1930,14 +2036,18 @@ defmodule StatifierPersistence.Driver do
   # the driver carries one, so an unset driver falls through to
   # `StatifierPersistence.Executions`'s own default rather than overriding it
   # with `nil`.
-  @spec execution_opts(t(), keyword(), reference()) :: keyword()
-  defp execution_opts(driver, opts, ref) do
+  #
+  # `parent_metadata` is where a child this entry point starts reads its
+  # inherited keys from: the create's own `metadata:`, or `:stored` on a
+  # step, whose execution's record already exists.
+  @spec execution_opts(t(), keyword(), reference(), parent_metadata()) :: keyword()
+  defp execution_opts(driver, opts, ref, parent_metadata) do
     after_step = after_step(driver, opts)
 
     opts =
       opts
       |> Keyword.delete(:after_step)
-      |> Keyword.put(:executor, executor(driver, ref))
+      |> Keyword.put(:executor, executor(driver, ref, parent_metadata))
       |> Keyword.put_new(:invoke_types, driver.invoke_types)
       |> Keyword.put_new(:send_types, driver.send_types)
       |> Keyword.put_new(:function_providers, driver.function_providers)
@@ -1971,13 +2081,13 @@ defmodule StatifierPersistence.Driver do
   # executor sees every effect first and its refusal short-circuits the
   # dispatch, so an effect the host could not perform never becomes a call
   # the host then has to un-make.
-  @spec executor(t(), reference()) :: Executor.t()
-  defp executor(driver, ref) do
+  @spec executor(t(), reference(), parent_metadata()) :: Executor.t()
+  defp executor(driver, ref, parent_metadata) do
     reader = self()
 
     fn effect, context ->
       with :ok <- observe(driver.effects, effect, context) do
-        perform(driver, effect, context, reader, ref)
+        perform(driver, effect, context, {reader, ref}, parent_metadata)
       end
     end
   end
@@ -1993,9 +2103,15 @@ defmodule StatifierPersistence.Driver do
   # A message tagged with a reference minted for this one drive is an
   # ordered buffer that needs no second process and cannot outlive the
   # drive that filled it, or be read by another drive in this process.
-  @spec perform(t(), Statifier.Effect.t(), Executor.context(), pid(), reference()) ::
+  @spec perform(
+          t(),
+          Statifier.Effect.t(),
+          Executor.context(),
+          {pid(), reference()},
+          parent_metadata()
+        ) ::
           :ok | {:error, term()}
-  defp perform(driver, {:invoke, %Invoke{} = invoke}, context, reader, ref) do
+  defp perform(driver, {:invoke, %Invoke{} = invoke}, context, {reader, ref}, parent_metadata) do
     # The whole effect rides along beside its id: `type` and `params` are
     # the two fields an ordinary host acts on, and every other one - `src`
     # above all - has no other way to reach a dispatch fun.
@@ -2028,7 +2144,7 @@ defmodule StatifierPersistence.Driver do
       # buffered, the parent reaches quiescence, and the invocation rides
       # the persisted position out to whatever answers it.
       {:start_child, %Invoke{} = resolved, {:invoke, %Invoke{}}} ->
-        case start_child(driver, resolved, context) do
+        case start_child(driver, resolved, context, parent_metadata) do
           :ok ->
             :ok
 
@@ -2060,7 +2176,7 @@ defmodule StatifierPersistence.Driver do
   # own children are untouched.
   #
   # Guarded by `child_listing_supported?/1` first, the same posture as
-  # `start_child/3`'s own refusal at open: an adapter that cannot host a
+  # `start_child/4`'s own refusal at open: an adapter that cannot host a
   # durable subchart at all could never have a linked child to cascade
   # into, and every other invoke type fires this same effect on exit, so a
   # host that never starts one must see no behavior change - not even the
@@ -2080,8 +2196,8 @@ defmodule StatifierPersistence.Driver do
          driver,
          {:cancel_invoke, %CancelInvoke{invoke_id: invoke_id} = cancel},
          context,
-         _reader,
-         _ref
+         _buffer,
+         _parent_metadata
        ) do
     if Storage.child_listing_supported?(driver.store) do
       first = Linkage.child_execution_id(context.execution_id, invoke_id, 0)
@@ -2100,7 +2216,7 @@ defmodule StatifierPersistence.Driver do
     end
   end
 
-  defp perform(_driver, _effect, _context, _reader, _ref), do: :ok
+  defp perform(_driver, _effect, _context, _buffer, _parent_metadata), do: :ok
 
   # Whether the cancel reaches `child_execution_id`. Every child it always
   # reached still answers `true`: the first pass's, a fan-out's, anything
@@ -2135,12 +2251,12 @@ defmodule StatifierPersistence.Driver do
   # `create/3` or the adoption read answers with - the last two being
   # decision 4's one durable-only reason, a child execution that could not be
   # created. Counting the arms is not the invariant; the single return is.
-  @spec start_child(t(), Invoke.t(), dispatch_context()) ::
+  @spec start_child(t(), Invoke.t(), dispatch_context(), parent_metadata()) ::
           :ok | {:answered, {:done, term()} | {:failed, keyword()}} | {:refused, term()}
-  defp start_child(driver, %Invoke{} = resolved, context) do
+  defp start_child(driver, %Invoke{} = resolved, context, parent_metadata) do
     result =
       if Storage.child_listing_supported?(driver.store) do
-        resolve_child(driver, resolved, context, nil)
+        resolve_child(driver, resolved, context, nil, parent_metadata)
       else
         {:refused, :child_listing_unsupported}
       end
@@ -2164,27 +2280,31 @@ defmodule StatifierPersistence.Driver do
   # `invoke.content` is SCXML markup, and `Source.resolve/2` compiles it
   # (`Statifier.Invoke.Source`) - the durable path resolves a child exactly
   # as `Statifier.Session` does, rather than compiling it itself.
-  @spec resolve_child(t(), Invoke.t(), dispatch_context(), fan_out()) ::
+  @spec resolve_child(t(), Invoke.t(), dispatch_context(), fan_out(), parent_metadata()) ::
           :ok | {:answered, {:done, term()} | {:failed, keyword()}} | {:refused, term()}
-  defp resolve_child(driver, resolved, context, fan_out) do
+  defp resolve_child(driver, resolved, context, fan_out, parent_metadata) do
     case Source.resolve(resolved, []) do
-      {:ok, child_machine} -> identify_child(driver, resolved, context, child_machine, fan_out)
-      {:error, reason} -> {:refused, reason}
+      {:ok, child_machine} ->
+        child = %{machine: child_machine, parent_metadata: parent_metadata}
+        identify_child(driver, resolved, context, child, fan_out)
+
+      {:error, reason} ->
+        {:refused, reason}
     end
   end
 
   # The pin is mandatory (ADR-0008 decision 2): a chart with no identity
   # cannot be guarded on reload, so a child that resolves to one is refused
   # rather than started unpinned.
-  @spec identify_child(t(), Invoke.t(), dispatch_context(), Machine.t(), fan_out()) ::
+  @spec identify_child(t(), Invoke.t(), dispatch_context(), child(), fan_out()) ::
           :ok | {:answered, {:done, term()} | {:failed, keyword()}} | {:refused, term()}
-  defp identify_child(driver, resolved, context, child_machine, fan_out) do
-    case Machine.identity(child_machine) do
+  defp identify_child(driver, resolved, context, child, fan_out) do
+    case Machine.identity(child.machine) do
       nil ->
         {:refused, :unidentified_chart}
 
       %Identity{content_hash: content_hash} ->
-        create_child(driver, resolved, context, child_machine, content_hash, fan_out)
+        create_child(driver, resolved, context, child, content_hash, fan_out)
     end
   end
 
@@ -2192,7 +2312,7 @@ defmodule StatifierPersistence.Driver do
   # invocation's `invoke_id`, index `0` (ADR-0008 decision 7 - fan-out is
   # not built, but the linkage does not assume one child per invocation),
   # and the child's own `content_hash`. The child is driven by
-  # `%{driver | machine: child_machine}` - the same store, the same
+  # `%{driver | machine: child.machine}` - the same store, the same
   # serialization strategy, the same `effects` executor, the same
   # `dispatch` fun (which is what makes a grandchild work), a different
   # machine - through this module's own `create/3`, so a child whose own
@@ -2221,9 +2341,9 @@ defmodule StatifierPersistence.Driver do
   # nothing else creates this parent's single child. A fan-out child,
   # created outside the parent's step, keeps the create-then-adopt order
   # and the one adoption rule it has always had.
-  @spec create_child(t(), Invoke.t(), dispatch_context(), Machine.t(), String.t(), fan_out()) ::
+  @spec create_child(t(), Invoke.t(), dispatch_context(), child(), String.t(), fan_out()) ::
           :ok | {:answered, {:done, term()} | {:failed, keyword()}} | {:refused, term()}
-  defp create_child(driver, resolved, context, child_machine, content_hash, nil) do
+  defp create_child(driver, resolved, context, child, content_hash, nil) do
     {child_index, linkage} = child_linkage(context, content_hash, nil)
 
     child_execution_id =
@@ -2231,12 +2351,12 @@ defmodule StatifierPersistence.Driver do
 
     case existing(driver.store, child_execution_id) do
       :absent ->
-        create_or_adopt(driver, resolved, child_machine, child_execution_id, linkage)
+        create_or_adopt(driver, resolved, child, child_execution_id, linkage)
 
       {:ok, execution_record} ->
         case first_child(execution_record, linkage) do
           :adopt -> report_started(child_execution_id, linkage, nil)
-          :earlier_pass -> later_pass(driver, resolved, context, child_machine, linkage)
+          :earlier_pass -> later_pass(driver, resolved, context, child, linkage)
           {:refused, _reason} = refused -> refused
         end
 
@@ -2245,21 +2365,21 @@ defmodule StatifierPersistence.Driver do
     end
   end
 
-  defp create_child(driver, resolved, context, child_machine, content_hash, fan_out) do
+  defp create_child(driver, resolved, context, child, content_hash, fan_out) do
     {child_index, linkage} = child_linkage(context, content_hash, fan_out)
 
     child_execution_id =
       Linkage.child_execution_id(context.execution_id, context.invoke_id, child_index)
 
-    create_or_adopt(driver, resolved, child_machine, child_execution_id, linkage)
+    create_or_adopt(driver, resolved, child, child_execution_id, linkage)
   end
 
   # A later pass's child, under the id its own invocation names. Found
   # there, it can only be this same pass's child from an interrupted drive,
   # so it is adopted under the same linkage check as any other.
-  @spec later_pass(t(), Invoke.t(), dispatch_context(), Machine.t(), Linkage.t()) ::
+  @spec later_pass(t(), Invoke.t(), dispatch_context(), child(), Linkage.t()) ::
           :ok | {:answered, {:done, term()} | {:failed, keyword()}} | {:refused, term()}
-  defp later_pass(driver, resolved, context, child_machine, linkage) do
+  defp later_pass(driver, resolved, context, child, linkage) do
     child_execution_id =
       Linkage.child_execution_id(
         context.execution_id,
@@ -2269,7 +2389,7 @@ defmodule StatifierPersistence.Driver do
       )
 
     case existing(driver.store, child_execution_id) do
-      :absent -> create_or_adopt(driver, resolved, child_machine, child_execution_id, linkage)
+      :absent -> create_or_adopt(driver, resolved, child, child_execution_id, linkage)
       {:ok, execution_record} -> adopt_later(execution_record, linkage)
       {:refused, _reason} = refused -> refused
     end
@@ -2335,10 +2455,10 @@ defmodule StatifierPersistence.Driver do
 
   # The create, and the adoption `{:error, :execution_exists}` has always
   # led to.
-  @spec create_or_adopt(t(), Invoke.t(), Machine.t(), Executions.execution_id(), Linkage.t()) ::
+  @spec create_or_adopt(t(), Invoke.t(), child(), Executions.execution_id(), Linkage.t()) ::
           :ok | {:refused, term()}
-  defp create_or_adopt(driver, resolved, child_machine, child_execution_id, linkage) do
-    case create_linked(driver, resolved, child_machine, child_execution_id, linkage) do
+  defp create_or_adopt(driver, resolved, child, child_execution_id, linkage) do
+    case create_linked(driver, resolved, child, child_execution_id, linkage) do
       :exists -> adopt_child(driver.store, child_execution_id, linkage)
       result -> result
     end
@@ -2346,30 +2466,74 @@ defmodule StatifierPersistence.Driver do
 
   # The create itself, shared by every id a child can be created under.
   # `:exists` is the one answer the caller reads further.
-  @spec create_linked(t(), Invoke.t(), Machine.t(), Executions.execution_id(), Linkage.t()) ::
+  #
+  # The child's inherited keys are read here, at the create and nowhere
+  # else, so an adopted child is never written to (ADR-0008's 2026-11-23
+  # Amendment, point 5). A child that inherits no key is created with the
+  # very options it was created with before the option existed: no
+  # `metadata:` is passed at all.
+  @spec create_linked(t(), Invoke.t(), child(), Executions.execution_id(), Linkage.t()) ::
           :ok | :exists | {:refused, term()}
-  defp create_linked(driver, resolved, child_machine, child_execution_id, linkage) do
-    child_driver = %{driver | machine: child_machine}
-    datamodel = Invocations.seed_datamodel(resolved.params, child_machine)
+  defp create_linked(driver, resolved, child, child_execution_id, linkage) do
+    with {:ok, inherited} <-
+           inherited_metadata(driver, child.parent_metadata, linkage.parent_execution_id) do
+      child_driver = %{driver | machine: child.machine}
+      datamodel = Invocations.seed_datamodel(resolved.params, child.machine)
 
-    case create(child_driver, child_execution_id,
-           linkage: linkage,
-           initialize: [datamodel: datamodel],
-           function_providers: nil
-         ) do
-      {:ok, _execution, machine_state} ->
-        report_started(child_execution_id, linkage, child_session_id(machine_state))
+      opts =
+        inherited_opt(
+          [linkage: linkage, initialize: [datamodel: datamodel], function_providers: nil],
+          inherited
+        )
 
-      {:error, :execution_exists} ->
-        :exists
+      case create(child_driver, child_execution_id, opts) do
+        {:ok, _execution, machine_state} ->
+          report_started(child_execution_id, linkage, child_session_id(machine_state))
+
+        {:error, :execution_exists} ->
+          :exists
+
+        {:error, reason} ->
+          {:refused, reason}
+
+        {:discarded, _execution} ->
+          {:refused, :execution_exists}
+      end
+    end
+  end
+
+  # The named keys the parent's host metadata holds, with the parent's
+  # values. With no key named, nothing is read. A parent record that
+  # cannot be read refuses the child's start with the read's reason, the
+  # posture a failed create has always had.
+  @spec inherited_metadata(t(), parent_metadata(), Executions.execution_id()) ::
+          {:ok, Adapter.metadata()} | {:refused, term()}
+  defp inherited_metadata(%__MODULE__{inherited_metadata_keys: []}, _source, _parent_id),
+    do: {:ok, %{}}
+
+  defp inherited_metadata(driver, {:metadata, metadata}, _parent_id),
+    do: {:ok, take_inherited(metadata, driver.inherited_metadata_keys)}
+
+  defp inherited_metadata(driver, :stored, parent_execution_id) do
+    case Storage.fetch_execution(driver.store, parent_execution_id) do
+      {:ok, parent_record} ->
+        {:ok, take_inherited(parent_record.metadata, driver.inherited_metadata_keys)}
 
       {:error, reason} ->
         {:refused, reason}
-
-      {:discarded, _execution} ->
-        {:refused, :execution_exists}
     end
   end
+
+  # A named key the parent does not hold is not written: no `nil`, no
+  # placeholder. The reserved key can never be named (`new/3`), so the
+  # parent's own linkage is never copied.
+  @spec take_inherited(term(), [String.t()]) :: Adapter.metadata()
+  defp take_inherited(metadata, keys) when is_map(metadata), do: Map.take(metadata, keys)
+  defp take_inherited(_not_a_map, _keys), do: %{}
+
+  @spec inherited_opt(keyword(), Adapter.metadata()) :: keyword()
+  defp inherited_opt(opts, inherited) when map_size(inherited) == 0, do: opts
+  defp inherited_opt(opts, inherited), do: [{:metadata, inherited} | opts]
 
   # `nil` is an ordinary durable subchart: index `0`, no `child_count`,
   # no policy, and a stored metadata map byte-identical to the one this

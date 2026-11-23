@@ -1330,6 +1330,67 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
 
       assert {:ok, %{children: 0}} = Storage.Ecto.count_executions_by_content_hash(opts, pin)
     end
+
+    # The answer the adapter's moduledoc gives for a linkage its host stored
+    # in `metadata` before opting in: `Host` (the option off) writes the row,
+    # and `LinkedHost` (the option on) reads it over the same tables. The
+    # re-pin falls back to `metadata`; the two listings and the pin count,
+    # whose query the retirement guard shares, read the columns alone.
+    # sabotage: made column_linkage_update/3 write the columns for a row
+    # whose columns are empty -> red on the re-pinned hash; and made the
+    # columns' listing drop its conditions -> red on the empty listing.
+    # Each verified red, reverted from a copy.
+    test "a linkage held in metadata before opting in is re-pinned, not listed, counted or guarded" do
+      off = sqlite_store().opts
+      on = linked_store().opts
+      parent = "execution_loan_held"
+      pin = "sha256:loan-held-child"
+      child = Linkage.child_execution_id(parent, "renewals", 0)
+      linkage = Linkage.new(parent, "renewals", 0, pin)
+
+      :ok = Storage.Ecto.insert_execution(on, raw_record(parent))
+
+      :ok =
+        Storage.Ecto.insert_execution(
+          off,
+          raw_record(child, %{metadata: Linkage.to_metadata(linkage)})
+        )
+
+      assert {:ok, %{metadata: held}} = Storage.Ecto.fetch_execution(on, child)
+      assert {:ok, ^linkage} = Linkage.from_metadata(held)
+
+      assert {:ok, []} =
+               Storage.Ecto.list_executions_by_metadata(on, Linkage.parent_match(parent))
+
+      assert {:ok, []} =
+               Storage.Ecto.list_execution_states_by_metadata(
+                 on,
+                 Linkage.invocation_match(parent, "renewals")
+               )
+
+      :ok =
+        Storage.Ecto.save_chart(on, %{
+          content_hash: pin,
+          identity_blob: "identity-bytes",
+          chart_blob: "chart-bytes"
+        })
+
+      # The retirement guard asks the same query this count counts
+      # (`child_pins/2`), so the count is the guard's answer too.
+      assert {:ok, %{children: 0}} = Storage.Ecto.count_executions_by_content_hash(on, pin)
+
+      record = raw_record(child, %{metadata: held})
+
+      :ok =
+        Storage.Ecto.write_tree_migration(on, [
+          {:repin, %{record | content_hash: "sha256:loan-held-new"}, "sha256:loan-held-new"}
+        ])
+
+      assert {:ok, %{metadata: repinned}} = Storage.Ecto.fetch_execution(on, child)
+
+      assert {:ok, %Linkage{content_hash: "sha256:loan-held-new"}} =
+               Linkage.from_metadata(repinned)
+    end
   end
 
   # ADR-0008's 2026-11-19 Amendment, the facade and Driver half, on this
