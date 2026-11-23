@@ -44,7 +44,7 @@ async work.
 ```elixir
 def deps do
   [
-    {:statifier_persistence, "~> 0.27.0"},
+    {:statifier_persistence, "~> 0.28.0"},
     # Optional, for the Postgres adapter:
     {:ecto_sql, "~> 3.10"}
   ]
