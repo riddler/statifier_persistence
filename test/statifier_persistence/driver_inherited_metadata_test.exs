@@ -24,7 +24,7 @@ defmodule StatifierPersistence.DriverInheritedMetadataTest do
   alias Statifier.Effect.Invoke
   alias Statifier.Event
   alias Statifier.Invoke.Types, as: InvokeTypes
-  alias StatifierPersistence.{Driver, Storage}
+  alias StatifierPersistence.{Driver, Executions, Storage}
   alias StatifierPersistence.EctoHosts
   alias StatifierPersistence.Execution.Linkage
   alias StatifierPersistence.Storage.InMemory
@@ -181,6 +181,40 @@ defmodule StatifierPersistence.DriverInheritedMetadataTest do
 
         assert host_keys(store, child) == %{"branch_id" => "branch_east"}
         assert host_keys(store, grandchild) == %{"branch_id" => "branch_east"}
+      end
+
+      # The Amendment's point 6: the host reads what each execution of the
+      # tree holds with Executions.inherited_metadata/3, one record a call.
+      # sabotage: in Executions.inherited_metadata/3, answered every stored
+      # key but the reserved one in place of the named ones -> red on both
+      # stores, the root answered "patron_id". Verified red, reverted from a
+      # copy.
+      test "Executions.inherited_metadata/3 reads each execution's own copy", %{store: store} do
+        parent = "execution_loan_reader"
+
+        driver =
+          driver(store, @nesting_parent_source, nesting_dispatch(),
+            inherited_metadata_keys: ["branch_id"]
+          )
+
+        child = Linkage.child_execution_id(parent, "call", 0)
+        grandchild = Linkage.child_execution_id(child, "nested", 0)
+        keys = ["branch_id", "patron_id"]
+
+        assert {:ok, _execution, _ms} = Driver.create(driver, parent, metadata: @host_metadata)
+
+        assert {:ok, %{"branch_id" => "branch_east"} = root} =
+                 Executions.inherited_metadata(store, parent, ["branch_id"])
+
+        assert map_size(root) == 1
+        assert {:ok, @host_metadata} = Executions.inherited_metadata(store, parent, keys)
+
+        for id <- [child, grandchild] do
+          assert {:ok, %{"branch_id" => "branch_east"} = named} =
+                   Executions.inherited_metadata(store, id, keys)
+
+          assert map_size(named) == 1
+        end
       end
 
       # sabotage: in Driver's start_context/3, handed the fan-out an empty
