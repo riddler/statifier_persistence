@@ -1632,6 +1632,30 @@ defmodule StatifierPersistence.Ecto.SqliteMigrationsTest do
 
       assert {:ok, []} = Executions.active_children(store, third)
     end
+
+    # ADR-0008's 2026-11-23 Amendment, point 4: off Postgres no record
+    # holds a host key, so a driver naming one copies nothing, and the
+    # reader answers what each record holds.
+    # sabotage: in Executions.inherited_metadata/3, answered each named key
+    # the record does not hold as nil -> red, the parent answered
+    # %{"branch_id" => nil}. Verified red, reverted from a copy.
+    test "inherited_metadata/3 answers an empty map for the parent and its child" do
+      store = linked_store()
+      parent = "execution_loan_inherited"
+
+      driver =
+        linked_driver(store, @parent_source, subchart_dispatch(),
+          inherited_metadata_keys: ["branch_id"]
+        )
+
+      assert {:ok, _execution, _machine_state} = Driver.create(driver, parent)
+
+      child = Linkage.child_execution_id(parent, "call", 0)
+
+      for id <- [parent, child] do
+        assert {:ok, %{}} == Executions.inherited_metadata(store, id, ["branch_id"])
+      end
+    end
   end
 
   defp event(name), do: %Event{name: name, type: :external}

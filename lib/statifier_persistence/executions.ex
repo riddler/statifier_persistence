@@ -117,9 +117,9 @@ defmodule StatifierPersistence.Executions do
   `unpark/3`, `migrate/4`, `migrate_tree/4` and `inputs/2` - answers
   `{:error, {:reentrant_step, execution_id}}` for a marked id before it
   reads or writes anything. `migrate_tree/4` checks its root and every id
-  its `plans` name. `active_children/2` takes an execution id and is not
-  among them: it writes nothing, and answers what storage holds, as
-  `StatifierPersistence.Storage.fetch_execution/2` does.
+  its `plans` name. `active_children/2` and `inherited_metadata/3` take an
+  execution id and are not among them: they write nothing, and answer what
+  storage holds, as `StatifierPersistence.Storage.fetch_execution/2` does.
   `migrate_batch/3` takes no execution id, but its dry run answers
   `{:would_refuse, {:reentrant_step, execution_id}}` for a marked id
   among the executions it lists, before it reads that one, as
@@ -2660,6 +2660,65 @@ defmodule StatifierPersistence.Executions do
        )
        |> Enum.sort_by(&elem(&1, 0))
        |> Enum.map(fn {_key, record} -> Execution.from_record(record) end)}
+    end
+  end
+
+  @doc """
+  Reads the host metadata keys named in `keys` from `execution_id`'s stored
+  record (ADR-0008's 2026-11-23 Amendment, point 6).
+
+  Answers `{:ok, map}` holding each named key the stored record's
+  metadata holds, with its value; a named key the record does not hold
+  is left out, so an execution holding none of them answers `{:ok, %{}}`.
+  A record that cannot be read answers the read's error, as
+  `StatifierPersistence.Storage.fetch_execution/2` does:
+  `{:error, :execution_not_found}` for an execution that does not exist.
+
+  This is how a host reads the keys a durable subchart child copied from
+  its parent at its create (`StatifierPersistence.Driver.new/3`'s
+  `inherited_metadata_keys:`). It reads the one record and nothing else:
+  it does not walk the linkage, so a child created without the option, or
+  before it existed, answers without the keys, and a host falls back by
+  walking `StatifierPersistence.Driver.parent_link/2` to the root and
+  calling this with the root's id. For a root it answers the root's own
+  keys. On a store that keeps no host metadata (the Ecto adapter off
+  Postgres) no record holds a host key, and the answer is `{:ok, %{}}`.
+
+  Naming `StatifierPersistence.Execution.Linkage.reserved_key/0` raises
+  `ArgumentError`, before anything is read: the package's linkage is never
+  a host's key.
+
+  Read-only, and outside every execution's exclusion: it takes no lock and
+  reports what storage held when it read, as `active_children/2` does.
+
+      iex> {:ok, store} = StatifierPersistence.Storage.new(StatifierPersistence.Storage.InMemory, [])
+      iex> {:ok, machine} = Statifier.compile(~s(<scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0"><state id="on_loan"/></scxml>))
+      iex> {:ok, _execution, _machine_state} =
+      ...>   StatifierPersistence.Executions.create(store, "loan_copy_42", machine,
+      ...>     executor: fn _effect, _context -> :ok end,
+      ...>     metadata: %{"branch_id" => "branch_east", "patron_id" => "patron_7"}
+      ...>   )
+      iex> StatifierPersistence.Executions.inherited_metadata(store, "loan_copy_42", ["branch_id", "shelf_id"])
+      {:ok, %{"branch_id" => "branch_east"}}
+      iex> StatifierPersistence.Executions.inherited_metadata(store, "loan_copy_43", ["branch_id"])
+      {:error, :execution_not_found}
+  """
+  @spec inherited_metadata(
+          store :: Storage.t(),
+          execution_id :: execution_id(),
+          keys :: [String.t()]
+        ) :: {:ok, Adapter.metadata()} | {:error, error()}
+  def inherited_metadata(%Storage{} = store, execution_id, keys)
+      when is_binary(execution_id) and is_list(keys) do
+    if Linkage.reserved_key() in keys do
+      raise ArgumentError,
+            "the #{inspect(Linkage.reserved_key())} metadata key is reserved by " <>
+              "statifier_persistence for durable subchart linkage (ADR-0008 " <>
+              "decision 2) and is not a host's key to read"
+    end
+
+    with {:ok, record} <- Storage.fetch_execution(store, execution_id) do
+      {:ok, Map.take(record.metadata, keys)}
     end
   end
 
