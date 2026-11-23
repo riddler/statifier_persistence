@@ -1955,7 +1955,7 @@ What was re-read before the flip:
 
 ## Amendment (2026-11-23, sp-ezfr): a durable child carries the host metadata keys the host names as inherited
 
-Status of this amendment: proposed (2026-11-23, sp-ezfr). The record above
+Status of this amendment: accepted (2026-11-23, sp-ezfr). The record above
 stays accepted; this amendment is proposed until the code that implements
 it ships in a published version and every claim below verifies against
 `main` at that version. Every cite below to code that exists was read on
@@ -2132,3 +2132,99 @@ leaves it to a later record); and `function_providers:`, which a child
 does not inherit (the `Driver.new/3` docstring), is unchanged.
 
 No other decision in this record moves.
+
+## Note (2026-11-23): the sp-ezfr Amendment is accepted
+
+The 2026-11-23 sp-ezfr Amendment is accepted on 2026-11-23, under the
+operator's standing grant to flip a record whose code has shipped. The
+code that implements it landed in PR 306 (`14f7ea1`, the copy at a
+child's create) and PR 307 (`745c991`, the reader), and shipped in
+statifier_persistence 0.28.0 (tag `v0.28.0`, `3b12ffd`, published on Hex
+2026-11-23 by the release workflow). That Amendment's own status line
+flips in place from proposed to accepted; its sentence that it "is
+proposed until the code that implements it ships in a published version
+and every claim below verifies against `main` at that version" is met by
+this Note and stays as written, and the record above stays accepted. Its
+sentence that "the option and the function this amendment decides do not
+exist yet and are cited by name alone" was true at `b0defbb` and no longer
+is: both exist at the tag, `inherited_metadata_keys:` on `Driver.new/3`
+and `Executions.inherited_metadata/3`. The sentence stays as written.
+Every cite below was read at `3b12ffd`, the tag, which is also `main`: the
+two commits after PR 307 (`fd9f867`, the upgrading page, and `3b12ffd`,
+the release prep) touch no file under `lib/` or `test/`.
+
+What was re-read before the flip:
+
+- **The opening.** At `b0defbb`, the cite the Amendment names for code
+  that predates it, `create_linked/5` passed `Driver.create/3` the
+  child's `linkage:` and no `metadata:`. At the tag it still does when no
+  key is copied, and passes a `metadata:` holding the copied keys when
+  one is (`inherited_opt/2`); the opening describes the code before this
+  change, as the Amendment's status paragraph says. Every durable child,
+  a single child on any pass and each child of a fan-out, is still
+  created through `create_or_adopt/5` and so through `create_linked/5`.
+- **Point 1, the option.** `Driver.new/3` reads `inherited_metadata_keys:`
+  through `inherited_metadata_keys!/1`, defaulting to `[]`, which raises
+  `ArgumentError` on a value that is not a list of strings and on a list
+  naming `Linkage.reserved_key/0`. Its docstring now names the option
+  beside `dispatch:` as the two not overridden per call.
+  `refuse_per_call_inheritance!/1` raises `ArgumentError` at the head of
+  `Driver.create/3`, `Driver.send_event/4`, `Driver.done_invocation/5` and
+  `Driver.failed_invocation/5`, before any read or write. The Amendment's
+  `execution_opts/3` cite names that function at `b0defbb`; at the tag it
+  is `execution_opts/4`, whose new argument says where a child's create
+  reads the parent's map, and it still passes the call's other keys on to
+  `StatifierPersistence.Executions`. `create_linked/5` drives the child
+  with the same driver and the child's machine, so the list reaches a
+  grandchild. `metadata/1` in `lib/statifier_persistence/executions.ex`
+  still raises on a host `metadata:` carrying the reserved key.
+- **Point 2, the copy.** The driver's private `inherited_metadata/3`
+  answers an empty map with no read when no key is named, and otherwise
+  takes the named keys with `take_inherited/2` (`Map.take/2`), so a key
+  the parent does not hold is not written. `Driver.create/3` hands its
+  children the `metadata:` it was given; the driver's step, which every
+  door that re-enters a parent reaches, hands them `:stored`, read with
+  `Storage.fetch_execution/2`; `Driver.start_child_at/6` hands them the
+  record `start_context/3` read. A read that fails refuses the child with
+  its reason. `Executions.create/4` merges `metadata:` and `linkage:` in
+  `metadata/1`, `persist_tail/8` executes the effects before it writes,
+  and `Storage.update_execution/5`'s documentation calls the map
+  write-once.
+- **Point 3.** Nothing in the code decides it; the `Driver.new/3`
+  docstring restates ADR-0006 decision 2's rule for a copied key.
+- **Point 4.** `supports_metadata?/1` in
+  `lib/statifier_persistence/storage/ecto.ex` answers true on Postgres
+  only, `check_metadata_supported/2` in
+  `lib/statifier_persistence/storage.ex` refuses a non-empty map with
+  `{:error, :metadata_unsupported}` on a store without `metadata`, and
+  `supports_metadata?/1` in `lib/statifier_persistence/storage/in_memory.ex`
+  answers true. The one change to the Ecto adapter between `b0defbb` and
+  the tag is a paragraph of its moduledoc.
+- **Point 5.** `first_child/2`, `adopt_later/2` and `adopt_child/3` read
+  and adopt, and write nothing; the copy is in `create_linked/5` alone.
+  Between `b0defbb` and the tag nothing under `priv/` changes, and
+  neither `lib/statifier_persistence/storage.ex` nor
+  `lib/statifier_persistence/storage/adapter.ex` changes.
+- **Point 6.** `Executions.inherited_metadata/3` raises `ArgumentError`
+  on the reserved key before it reads, reads the one record with
+  `Storage.fetch_execution/2`, answers `Map.take/2` of its metadata, and
+  passes a read's error through; its documentation says it takes no lock,
+  and the `StatifierPersistence.Executions` moduledoc names it beside
+  `active_children/2` as writing nothing and answering what storage
+  holds. `lib/statifier_persistence/execution.ex` does not
+  change, and `Executions.active_children/2` still answers
+  `StatifierPersistence.Execution` structs.
+- **What a host sees.** `Storage.list_executions_by_metadata/2` lists by
+  containment and its documentation names no order.
+  `Executions.cascade_cancel/3` documents its match as a linkage
+  containment map, `Executions.cascade_cancel_where/4` is `@doc false`,
+  and the driver passes each only `Linkage.invocation_match/2`.
+  `[:statifier_persistence, :child, :cascade_cancelled]` carries
+  `retained`, the executions a sweep found already terminal.
+  `Storage.fetch_execution/2` reports through
+  `[:statifier_persistence, :adapter, :call]` (`adapter_call/4`);
+  `lib/statifier_persistence/telemetry.ex` does not change, and the one
+  change to `docs/telemetry.md` renames `Driver.start_child/3` to
+  `Driver.start_child/4`. The release prep promoted the change into the
+  0.28.0 section of `CHANGELOG.md`, under Added, and `docs/upgrading.md`
+  carries "0.27 to 0.28".
