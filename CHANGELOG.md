@@ -6,9 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Entries for unreleased work are not written here directly. Each issue drops a
-fragment in [`changelog.d/`](https://github.com/riddler/statifier_persistence/blob/v0.27.0/changelog.d/README.md); the fragments are assembled
+fragment in [`changelog.d/`](https://github.com/riddler/statifier_persistence/blob/v0.28.0/changelog.d/README.md); the fragments are assembled
 into a version section at release. See that README for the format and for when a
 change warrants an entry at all.
+
+## [0.28.0] 2026-11-23
+
+Feature release: a durable subchart child can carry host metadata keys copied from its parent, named once on the driver with `inherited_metadata_keys:`, and `StatifierPersistence.Executions.inherited_metadata/3` reads them. A host that names no key sees every answer 0.27.0 gives.
+
+Upgrading: no migration and no stored value moves; a host that names keys reads a child created before the option by walking to the root. See "0.27 to 0.28" in the upgrading page.
+
+### Added
+
+- `StatifierPersistence.Driver.new/3` takes `inherited_metadata_keys:`, a list of the host metadata keys a durable subchart child copies from its parent when it is created, defaulting to `[]`. A child, a single child on any pass or each child of a fan-out, is given each named key its parent's metadata holds, with the parent's value, beside its linkage; a key the parent does not hold is not written, an adopted child is not written to, and a grandchild copies the same keys from its parent. A list that is not strings, or that names the reserved linkage key, raises `ArgumentError`, and so does the option passed per call to `create/3`, `send_event/4`, `done_invocation/5` or `failed_invocation/5`. With keys named, a child created on a step of its parent adds one `:fetch_execution` of the parent to `[:statifier_persistence, :adapter, :call]`. Without the option a child is created exactly as before.
+- `StatifierPersistence.Executions.inherited_metadata/3` answers `{:ok, map}` holding each named host metadata key an execution's stored record holds, with its value, so a host reads the keys a durable subchart child copied under `inherited_metadata_keys:` without walking the linkage; a record that cannot be read answers the read's error, and naming the reserved linkage key raises `ArgumentError`.
 
 ## [0.27.0] 2026-11-22
 
