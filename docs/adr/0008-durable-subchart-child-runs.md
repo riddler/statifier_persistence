@@ -2000,6 +2000,16 @@ the posture `Executions.create/4` already takes toward a host's
 `lib/statifier_persistence/executions.ex` raises): the package's linkage
 is never a host's key, so it can be neither supplied nor inherited.
 
+The option is the driver's alone, and a per-call
+`inherited_metadata_keys:` is refused the same way: `Driver.create/3`,
+`Driver.send_event/4`, `Driver.done_invocation/5` and
+`Driver.failed_invocation/5` raise `ArgumentError` on an `opts` list that
+carries the key, before any read or write. The refusal is needed because
+the key would not otherwise be refused: today the driver passes the
+call's `opts` on to `StatifierPersistence.Executions` with the keys it
+does not take for itself (`execution_opts/3` in
+`lib/statifier_persistence/driver.ex`).
+
 **2. What is copied, and from where.** At a child's create, the child is
 given, as its `metadata:`, each named key the parent's host metadata
 holds, with the parent's value, verbatim. `Executions.create/4` already
@@ -2021,7 +2031,13 @@ the parent's own create, and that create executes its effects before it
 inserts the record (`persist_tail/8` in
 `lib/statifier_persistence/executions.ex`). There the copy reads the
 `metadata:` the parent's create was given, which is the map the insert
-then stores. A fan-out child started through `Driver.start_child_at/6`
+stores when it succeeds. When the parent's insert fails, the parent has
+no record and its keys are stored nowhere. On Postgres under
+`AdapterLock` the failed insert aborts the transaction the child's insert
+ran in, so the child is not stored either (`failed_write/2` in
+`lib/statifier_persistence/executions.ex`); on a store where the two
+commit apart, the child stays, holding keys copied from a create that
+stored nothing, as it holds a linkage to a parent with no record. A fan-out child started through `Driver.start_child_at/6`
 already has the parent's record in hand, read to build its context
 (`start_context/3` in `lib/statifier_persistence/driver.ex`), and copies
 from that. A parent record that cannot be read refuses the child's start
@@ -2081,7 +2097,18 @@ the named keys beside its linkage. A listing by a copied key's value
 (`Storage.list_executions_by_metadata/2`) now matches the children
 created under the option as well as the root; a host that wants roots
 alone keeps the records whose metadata has no `Linkage.reserved_key/0`
-key, or names only keys it wants matched on the whole tree. On a step of
+key, or names only keys it wants matched on the whole tree. A cascade
+reads the same listing: `Executions.cascade_cancel/3` documents its match
+as a linkage containment map, and `Executions.cascade_cancel_where/4`
+(undocumented, the driver's own) takes the same match, so a linkage
+match, the only kind the driver passes either function, finds what it
+did. A host that passes `cascade_cancel/3` a match on copied keys now
+matches the children created under the option directly, as well as
+reaching them through their parent's walk: each child is cancelled once,
+each further visit finds it terminal and counts it as retained in
+`[:statifier_persistence, :child, :cascade_cancelled]`, and since
+`Storage.list_executions_by_metadata/2` documents no order, a child may
+be cancelled before its parent. On a step of
 the parent, a child's create adds one `:fetch_execution` adapter call on
 the parent's id, reported through
 `[:statifier_persistence, :adapter, :call]`; no event, key or value is
